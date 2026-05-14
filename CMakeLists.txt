@@ -1,0 +1,56 @@
+cmake_minimum_required(VERSION 3.18)
+project(planetary_feature_matching LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(Torch REQUIRED)
+
+enable_testing()
+
+add_library(pfm STATIC
+    modules/cli/commands.cpp
+    modules/core/tensor_utils.cpp
+    modules/infer/pipeline.cpp
+    modules/data/normalization.cpp
+    modules/data/synthetic_pair.cpp
+    modules/eval/metrics.cpp
+    modules/geometry/warp.cpp
+    modules/losses/losses.cpp
+    modules/models/backbone.cpp
+    modules/models/dense_head.cpp
+    modules/models/matcher.cpp
+    modules/models/sparse_head.cpp
+)
+
+target_include_directories(pfm PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+
+target_link_libraries(pfm PUBLIC ${TORCH_LIBRARIES})
+target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(pfm_cli src/main.cpp)
+target_link_libraries(pfm_cli PRIVATE pfm)
+
+add_executable(pfm_tests
+    tests/test_main.cpp
+    modules/cli/commands_test.cpp
+    modules/core/tensor_utils_test.cpp
+    modules/data/normalization_test.cpp
+    modules/data/synthetic_pair_test.cpp
+    modules/eval/metrics_test.cpp
+    modules/geometry/warp_test.cpp
+    modules/losses/losses_test.cpp
+    modules/models/backbone_test.cpp
+    modules/models/dense_head_test.cpp
+    modules/models/matcher_test.cpp
+    modules/models/sparse_head_test.cpp
+)
+target_include_directories(pfm_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(pfm_tests PRIVATE pfm)
+add_test(NAME pfm_tests COMMAND pfm_tests)

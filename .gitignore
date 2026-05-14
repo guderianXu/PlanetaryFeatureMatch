@@ -1,0 +1,14 @@
+build/
+.claude/
+.superpowers/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
