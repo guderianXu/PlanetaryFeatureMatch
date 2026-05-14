@@ -84,15 +84,16 @@ torch::Tensor resize_mask_for_heatmap(const torch::Tensor& valid_mask, const tor
 torch::Tensor resize_offsets_for_dense_head(const torch::Tensor& warp, const torch::Tensor& offsets) {
     using torch::indexing::Slice;
 
-    auto flow = warp.permute({0, 3, 1, 2}).to(offsets.dtype()).contiguous();
+    auto source_grid = make_xy_grid(warp.size(1), warp.size(2), warp.device()).unsqueeze(0).to(warp.dtype());
+    auto displacement = (warp - source_grid).permute({0, 3, 1, 2}).to(offsets.dtype()).contiguous();
     auto resized = torch::nn::functional::interpolate(
-        flow,
+        displacement,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{offsets.size(2), offsets.size(3)})
             .mode(torch::kBilinear)
             .align_corners(false));
-    auto x_scale = static_cast<double>(offsets.size(3)) / static_cast<double>(flow.size(3));
-    auto y_scale = static_cast<double>(offsets.size(2)) / static_cast<double>(flow.size(2));
+    auto x_scale = static_cast<double>(offsets.size(3)) / static_cast<double>(displacement.size(3));
+    auto y_scale = static_cast<double>(offsets.size(2)) / static_cast<double>(displacement.size(2));
     resized.index_put_({Slice(), Slice(0, 1), Slice(), Slice()},
                        resized.index({Slice(), Slice(0, 1), Slice(), Slice()}) * x_scale);
     resized.index_put_({Slice(), Slice(1, 2), Slice(), Slice()},
@@ -195,6 +196,14 @@ void save_checkpoint(const TrainConfig& config, TrainModules& modules) {
 }
 
 }  // namespace
+
+namespace testing {
+
+torch::Tensor resize_offsets_for_dense_head_for_test(const torch::Tensor& warp, const torch::Tensor& offsets) {
+    return resize_offsets_for_dense_head(warp, offsets);
+}
+
+}  // namespace testing
 
 TrainResult train_model(const TrainConfig& config) {
     validate_config(config);

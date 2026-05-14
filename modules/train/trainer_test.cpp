@@ -8,9 +8,16 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <torch/torch.h>
 
 #include "tests/test_harness.h"
 #include "train/trainer.h"
+
+namespace pfm::testing {
+
+torch::Tensor resize_offsets_for_dense_head_for_test(const torch::Tensor& warp, const torch::Tensor& offsets);
+
+}  // namespace pfm::testing
 
 namespace {
 
@@ -121,10 +128,26 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument() {
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_learning_rate));
 }
 
+static void trainer_resizes_dense_warp_as_local_offsets() {
+    auto xy = torch::meshgrid({torch::arange(32, torch::kFloat32), torch::arange(32, torch::kFloat32)}, "ij");
+    auto warp = torch::stack({xy[1] + 1.0F, xy[0]}, 2).unsqueeze(0);
+    auto offsets = torch::zeros({1, 2, 16, 16}, torch::kFloat32);
+
+    auto target = pfm::testing::resize_offsets_for_dense_head_for_test(warp, offsets);
+    auto expected_x = torch::full({16, 16}, 0.5F);
+    auto expected_y = torch::zeros({16, 16});
+
+    PFM_REQUIRE(target.sizes() == offsets.sizes());
+    PFM_REQUIRE(torch::allclose(target.index({0, 0}), expected_x, 1.0e-6, 1.0e-6));
+    PFM_REQUIRE(torch::allclose(target.index({0, 1}), expected_y, 1.0e-6, 1.0e-6));
+}
+
 void register_trainer_tests() {
     register_test("trainer_one_epoch_saves_loadable_checkpoint", trainer_one_epoch_saves_loadable_checkpoint);
     register_test("trainer_missing_image_dir_throws_invalid_argument",
                   trainer_missing_image_dir_throws_invalid_argument);
     register_test("trainer_invalid_numeric_parameters_throw_invalid_argument",
                   trainer_invalid_numeric_parameters_throw_invalid_argument);
+    register_test("trainer_resizes_dense_warp_as_local_offsets",
+                  trainer_resizes_dense_warp_as_local_offsets);
 }
