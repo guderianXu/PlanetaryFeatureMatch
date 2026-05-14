@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Torch REQUIRED)
+find_package(OpenCV REQUIRED)
 
 enable_testing()
 
@@ -29,7 +30,7 @@ target_include_directories(pfm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/modules
 )
 
-target_link_libraries(pfm PUBLIC ${TORCH_LIBRARIES})
+target_link_libraries(pfm PUBLIC ${TORCH_LIBRARIES} ${OpenCV_LIBS})
 target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(pfm_cli src/main.cpp)
