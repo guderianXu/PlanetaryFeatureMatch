@@ -29,6 +29,8 @@ void register_backbone_tests();
 void register_sparse_head_tests();
 void register_dense_head_tests();
 void register_matcher_tests();
+void register_feature_codec_tests();
+void register_match_codec_tests();
 void register_loss_tests();
 void register_metric_tests();
 void register_cli_tests();
@@ -44,6 +46,8 @@ int main() {
     register_sparse_head_tests();
     register_dense_head_tests();
     register_matcher_tests();
+    register_feature_codec_tests();
+    register_match_codec_tests();
     register_loss_tests();
     register_metric_tests();
     register_cli_tests();
