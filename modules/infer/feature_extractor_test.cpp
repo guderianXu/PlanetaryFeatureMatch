@@ -10,7 +10,7 @@ pfm::RawFeatureMaps makeMaps(const torch::Tensor& heatmap, const torch::Tensor& 
         heatmap,
         torch::arange(24, torch::kFloat32).reshape({1, 4, 2, 3}),
         torch::ones({1, 1, 2, 3}, torch::kFloat32),
-        torch::zeros({1, 1, 2, 3}, torch::kFloat32),
+        torch::zeros({1, 2, 2, 3}, torch::kFloat32),
         torch::ones({1, 4, 2, 3}, torch::kFloat32),
         dense_confidence};
 }
@@ -23,7 +23,10 @@ static void decode_sparse_features_gathers_values_at_top_k_points() {
     heatmap.index_put_({0, 0, 1, 2}, 0.8F);
     auto maps = makeMaps(heatmap, torch::ones({1, 1, 2, 3}, torch::kFloat32));
     maps.scale = torch::tensor({{{{1.0F, 1.5F, 2.0F}, {2.5F, 3.0F, 3.5F}}}}, torch::kFloat32);
-    maps.orientation = torch::tensor({{{{10.0F, 20.0F, 30.0F}, {40.0F, 50.0F, 60.0F}}}}, torch::kFloat32);
+    maps.orientation = torch::tensor(
+        {{{{10.0F, 20.0F, 30.0F}, {40.0F, 50.0F, 60.0F}},
+          {{11.0F, 21.0F, 31.0F}, {41.0F, 51.0F, 61.0F}}}},
+        torch::kFloat32);
     maps.affine = torch::tensor(
         {{{{1.0F, 2.0F, 3.0F}, {4.0F, 5.0F, 6.0F}},
           {{7.0F, 8.0F, 9.0F}, {10.0F, 11.0F, 12.0F}},
@@ -35,13 +38,15 @@ static void decode_sparse_features_gathers_values_at_top_k_points() {
 
     PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({2, 2}));
     PFM_REQUIRE(features.descriptors.sizes() == torch::IntArrayRef({2, 4}));
+    PFM_REQUIRE(features.orientation.sizes() == torch::IntArrayRef({2, 2}));
     PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 1.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 0.9F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.descriptors.index({0, 0}).item<float>(), 1.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.descriptors.index({0, 3}).item<float>(), 19.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scale.index({0}).item<float>(), 1.5F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.orientation.index({0}).item<float>(), 20.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.orientation.index({0, 0}).item<float>(), 20.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.orientation.index({0, 1}).item<float>(), 21.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.affine.index({0, 0, 0}).item<float>(), 2.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.affine.index({0, 0, 1}).item<float>(), 8.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.affine.index({0, 1, 0}).item<float>(), 14.0F, 1.0e-6F);
@@ -51,7 +56,8 @@ static void decode_sparse_features_gathers_values_at_top_k_points() {
     PFM_REQUIRE_CLOSE(features.descriptors.index({1, 0}).item<float>(), 5.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.descriptors.index({1, 3}).item<float>(), 23.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scale.index({1}).item<float>(), 3.5F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.orientation.index({1}).item<float>(), 60.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.orientation.index({1, 0}).item<float>(), 60.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.orientation.index({1, 1}).item<float>(), 61.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.affine.index({1, 1, 1}).item<float>(), 24.0F, 1.0e-6F);
 }
 
@@ -61,7 +67,7 @@ static void decode_dense_features_returns_exact_points_and_confidence() {
     auto maps = makeMaps(heatmap, dense_confidence);
     maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
     maps.scale = torch::ones({1, 1, 2, 2}, torch::kFloat32);
-    maps.orientation = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
     maps.affine = torch::ones({1, 4, 2, 2}, torch::kFloat32);
 
     const auto features = pfm::decode_feature_maps(maps, 1, 0.75);
@@ -89,7 +95,7 @@ static void decode_feature_maps_returns_cpu_float_contiguous_tensors() {
     auto maps = makeMaps(torch::zeros({1, 1, 2, 3}, torch::kFloat64), torch::ones({1, 1, 2, 3}, torch::kFloat64));
     maps.descriptors = torch::ones({1, 4, 2, 3}, torch::kFloat64);
     maps.scale = torch::ones({1, 1, 2, 3}, torch::kFloat64);
-    maps.orientation = torch::zeros({1, 1, 2, 3}, torch::kFloat64);
+    maps.orientation = torch::zeros({1, 2, 2, 3}, torch::kFloat64);
     maps.affine = torch::ones({1, 4, 2, 3}, torch::kFloat64);
 
     const auto features = pfm::decode_feature_maps(maps, 1, 0.5);
@@ -136,6 +142,10 @@ static void decode_feature_maps_rejects_invalid_arguments() {
 
     maps = makeMaps(torch::zeros({1, 1, 2, 3}, torch::kFloat32), torch::ones({1, 1, 2, 3}, torch::kFloat32));
     maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    PFM_REQUIRE_INVALID_ARG(pfm::decode_feature_maps(maps, 1, 0.5));
+
+    maps = makeMaps(torch::zeros({1, 1, 2, 3}, torch::kFloat32), torch::ones({1, 1, 2, 3}, torch::kFloat32));
+    maps.orientation = torch::zeros({1, 1, 2, 3}, torch::kFloat32);
     PFM_REQUIRE_INVALID_ARG(pfm::decode_feature_maps(maps, 1, 0.5));
 }
 

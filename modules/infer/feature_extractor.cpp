@@ -53,8 +53,8 @@ void validateRawMaps(const RawFeatureMaps& maps) {
     if (maps.scale.size(1) < 1) {
         throw std::invalid_argument("scale channels must be at least 1");
     }
-    if (maps.orientation.size(1) < 1) {
-        throw std::invalid_argument("orientation channels must be at least 1");
+    if (maps.orientation.size(1) != 2) {
+        throw std::invalid_argument("orientation channels must be 2");
     }
     if (maps.affine.size(1) != 4) {
         throw std::invalid_argument("affine channels must be 4");
@@ -105,7 +105,7 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
     sparse_points.reserve(static_cast<size_t>(sparse_count * 2));
     sparse_descriptors.reserve(static_cast<size_t>(sparse_count * descriptors.size(1)));
     sparse_scale.reserve(static_cast<size_t>(sparse_count));
-    sparse_orientation.reserve(static_cast<size_t>(sparse_count));
+    sparse_orientation.reserve(static_cast<size_t>(sparse_count * 2));
     sparse_affine.reserve(static_cast<size_t>(sparse_count * 4));
 
     auto index_accessor = topk_indices.accessor<int64_t, 1>();
@@ -118,7 +118,9 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
             sparse_descriptors.push_back(descriptors.index({0, channel, y, x}).item<float>());
         }
         sparse_scale.push_back(scale.index({0, 0, y, x}).item<float>());
-        sparse_orientation.push_back(orientation.index({0, 0, y, x}).item<float>());
+        for (int64_t channel = 0; channel < orientation.size(1); ++channel) {
+            sparse_orientation.push_back(orientation.index({0, channel, y, x}).item<float>());
+        }
         for (int64_t channel = 0; channel < affine.size(1); ++channel) {
             sparse_affine.push_back(affine.index({0, channel, y, x}).item<float>());
         }
@@ -152,7 +154,7 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
         topk_values.to(torch::kCPU, torch::kFloat32).contiguous(),
         torch::from_blob(sparse_descriptors.data(), {sparse_count, descriptors.size(1)}, tensor_options).clone().contiguous(),
         torch::from_blob(sparse_scale.data(), {sparse_count}, tensor_options).clone().contiguous(),
-        torch::from_blob(sparse_orientation.data(), {sparse_count}, tensor_options).clone().contiguous(),
+        torch::from_blob(sparse_orientation.data(), {sparse_count, orientation.size(1)}, tensor_options).clone().contiguous(),
         torch::from_blob(sparse_affine.data(), {sparse_count, 2, 2}, tensor_options).clone().contiguous(),
         dense_points_tensor,
         dense_confidence_tensor};
