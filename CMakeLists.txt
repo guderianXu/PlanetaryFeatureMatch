@@ -8,12 +8,33 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Torch REQUIRED)
 find_package(OpenCV REQUIRED)
 
+set(PFM_OPENCV_RUNTIME_LIBRARY_DIRS)
+get_filename_component(PFM_OPENCV_PREFIX "${OpenCV_DIR}/../../.." REALPATH)
+if(PFM_OPENCV_PREFIX MATCHES "/pkgs/[^/]+$")
+    get_filename_component(PFM_MAMBA_PKGS_DIR "${PFM_OPENCV_PREFIX}/.." REALPATH)
+    foreach(PFM_DEP_PATTERN
+            jpeg-*
+            libjpeg-turbo-*
+            libwebp-base-*
+            libpng-*
+            libtiff-*
+            jasper-*
+            openexr-*
+            imath-*
+            libcblas-*)
+        file(GLOB PFM_DEP_DIRS LIST_DIRECTORIES true "${PFM_MAMBA_PKGS_DIR}/${PFM_DEP_PATTERN}/lib")
+        list(APPEND PFM_OPENCV_RUNTIME_LIBRARY_DIRS ${PFM_DEP_DIRS})
+    endforeach()
+    list(REMOVE_DUPLICATES PFM_OPENCV_RUNTIME_LIBRARY_DIRS)
+endif()
+
 enable_testing()
 
 add_library(pfm STATIC
     modules/cli/commands.cpp
     modules/core/tensor_utils.cpp
     modules/infer/pipeline.cpp
+    modules/data/image_io.cpp
     modules/data/normalization.cpp
     modules/data/synthetic_pair.cpp
     modules/eval/metrics.cpp
@@ -31,6 +52,11 @@ target_include_directories(pfm PUBLIC
 )
 
 target_link_libraries(pfm PUBLIC ${TORCH_LIBRARIES} ${OpenCV_LIBS})
+if(PFM_OPENCV_RUNTIME_LIBRARY_DIRS)
+    target_link_directories(pfm PUBLIC ${PFM_OPENCV_RUNTIME_LIBRARY_DIRS})
+    target_link_options(pfm PUBLIC "LINKER:--disable-new-dtags")
+    set_target_properties(pfm PROPERTIES BUILD_RPATH "${PFM_OPENCV_RUNTIME_LIBRARY_DIRS}")
+endif()
 target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(pfm_cli src/main.cpp)
@@ -40,6 +66,7 @@ add_executable(pfm_tests
     tests/test_main.cpp
     modules/cli/commands_test.cpp
     modules/core/tensor_utils_test.cpp
+    modules/data/image_io_test.cpp
     modules/data/normalization_test.cpp
     modules/data/synthetic_pair_test.cpp
     modules/eval/metrics_test.cpp
