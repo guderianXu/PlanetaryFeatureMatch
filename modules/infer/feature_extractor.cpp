@@ -14,11 +14,20 @@ void validateMap(const torch::Tensor& tensor, const char* name) {
     if (!tensor.defined()) {
         throw std::invalid_argument(std::string(name) + " must be defined");
     }
+    if (!tensor.device().is_cpu()) {
+        throw std::invalid_argument(std::string(name) + " must be a CPU tensor");
+    }
     if (tensor.dim() != 4) {
         throw std::invalid_argument(std::string(name) + " must be 4D");
     }
     if (tensor.size(0) != 1) {
         throw std::invalid_argument(std::string(name) + " batch size must be 1");
+    }
+}
+
+void validateSpatialSize(const torch::Tensor& tensor, const char* name, int64_t height, int64_t width) {
+    if (tensor.size(2) != height || tensor.size(3) != width) {
+        throw std::invalid_argument(std::string(name) + " spatial size must match heatmap");
     }
 }
 
@@ -29,6 +38,36 @@ void validateRawMaps(const RawFeatureMaps& maps) {
     validateMap(maps.orientation, "orientation");
     validateMap(maps.affine, "affine");
     validateMap(maps.dense_confidence, "dense_confidence");
+
+    const int64_t height = maps.heatmap.size(2);
+    const int64_t width = maps.heatmap.size(3);
+    if (height <= 0 || width <= 0) {
+        throw std::invalid_argument("heatmap height and width must be positive");
+    }
+    if (maps.heatmap.size(1) != 1) {
+        throw std::invalid_argument("heatmap channels must be 1");
+    }
+    if (maps.descriptors.size(1) <= 0) {
+        throw std::invalid_argument("descriptors channels must be positive");
+    }
+    if (maps.scale.size(1) < 1) {
+        throw std::invalid_argument("scale channels must be at least 1");
+    }
+    if (maps.orientation.size(1) < 1) {
+        throw std::invalid_argument("orientation channels must be at least 1");
+    }
+    if (maps.affine.size(1) != 4) {
+        throw std::invalid_argument("affine channels must be 4");
+    }
+    if (maps.dense_confidence.size(1) != 1) {
+        throw std::invalid_argument("dense_confidence channels must be 1");
+    }
+
+    validateSpatialSize(maps.descriptors, "descriptors", height, width);
+    validateSpatialSize(maps.scale, "scale", height, width);
+    validateSpatialSize(maps.orientation, "orientation", height, width);
+    validateSpatialSize(maps.affine, "affine", height, width);
+    validateSpatialSize(maps.dense_confidence, "dense_confidence", height, width);
 }
 
 void appendPoint(std::vector<float>& points, int64_t y, int64_t x) {
@@ -51,8 +90,9 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
     const auto affine = maps.affine.to(torch::kFloat32).contiguous();
     const auto dense_confidence_map = maps.dense_confidence.to(torch::kFloat32).contiguous();
 
+    const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
-    const int64_t sparse_count = std::min<int64_t>(max_keypoints, heatmap.numel());
+    const int64_t sparse_count = std::min<int64_t>(max_keypoints, height * width);
     const auto topk = torch::topk(heatmap.flatten(), sparse_count);
     const auto topk_values = std::get<0>(topk).contiguous();
     const auto topk_indices = std::get<1>(topk).to(torch::kLong).contiguous();
@@ -98,18 +138,24 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
         }
     }
 
-    auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32);
+    const auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    const int64_t dense_count = static_cast<int64_t>(dense_confidence.size());
+    const auto dense_points_tensor = dense_count == 0
+        ? torch::empty({0, 2}, tensor_options)
+        : torch::from_blob(dense_points.data(), {dense_count, 2}, tensor_options).clone().contiguous();
+    const auto dense_confidence_tensor = dense_count == 0
+        ? torch::empty({0}, tensor_options)
+        : torch::from_blob(dense_confidence.data(), {dense_count}, tensor_options).clone().contiguous();
+
     return FeatureSet{
         torch::from_blob(sparse_points.data(), {sparse_count, 2}, tensor_options).clone().contiguous(),
-        topk_values.clone().contiguous(),
+        topk_values.to(torch::kCPU, torch::kFloat32).contiguous(),
         torch::from_blob(sparse_descriptors.data(), {sparse_count, descriptors.size(1)}, tensor_options).clone().contiguous(),
         torch::from_blob(sparse_scale.data(), {sparse_count}, tensor_options).clone().contiguous(),
         torch::from_blob(sparse_orientation.data(), {sparse_count}, tensor_options).clone().contiguous(),
         torch::from_blob(sparse_affine.data(), {sparse_count, 2, 2}, tensor_options).clone().contiguous(),
-        torch::from_blob(dense_points.data(), {static_cast<int64_t>(dense_confidence.size()), 2}, tensor_options).clone().contiguous(),
-        torch::from_blob(dense_confidence.data(), {static_cast<int64_t>(dense_confidence.size())}, tensor_options)
-            .clone()
-            .contiguous()};
+        dense_points_tensor,
+        dense_confidence_tensor};
 }
 
 }  // namespace pfm
