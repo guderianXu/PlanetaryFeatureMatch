@@ -16,6 +16,11 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v base64 >/dev/null 2>&1; then
+    echo "error: base64 is required" >&2
+    exit 1
+fi
+
 current_branch="$(git branch --show-current)"
 if [[ "${current_branch}" != "main" ]]; then
     echo "error: current branch is '${current_branch}', expected 'main'" >&2
@@ -57,6 +62,7 @@ rm -f "${create_body}"
 
 git remote set-url origin "${REMOTE_URL}"
 
-git -c "http.https://github.com/.extraheader=AUTHORIZATION: Bearer ${GH_TOKEN}" push -u origin main
+auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" push -u origin main
 
 echo "pushed main to https://github.com/${OWNER}/${REPO}"
