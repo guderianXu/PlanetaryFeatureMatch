@@ -28,6 +28,7 @@ add_library(pfm STATIC
     modules/models/dense_head.cpp
     modules/models/matcher.cpp
     modules/models/sparse_head.cpp
+    modules/train/trainer.cpp
 )
 
 target_include_directories(pfm PUBLIC
@@ -59,6 +60,7 @@ add_executable(pfm_tests
     modules/models/dense_head_test.cpp
     modules/models/matcher_test.cpp
     modules/models/sparse_head_test.cpp
+    modules/train/trainer_test.cpp
 )
 target_include_directories(pfm_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
