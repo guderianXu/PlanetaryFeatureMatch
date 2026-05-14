@@ -14,6 +14,7 @@ add_library(pfm STATIC
     modules/cli/commands.cpp
     modules/core/tensor_utils.cpp
     modules/infer/pipeline.cpp
+    modules/data/image_dataset.cpp
     modules/data/image_io.cpp
     modules/data/normalization.cpp
     modules/data/synthetic_pair.cpp
@@ -41,6 +42,7 @@ add_executable(pfm_tests
     tests/test_main.cpp
     modules/cli/commands_test.cpp
     modules/core/tensor_utils_test.cpp
+    modules/data/image_dataset_test.cpp
     modules/data/image_io_test.cpp
     modules/data/normalization_test.cpp
     modules/data/synthetic_pair_test.cpp

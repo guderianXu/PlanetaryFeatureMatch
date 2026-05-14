@@ -20,6 +20,7 @@ void register_test(const std::string& name, TestFn fn) {
 }
 
 void register_tensor_utils_tests();
+void register_image_dataset_tests();
 void register_image_io_tests();
 void register_normalization_tests();
 void register_warp_tests();
@@ -34,6 +35,7 @@ void register_cli_tests();
 
 int main() {
     register_tensor_utils_tests();
+    register_image_dataset_tests();
     register_image_io_tests();
     register_normalization_tests();
     register_warp_tests();
