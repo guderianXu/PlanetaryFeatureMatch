@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 
 #include "cli/commands.h"
 #include "infer/feature_codec.h"
+#include "infer/match_codec.h"
 #include "infer/pipeline.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"
@@ -160,23 +162,74 @@ static void pipeline_export_rejects_config_only_checkpoint() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_match_is_deferred_to_task_8() {
-    pfm::CliOptions options;
-    options.image_a = "a.png";
-    options.image_b = "b.png";
-    options.checkpoint = "checkpoint.pt";
-    options.output = "matches.json";
+static void pipeline_match_writes_match_file() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_match");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("match_a.png");
+    const auto image_b = temp_dir.file("match_b.png");
+    const auto output = temp_dir.file("matches.pt");
+    write_test_image(image_a, 17);
+    write_test_image(image_b, 29);
 
-    PFM_REQUIRE(pfm::run_match_command(options) != 0);
+    pfm::CliOptions options;
+    options.image_a = image_a.string();
+    options.image_b = image_b.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.max_keypoints = 8;
+    options.semi_dense_threshold = 0.0;
+    options.device = "cpu";
+
+    PFM_REQUIRE(pfm::run_match_command(options) == 0);
+    const auto matches = pfm::load_match_set(options.output);
+    PFM_REQUIRE(matches.sparse_matches.defined());
+    PFM_REQUIRE(matches.sparse_matches.scalar_type() == torch::kInt64);
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
+    PFM_REQUIRE(matches.sparse_scores.defined());
+    PFM_REQUIRE(matches.sparse_scores.dim() == 1);
+    PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
+    PFM_REQUIRE(matches.points_a.defined());
+    PFM_REQUIRE(matches.points_b.defined());
+    PFM_REQUIRE(matches.confidence.defined());
+    PFM_REQUIRE(matches.points_a.dim() == 2);
+    PFM_REQUIRE(matches.points_b.dim() == 2);
+    PFM_REQUIRE(matches.points_a.size(1) == 2);
+    PFM_REQUIRE(matches.points_b.size(1) == 2);
+    PFM_REQUIRE(matches.confidence.dim() == 1);
+    PFM_REQUIRE(matches.confidence.size(0) == matches.points_a.size(0));
 }
 
-static void pipeline_eval_is_deferred_to_task_8() {
-    pfm::CliOptions options;
-    options.pairs = "pairs.txt";
-    options.checkpoint = "checkpoint.pt";
-    options.output = "report.json";
+static void pipeline_eval_writes_report_archive() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_eval");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("eval_a.png");
+    const auto image_b = temp_dir.file("eval_b.png");
+    const auto pairs = temp_dir.file("pairs.txt");
+    const auto output = temp_dir.file("report.pt");
+    write_test_image(image_a, 71);
+    write_test_image(image_b, 91);
+    {
+        std::ofstream stream(pairs);
+        stream << image_a.string() << ' ' << image_b.string() << '\n';
+    }
 
-    PFM_REQUIRE(pfm::run_eval_command(options) != 0);
+    pfm::CliOptions options;
+    options.pairs = pairs.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.max_keypoints = 8;
+    options.semi_dense_threshold = 0.0;
+    options.device = "cpu";
+
+    PFM_REQUIRE(pfm::run_eval_command(options) == 0);
+    torch::serialize::InputArchive archive;
+    archive.load_from(options.output);
+    torch::Tensor average_matches;
+    archive.read("average_matches", average_matches);
+    PFM_REQUIRE(average_matches.defined());
+    PFM_REQUIRE(average_matches.numel() == 1);
+    PFM_REQUIRE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>() >= 0.0F);
 }
 
 void register_pipeline_tests() {
@@ -184,6 +237,6 @@ void register_pipeline_tests() {
     register_test("pipeline_extract_writes_loadable_feature_file", pipeline_extract_writes_loadable_feature_file);
     register_test("pipeline_export_writes_loadable_checkpoint", pipeline_export_writes_loadable_checkpoint);
     register_test("pipeline_export_rejects_config_only_checkpoint", pipeline_export_rejects_config_only_checkpoint);
-    register_test("pipeline_match_is_deferred_to_task_8", pipeline_match_is_deferred_to_task_8);
-    register_test("pipeline_eval_is_deferred_to_task_8", pipeline_eval_is_deferred_to_task_8);
+    register_test("pipeline_match_writes_match_file", pipeline_match_writes_match_file);
+    register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);
 }

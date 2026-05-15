@@ -14,14 +14,14 @@ int run_train_command(const CliOptions& options);
 /// @return Zero after writing a loadable feature file, nonzero when validation or extraction fails.
 int run_extract_command(const CliOptions& options);
 
-/// Validate image matching command paths and report that matching is deferred to Task 8.
-/// @param options Parsed CLI options containing image_a, image_b, checkpoint, and output.
-/// @return Always nonzero after required paths are present because matching is deferred.
+/// Run the image matching command.
+/// @param options Parsed CLI options containing image_a, image_b, checkpoint, output, device, and decode settings.
+/// @return Zero after writing a loadable match file, nonzero when validation, extraction, or matching fails.
 int run_match_command(const CliOptions& options);
 
-/// Validate evaluation command paths and report that evaluation is deferred to Task 8.
-/// @param options Parsed CLI options containing pairs, checkpoint, and output.
-/// @return Always nonzero after required paths are present because evaluation is deferred.
+/// Run the image-pair evaluation command.
+/// @param options Parsed CLI options containing pairs, checkpoint, output, device, and decode settings.
+/// @return Zero after writing a LibTorch report archive, nonzero when validation, extraction, or matching fails.
 int run_eval_command(const CliOptions& options);
 
 /// Run the model export command.
