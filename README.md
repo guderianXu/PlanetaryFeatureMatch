@@ -1,17 +1,30 @@
 # PlanetaryFeatureMatch
 
-PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影像局部特征提取与匹配项目。目标场景包括火星、月球和小行星影像；这些影像常见弱纹理、视角变化、成像畸变、相机倾斜和光照变化，传统局部特征与仅依赖 RANSAC 的流程容易失效。
+PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影像局部特征提取与匹配项目，面向火星、月球和小行星等场景。行星影像常见弱纹理、光照变化大、视角差异、成像畸变、相机倾斜和局部形变，传统局部特征与仅依赖 RANSAC 的流程在这些场景下容易失效。
 
-当前实现提供第一阶段真实可执行流程：从真实图像目录训练最小模型，保存/加载 checkpoint，提取特征，执行双图匹配，按图像对列表评估，并导出可用于推理的 checkpoint。该阶段用于打通端到端训练与推理链路，尚不代表生产级精度或完整鲁棒性。
+当前版本已经打通第一阶段真实闭环：读取真实图像、训练最小模型、保存 checkpoint、提取 `.pt` 特征、执行双图匹配、按 pairs 文件评估，并导出可用于推理的 checkpoint。该阶段重点是端到端可运行和可测试，尚不代表最终匹配精度。
 
-## 设计
+## 已实现能力
 
-模型采用稀疏与半稠密结合的匹配结构：
+- OpenCV 图像读取：支持常见 8/16 位灰度图和 RGB/BGR 图像。
+- LibTorch 训练：使用真实图像生成自监督合成图像对并执行最小训练循环。
+- Checkpoint：使用 LibTorch `.pt` archive 保存和加载模型。
+- 特征提取：输出稀疏关键点、描述子、尺度、方向、仿射形状和半稠密点。
+- 双图匹配：稀疏描述子 mutual nearest-neighbor 匹配与半稠密点对应导出。
+- 评估：对 pairs 文件中的图像对聚合平均匹配数、稀疏分数、半稠密置信度和覆盖率。
+- 模型导出：校验 checkpoint 完整性后导出推理 checkpoint。
+- 模块化测试：每个主要模块配套 `*_test.cpp`。
 
-- 共享多尺度 backbone
-- 稀疏分支输出关键点、描述子、尺度、方向和仿射形状
-- 半稠密分支输出置信点对应关系
-- matcher 模块提供描述子相似度与匹配评分基础
+## 模型结构
+
+当前模型采用稀疏与半稠密结合的第一阶段结构：
+
+- `Backbone`：共享多尺度特征提取。
+- `SparseHead`：输出关键点 heatmap、描述子、尺度、方向和仿射形状。
+- `DenseHead`：输出半稠密置信度和局部偏移。
+- `Matcher`：提供描述子相似度与匹配评分基础。
+
+训练使用自监督合成图像对，基础损失包括 repeatability、descriptor cross entropy、masked L1 offset 和 confidence BCE。
 
 ## 仓库结构
 
@@ -20,17 +33,20 @@ modules/
   cli/        CLI11 命令解析与测试
   core/       张量校验和网格工具
   data/       图像 IO、ImageDataset、归一化与自监督合成图像对
-  eval/       匹配指标、半稠密指标和评估流水线辅助函数
+  eval/       匹配指标和半稠密覆盖率指标
   geometry/   仿射 warp 辅助函数
-  infer/      特征/匹配编解码、特征解码、双图匹配与评估流水线辅助函数
+  infer/      特征/匹配编解码、特征解码、匹配与评估流水线
   losses/     repeatability、descriptor、offset 和 confidence 损失
   models/     backbone、sparse head、dense head、matcher
   train/      训练配置、trainer 和 checkpoint 保存/加载
 src/
   main.cpp    CLI 入口
+tests/
+  test_main.cpp
+  test_harness.h
 ```
 
-项目按模块组织代码，每个模块配套对应的 `*_test.cpp` 测试文件。
+项目按模块组织代码，不使用 `include/` 与 `src/` 分离的库式布局。
 
 ## 依赖
 
@@ -38,7 +54,15 @@ src/
 - C++17 编译器
 - LibTorch / PyTorch C++ CMake 包
 - OpenCV CMake 包
-- `CLI11.hpp` 位于仓库根目录
+- 仓库根目录下的 `CLI11.hpp`
+
+如果 CMake 无法自动找到 LibTorch 或 OpenCV，可以显式指定：
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON \
+  -DCMAKE_PREFIX_PATH="/path/to/torch/share/cmake" \
+  -DOpenCV_DIR="/path/to/opencv/lib/cmake/opencv4"
+```
 
 ## 构建与测试
 
@@ -49,13 +73,15 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-## CLI
+查看命令行帮助：
 
 ```bash
 ./build/pfm_cli --help
 ```
 
-第一阶段命令已经执行真实训练/推理行为：
+## 快速开始
+
+假设图像放在 `images/`，至少包含一张 OpenCV 可读取的图像：
 
 ```bash
 ./build/pfm_cli train \
@@ -65,30 +91,37 @@ ctest --test-dir build --output-on-failure
   --batch-size 1
 ```
 
-`train` 会读取真实图像目录，在线生成平移和光度扰动的自监督合成图像对，运行 LibTorch 最小模型训练，并保存 checkpoint。
+训练完成后提取单张图像特征：
 
 ```bash
 ./build/pfm_cli extract \
-  --image a.tif \
+  --image images/a.tif \
   --checkpoint model.pt \
   --output features.pt \
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5
 ```
 
-`extract` 会读取图像和 checkpoint，输出 `.pt` 特征文件。
+匹配两张图像：
 
 ```bash
 ./build/pfm_cli match \
-  --image-a a.tif \
-  --image-b b.tif \
+  --image-a images/a.tif \
+  --image-b images/b.tif \
   --checkpoint model.pt \
   --output matches.pt \
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5
 ```
 
-`match` 会读取两张图像和 checkpoint，输出 `.pt` 匹配结果。
+准备评估 pairs 文件：
+
+```text
+images/a.tif images/b.tif
+"/path/with spaces/a.tif" "/path/with spaces/b.tif"
+```
+
+运行评估：
 
 ```bash
 ./build/pfm_cli eval \
@@ -98,7 +131,7 @@ ctest --test-dir build --output-on-failure
   --max-keypoints 1024
 ```
 
-`eval` 会读取图像对列表，逐对提取与匹配，并输出 `.pt` 评估报告。
+导出 checkpoint：
 
 ```bash
 ./build/pfm_cli export \
@@ -106,19 +139,85 @@ ctest --test-dir build --output-on-failure
   --output exported.pt
 ```
 
-`export` 会校验输入 checkpoint，并复制/重存为推理 checkpoint。
+## CLI 命令说明
 
-## 当前状态
+### `train`
 
-已实现并测试：
+```bash
+./build/pfm_cli train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu]
+```
 
-- OpenCV 图像读取和 8/16 位灰度、RGB 归一化
-- ImageDataset 图像枚举与加载
-- 局部对比度归一化
-- 自监督合成图像对生成
-- 仿射 warp field 与 valid mask 工具
-- backbone、sparse head、dense head、matcher 张量契约
-- repeatability、descriptor、masked L1、confidence 损失
-- trainer、checkpoint 保存/加载
-- 特征与匹配结果 `.pt` 编解码
-- 提取、匹配、评估和导出 CLI 流程
+- `--image-dir`：训练图像目录。
+- `--checkpoint`：输出 checkpoint 路径。
+- `--epochs`：训练轮数，默认 1。
+- `--batch-size`：batch 大小，默认 1。
+- `--device`：当前仅支持 `cpu`。
+
+第一阶段训练会对大图做 CPU 友好的尺寸限幅，并限制每轮样本数，避免真实大幅面 TIFF 在本地 smoke 中占用过多内存和时间。
+
+### `extract`
+
+```bash
+./build/pfm_cli extract --image a.tif --checkpoint model.pt --output features.pt [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+```
+
+- 输出为 LibTorch `.pt` archive。
+- 包含稀疏关键点、分数、描述子、尺度、方向、仿射形状、半稠密点和半稠密置信度。
+
+### `match`
+
+```bash
+./build/pfm_cli match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+```
+
+- 输出为 LibTorch `.pt` archive。
+- 包含稀疏匹配索引、稀疏匹配分数、半稠密点对和置信度。
+
+### `eval`
+
+```bash
+./build/pfm_cli eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--max-keypoints 1024]
+```
+
+- `pairs.txt` 每行写一对图像路径。
+- 路径包含空格时必须使用英文双引号。
+- 输出报告字段包括 `average_matches`、`average_sparse_score`、`average_dense_confidence` 和 `semi_dense_coverage`。
+
+### `export`
+
+```bash
+./build/pfm_cli export --checkpoint model.pt --output exported.pt
+```
+
+`export` 会检查 checkpoint 是否包含推理所需的配置和模型权重；配置不完整或权重缺失时会失败。
+
+## 输出文件
+
+所有中间结果都使用 LibTorch `.pt` archive，便于 C++ 侧继续读取：
+
+- `model.pt`：训练 checkpoint。
+- `features.pt`：单图特征。
+- `matches.pt`：双图匹配结果。
+- `report.pt`：评估聚合指标。
+- `exported.pt`：导出的推理 checkpoint。
+
+## 当前限制
+
+- 当前训练和推理仅支持 CPU。
+- 第一阶段训练使用轻量自监督扰动，主要验证链路，不保证最终匹配效果。
+- 真实大图训练会被缩小到较小边长以保证本地 smoke 可运行。
+- `train` 中的 `--pairs`、`--config`、`--output` 已保留在 CLI 中，但当前主要训练输出使用 `--checkpoint`。
+- 后续需要继续增强仿射、透视、畸变、阴影、遮挡和多尺度几何监督。
+
+## 开发验证建议
+
+修改代码后至少运行：
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON
+cmake --build build -j$(nproc)
+./build/pfm_tests
+ctest --test-dir build --output-on-failure
+```
+
+修改训练、推理或 IO 后，建议再用真实 TIFF 执行一次 `train`、`extract`、`match`、`eval` 和 `export` smoke。

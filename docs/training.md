@@ -1,53 +1,63 @@
-# 训练说明
+# 训练与使用说明
 
-本文档说明 PlanetaryFeatureMatch 当前第一阶段 C++/LibTorch 训练流程。`train` 命令已经不再是参数校验桩：它会读取真实图像，生成自监督合成图像对，运行最小训练循环，并写出 checkpoint。
+本文档说明 PlanetaryFeatureMatch 当前第一阶段 C++/LibTorch 训练、推理和评估流程。当前实现已经不是参数校验桩，而是可以读取真实图像、执行最小训练循环、写出 checkpoint，并继续完成特征提取、匹配、评估和导出。
 
-## 训练目标
+## 目标
 
-训练一个面向行星影像的局部特征与匹配模型，支持稀疏关键点匹配和半稠密对应关系。当前阶段重点是打通真实图像输入、训练、checkpoint、提取、匹配、评估和导出链路；尚不宣称生产级精度。
+PlanetaryFeatureMatch 面向火星、月球和小行星影像，目标是训练一个同时支持稀疏关键点匹配和半稠密对应的局部特征模型。第一阶段的目标是打通真实图像闭环：
 
-需要逐步增强的鲁棒性包括：
+1. 从真实影像目录读取数据。
+2. 生成自监督图像对。
+3. 训练最小 LibTorch 模型。
+4. 保存可加载 checkpoint。
+5. 使用 checkpoint 提取特征。
+6. 导出匹配结果和评估报告。
 
-- 弱纹理
-- 大光照变化
-- 相机倾斜
-- 多视角几何
-- 局部仿射形变
-- 成像畸变
-- 阴影、无效区域和遮挡
+该阶段重点是工程闭环和测试覆盖，后续还需要继续提升匹配精度和几何鲁棒性。
 
-## 输入数据
+## 输入图像
 
-当前训练从 `--image-dir` 指定目录读取真实图像，并支持常见 OpenCV 可读格式，包括：
+训练和推理通过 OpenCV 读取图像。当前支持 OpenCV 可读取的常见格式，主要包括：
+
+- `.png`
+- `.jpg` / `.jpeg`
+- `.tif` / `.tiff`
+
+支持的像素类型包括：
 
 - 8 位灰度
 - 16 位灰度
 - 8 位 RGB/BGR
 - 16 位 RGB/BGR
 
-预处理会将图像转换为 `C x H x W` 的 LibTorch 张量，并归一化到 `[0, 1]`。
+图像会转换为 `C x H x W` 的 LibTorch float tensor，并归一化到 `[0, 1]`。彩色图像会按通道处理；训练时当前会转为单通道灰度输入。
 
-## 自监督图像对
+## 自监督训练数据
 
-每张源图像会生成两张相关视图和监督信号：
+当前训练不依赖人工标注匹配点，而是从单张真实图像在线生成一对相关视图：
 
 - `view_a`
 - `view_b`
 - 从 `view_a` 到 `view_b` 的 dense warp field
-- 有效对应 mask
+- 有效对应区域 mask
 
-当前第一阶段使用平移和光度扰动生成自监督合成图像对。后续可继续加入旋转、尺度、仿射倾斜、透视变换、畸变、局部形变、阴影、模糊、噪声和遮挡等增强。
+第一阶段使用平移和光度扰动构造监督信号。后续可以继续扩展：
 
-## 模型组件
+- 旋转和尺度变化
+- 仿射倾斜
+- 透视变化
+- 径向/切向畸变
+- 局部非刚性形变
+- 强光照、阴影和低对比度扰动
+- 模糊、噪声、压缩退化和遮挡
 
-训练流程会运行以下 LibTorch 模块：
+## 训练模块
 
-- `Backbone`：多尺度特征提取
-- `SparseHead`：关键点热力图、描述子、尺度、方向和仿射形状
-- `DenseHead`：半稠密置信度和局部偏移
-- `Matcher`：描述子相似度与匹配基础
+训练会联合运行以下模块：
 
-## 损失
+- `Backbone`：共享多尺度特征提取。
+- `SparseHead`：输出关键点 heatmap、描述子、尺度、方向和仿射形状。
+- `DenseHead`：输出半稠密置信度和局部偏移。
 
 当前基础损失包括：
 
@@ -56,27 +66,51 @@
 - `masked_l1_loss`
 - `confidence_bce_loss`
 
-第一阶段训练使用这些损失打通优化流程。几何一致性等更完整目标仍属于后续增强方向。
+为了让真实大幅面 TIFF 能在 CPU 本地 smoke 中稳定运行，第一阶段训练会限制输入图像尺寸、限制每轮参与训练的图像数量，并对 descriptor loss 的空间位置做采样。
 
-## 最小训练命令
+## 构建
 
 ```bash
-./build/pfm_cli train --image-dir images --checkpoint model.pt --epochs 1 --batch-size 1
+cmake -S . -B build -DBUILD_TESTS=ON
+cmake --build build -j$(nproc)
 ```
 
-该命令会：
+如果 CMake 找不到 LibTorch 或 OpenCV，可以显式指定路径：
 
-1. 从 `images` 目录读取真实图像。
-2. 将图像归一化为 LibTorch 张量。
-3. 在线生成平移/光度自监督图像对和有效 mask。
-4. 运行 LibTorch 模型前向与反向传播。
-5. 保存 checkpoint 到 `model.pt`。
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON \
+  -DCMAKE_PREFIX_PATH="/path/to/torch/share/cmake" \
+  -DOpenCV_DIR="/path/to/opencv/lib/cmake/opencv4"
+```
 
-第一阶段 MVP 会对训练图像做 CPU 友好的尺寸限幅，并限制每轮样本数，避免大幅面 TIFF 在本地 smoke 中占用过多内存和时间。
+## 训练
 
-## 相关推理命令
+```bash
+./build/pfm_cli train \
+  --image-dir images \
+  --checkpoint model.pt \
+  --epochs 1 \
+  --batch-size 1 \
+  --device cpu
+```
 
-训练完成后，可继续执行：
+参数说明：
+
+- `--image-dir`：训练图像目录，目录中必须至少包含一张支持格式图像。
+- `--checkpoint`：输出 checkpoint 路径。
+- `--epochs`：训练轮数，必须为正数。
+- `--batch-size`：batch 大小，必须为正数。
+- `--device`：当前仅支持 `cpu`。
+
+训练成功后会输出类似：
+
+```text
+training complete: epochs=1 final_loss=...
+```
+
+并生成 `model.pt`。
+
+## 提取特征
 
 ```bash
 ./build/pfm_cli extract \
@@ -85,7 +119,22 @@
   --output features.pt \
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5
+```
 
+输出 `features.pt` 是 LibTorch archive，包含：
+
+- `keypoints`：稀疏关键点坐标。
+- `scores`：关键点分数。
+- `descriptors`：稀疏描述子。
+- `scale`：尺度估计。
+- `orientation`：方向向量。
+- `affine`：局部仿射形状。
+- `dense_points`：半稠密点。
+- `dense_confidence`：半稠密置信度。
+
+## 双图匹配
+
+```bash
 ./build/pfm_cli match \
   --image-a images/a.tif \
   --image-b images/b.tif \
@@ -93,23 +142,108 @@
   --output matches.pt \
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5
+```
 
+输出 `matches.pt` 包含：
+
+- `sparse_matches`：稀疏匹配索引对。
+- `sparse_scores`：稀疏匹配分数。
+- `points_a`：图像 A 的半稠密点。
+- `points_b`：图像 B 的半稠密对应点。
+- `confidence`：半稠密匹配置信度。
+
+## 批量评估
+
+先准备 `pairs.txt`：
+
+```text
+images/a.tif images/b.tif
+images/c.tif images/d.tif
+```
+
+如果路径包含空格，必须使用英文双引号：
+
+```text
+"/home/user/data/Feature Extraction/a.tif" "/home/user/data/Feature Extraction/b.tif"
+```
+
+执行评估：
+
+```bash
 ./build/pfm_cli eval \
   --pairs pairs.txt \
   --checkpoint model.pt \
   --output report.pt \
   --max-keypoints 1024
+```
 
+输出 `report.pt` 包含：
+
+- `average_matches`：每对图像的平均稀疏匹配数量。
+- `average_sparse_score`：平均稀疏匹配分数。
+- `average_dense_confidence`：平均半稠密置信度。
+- `semi_dense_coverage`：半稠密覆盖率。
+
+## 导出模型
+
+```bash
 ./build/pfm_cli export \
   --checkpoint model.pt \
   --output exported.pt
 ```
 
-`extract` 输出 `.pt` 特征文件，`match` 输出 `.pt` 匹配结果，`eval` 输出 `.pt` 评估报告，`export` 会校验并复制/重存推理 checkpoint。
+导出前会校验 checkpoint 是否包含推理需要的配置和权重。只有 config 而没有模型权重的 checkpoint 会被拒绝。
+
+## 真实 TIFF smoke 示例
+
+下面是一套最小真实图像闭环示例：
+
+```bash
+mkdir -p /tmp/pfm_smoke/images
+cp images/a.tif /tmp/pfm_smoke/images/a.tif
+printf '"%s" "%s"\n' "$(pwd)/images/a.tif" "$(pwd)/images/b.tif" > /tmp/pfm_smoke/pairs.txt
+
+./build/pfm_cli train \
+  --image-dir /tmp/pfm_smoke/images \
+  --checkpoint /tmp/pfm_smoke/model.pt \
+  --epochs 1 \
+  --batch-size 1
+
+./build/pfm_cli extract \
+  --image images/a.tif \
+  --checkpoint /tmp/pfm_smoke/model.pt \
+  --output /tmp/pfm_smoke/features.pt \
+  --max-keypoints 128 \
+  --semi-dense-threshold 0.5
+
+./build/pfm_cli match \
+  --image-a images/a.tif \
+  --image-b images/b.tif \
+  --checkpoint /tmp/pfm_smoke/model.pt \
+  --output /tmp/pfm_smoke/matches.pt \
+  --max-keypoints 128 \
+  --semi-dense-threshold 0.5
+
+./build/pfm_cli eval \
+  --pairs /tmp/pfm_smoke/pairs.txt \
+  --checkpoint /tmp/pfm_smoke/model.pt \
+  --output /tmp/pfm_smoke/report.pt \
+  --max-keypoints 128
+
+./build/pfm_cli export \
+  --checkpoint /tmp/pfm_smoke/model.pt \
+  --output /tmp/pfm_smoke/exported.pt
+```
+
+检查输出：
+
+```bash
+ls -lh /tmp/pfm_smoke/*.pt
+```
 
 ## 验证命令
 
-修改训练或推理流程后运行：
+修改训练、推理、图像 IO、特征编解码或匹配逻辑后，至少运行：
 
 ```bash
 cmake -S . -B build -DBUILD_TESTS=ON
@@ -118,4 +252,19 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-建议同时使用真实 TIFF 图像执行一次 `train`、`extract`、`match`、`eval` 和 `export` CLI smoke，确认 checkpoint 与 `.pt` 输出文件可以生成。
+## 当前限制与下一步
+
+当前限制：
+
+- 仅支持 CPU 训练和推理。
+- 当前训练是第一阶段 MVP，偏重链路正确性和可测试性。
+- 大图会被缩小，训练样本数也会被限制，因此不能代表完整训练效果。
+- 几何增强仍较简单，对强旋转、强透视、严重畸变和大尺度变化的鲁棒性还需要继续提升。
+
+建议下一步：
+
+1. 增强自监督图像对生成，加入旋转、尺度、仿射、透视和畸变。
+2. 增加多尺度训练和更真实的光照/阴影扰动。
+3. 完善 matcher 训练目标，提高稀疏匹配精度。
+4. 加入几何一致性评估和真实标注/伪标注 benchmark。
+5. 在 CPU smoke 之外增加可选 GPU 训练路径。
