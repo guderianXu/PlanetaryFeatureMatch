@@ -105,6 +105,8 @@ static void parse_eval_command() {
         "report.json",
         "--device",
         "cuda:1",
+        "--semi-dense-threshold",
+        "0.25",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Eval);
@@ -112,6 +114,7 @@ static void parse_eval_command() {
     PFM_REQUIRE(parsed.checkpoint == "model.pt");
     PFM_REQUIRE(parsed.output == "report.json");
     PFM_REQUIRE(parsed.device == "cuda:1");
+    PFM_REQUIRE_CLOSE(parsed.semi_dense_threshold, 0.25, 1.0e-6);
 }
 
 static void parse_export_command() {

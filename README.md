@@ -8,7 +8,8 @@ PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影�
 
 - OpenCV 图像读取：支持常见 8/16 位灰度图和 RGB/BGR 图像。
 - LibTorch 训练：使用真实图像生成自监督合成图像对并执行最小训练循环。
-- Checkpoint：使用 LibTorch `.pt` archive 保存和加载模型。
+- CUDA 设备选择：训练和推理 forward 支持 `cpu`、`cuda`、`cuda:N`。
+- Checkpoint：使用 LibTorch `.pt` archive 保存和加载模型，CUDA 训练后仍保存为 CPU 权重。
 - 特征提取：输出稀疏关键点、描述子、尺度、方向、仿射形状和半稠密点。
 - 双图匹配：稀疏描述子 mutual nearest-neighbor 匹配与半稠密点对应导出。
 - 评估：对 pairs 文件中的图像对聚合平均匹配数、稀疏分数、半稠密置信度和覆盖率。
@@ -151,14 +152,14 @@ images/a.tif images/b.tif
 - `--checkpoint`：输出 checkpoint 路径。
 - `--epochs`：训练轮数，默认 1。
 - `--batch-size`：batch 大小，默认 1。
-- `--device`：当前仅支持 `cpu`。
+- `--device`：计算设备，默认 `cpu`；可写 `cuda` 或 `cuda:0`，其中 `cuda` 等价于 `cuda:0`。
 
-第一阶段训练会对大图做 CPU 友好的尺寸限幅，并限制每轮样本数，避免真实大幅面 TIFF 在本地 smoke 中占用过多内存和时间。
+第一阶段训练会对大图做 CPU 友好的尺寸限幅，并限制每轮样本数，避免真实大幅面 TIFF 在本地 smoke 中占用过多内存和时间。显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。
 
 ### `extract`
 
 ```bash
-./build/pfm_cli extract --image a.tif --checkpoint model.pt --output features.pt [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+./build/pfm_cli extract --image a.tif --checkpoint model.pt --output features.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5]
 ```
 
 - 输出为 LibTorch `.pt` archive。
@@ -167,7 +168,7 @@ images/a.tif images/b.tif
 ### `match`
 
 ```bash
-./build/pfm_cli match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+./build/pfm_cli match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5]
 ```
 
 - 输出为 LibTorch `.pt` archive。
@@ -176,7 +177,7 @@ images/a.tif images/b.tif
 ### `eval`
 
 ```bash
-./build/pfm_cli eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--max-keypoints 1024]
+./build/pfm_cli eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5]
 ```
 
 - `pairs.txt` 每行写一对图像路径。
@@ -201,9 +202,30 @@ images/a.tif images/b.tif
 - `report.pt`：评估聚合指标。
 - `exported.pt`：导出的推理 checkpoint。
 
+## CUDA 说明
+
+- `--device cpu` 是默认值。
+- `--device cuda` 等价于 `--device cuda:0`。
+- `--device cuda:N` 会使用第 `N` 张 CUDA 设备。
+- CUDA 不可用、索引越界或设备字符串格式错误时命令会明确失败，不会静默退回 CPU。
+- 当前 CUDA 范围是训练 forward/backward/loss 和推理模型 forward；OpenCV 图像读取、特征解码、匹配后处理、评估汇总和 `.pt` 输出仍在 CPU。
+- 训练 checkpoint 保存为 CPU 权重，便于在 CPU/GPU 之间迁移。
+
+## `pfm_tests` 是什么
+
+`build/pfm_tests` 是 CMake 构建出的自定义 C++ 单元测试运行器，由 `tests/test_main.cpp` 和 `tests/test_harness.h` 组织。它会把各模块的 `*_test.cpp` 注册到同一个测试程序中。
+
+运行：
+
+```bash
+./build/pfm_tests
+ctest --test-dir build --output-on-failure
+```
+
+输出里的 `PASS <test_name>` 表示一个测试用例通过；出现很多 `PASS` 是正常现象。最后一行类似 `127 test(s) passed` 且退出码为 0，表示全部通过。如果失败，会输出 `FAIL <test_name>: <reason>` 并返回非 0。
+
 ## 当前限制
 
-- 当前训练和推理仅支持 CPU。
 - 第一阶段训练使用轻量自监督扰动，主要验证链路，不保证最终匹配效果。
 - 真实大图训练会被缩小到较小边长以保证本地 smoke 可运行。
 - `train` 中的 `--pairs`、`--config`、`--output` 已保留在 CLI 中，但当前主要训练输出使用 `--checkpoint`。

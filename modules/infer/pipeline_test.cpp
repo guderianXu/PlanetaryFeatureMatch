@@ -232,6 +232,115 @@ static void pipeline_eval_writes_report_archive() {
     PFM_REQUIRE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>() >= 0.0F);
 }
 
+static void pipeline_extract_rejects_invalid_device() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_extract_invalid_device");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image = temp_dir.file("extract.png");
+    const auto output = temp_dir.file("features.pt");
+    write_test_image(image, 83);
+
+    pfm::CliOptions options;
+    options.image = image.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.device = "cuda:abc";
+
+    PFM_REQUIRE(pfm::run_extract_command(options) != 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.output));
+}
+
+static void pipeline_match_rejects_invalid_device() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_match_invalid_device");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("match_a.png");
+    const auto image_b = temp_dir.file("match_b.png");
+    const auto output = temp_dir.file("matches.pt");
+    write_test_image(image_a, 17);
+    write_test_image(image_b, 29);
+
+    pfm::CliOptions options;
+    options.image_a = image_a.string();
+    options.image_b = image_b.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.device = "cuda:abc";
+
+    PFM_REQUIRE(pfm::run_match_command(options) != 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.output));
+}
+
+static void pipeline_eval_rejects_invalid_device() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_eval_invalid_device");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("eval_a.png");
+    const auto image_b = temp_dir.file("eval_b.png");
+    const auto pairs = temp_dir.file("pairs.txt");
+    const auto output = temp_dir.file("report.pt");
+    write_test_image(image_a, 71);
+    write_test_image(image_b, 91);
+    {
+        std::ofstream stream(pairs);
+        stream << image_a.string() << ' ' << image_b.string() << '\n';
+    }
+
+    pfm::CliOptions options;
+    options.pairs = pairs.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.device = "cuda:abc";
+
+    PFM_REQUIRE(pfm::run_eval_command(options) != 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.output));
+}
+
+static void pipeline_cuda_device_is_strictly_validated_when_unavailable() {
+    if (torch::cuda::is_available()) {
+        return;
+    }
+
+    TempPipelineDirectory temp_dir("pfm_pipeline_cuda_unavailable");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image = temp_dir.file("extract.png");
+    const auto output = temp_dir.file("features.pt");
+    write_test_image(image, 83);
+
+    pfm::CliOptions options;
+    options.image = image.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.device = "cuda";
+
+    PFM_REQUIRE(pfm::run_extract_command(options) != 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.output));
+}
+
+static void pipeline_cuda_extract_writes_cpu_feature_file_when_available() {
+    if (!torch::cuda::is_available()) {
+        return;
+    }
+
+    TempPipelineDirectory temp_dir("pfm_pipeline_cuda_extract");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image = temp_dir.file("extract.png");
+    const auto output = temp_dir.file("features.pt");
+    write_test_image(image, 83);
+
+    pfm::CliOptions options;
+    options.image = image.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.max_keypoints = 8;
+    options.semi_dense_threshold = 0.0;
+    options.device = "cuda";
+
+    PFM_REQUIRE(pfm::run_extract_command(options) == 0);
+    const auto features = pfm::load_feature_set(options.output);
+    PFM_REQUIRE(features.keypoints.device().is_cpu());
+    PFM_REQUIRE(features.descriptors.device().is_cpu());
+    PFM_REQUIRE(features.dense_points.device().is_cpu());
+    PFM_REQUIRE(features.dense_confidence.device().is_cpu());
+}
+
 void register_pipeline_tests() {
     register_test("pipeline_train_writes_loadable_checkpoint", pipeline_train_writes_loadable_checkpoint);
     register_test("pipeline_extract_writes_loadable_feature_file", pipeline_extract_writes_loadable_feature_file);
@@ -239,4 +348,11 @@ void register_pipeline_tests() {
     register_test("pipeline_export_rejects_config_only_checkpoint", pipeline_export_rejects_config_only_checkpoint);
     register_test("pipeline_match_writes_match_file", pipeline_match_writes_match_file);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);
+    register_test("pipeline_extract_rejects_invalid_device", pipeline_extract_rejects_invalid_device);
+    register_test("pipeline_match_rejects_invalid_device", pipeline_match_rejects_invalid_device);
+    register_test("pipeline_eval_rejects_invalid_device", pipeline_eval_rejects_invalid_device);
+    register_test("pipeline_cuda_device_is_strictly_validated_when_unavailable",
+                  pipeline_cuda_device_is_strictly_validated_when_unavailable);
+    register_test("pipeline_cuda_extract_writes_cpu_feature_file_when_available",
+                  pipeline_cuda_extract_writes_cpu_feature_file_when_available);
 }

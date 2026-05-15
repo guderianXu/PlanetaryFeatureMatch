@@ -52,6 +52,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     eval->add_option("--output", options.output, "Output report path")->required();
     eval->add_option("--device", options.device, "Compute device");
     eval->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
+    eval->add_option("--semi-dense-threshold", options.semi_dense_threshold, "Semi-dense confidence threshold");
     eval->callback([&options]() { options.command = Command::Eval; });
 
     CLI::App* export_command = app->add_subcommand("export", "Export a trained model");

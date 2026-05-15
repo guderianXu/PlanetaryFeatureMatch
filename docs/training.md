@@ -100,7 +100,9 @@ cmake -S . -B build -DBUILD_TESTS=ON \
 - `--checkpoint`：输出 checkpoint 路径。
 - `--epochs`：训练轮数，必须为正数。
 - `--batch-size`：batch 大小，必须为正数。
-- `--device`：当前仅支持 `cpu`。
+- `--device`：计算设备，默认 `cpu`；可写 `cuda` 或 `cuda:0`，其中 `cuda` 等价于 `cuda:0`。
+
+显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。CUDA 训练结束保存 checkpoint 前会把权重移回 CPU，因此同一个 checkpoint 可以被 CPU 或 GPU 推理加载。
 
 训练成功后会输出类似：
 
@@ -241,6 +243,42 @@ printf '"%s" "%s"\n' "$(pwd)/images/a.tif" "$(pwd)/images/b.tif" > /tmp/pfm_smok
 ls -lh /tmp/pfm_smoke/*.pt
 ```
 
+## CUDA 运行范围
+
+当前 CUDA 接入范围：
+
+- 训练：模型 forward、backward、loss 和 optimizer step 在指定设备上运行。
+- 推理：`extract`、`match`、`eval` 的模型 forward 在指定设备上运行。
+- 仍在 CPU 的部分：OpenCV 图像读取、特征解码、匹配后处理、评估汇总和 `.pt` 结果写出。
+
+可用设备写法：
+
+```bash
+--device cpu
+--device cuda
+--device cuda:0
+```
+
+`cuda` 等价于 `cuda:0`。如果当前 LibTorch 没有 CUDA、设备索引不存在或字符串如 `cuda:abc` 格式错误，命令会失败，不会伪装成 CPU 运行。
+
+## `pfm_tests` 测试程序
+
+`build/pfm_tests` 是项目自己的 C++ 单元测试运行器，不是训练程序。CMake 会把 `tests/test_main.cpp`、`tests/test_harness.h` 和所有模块的 `*_test.cpp` 编译进这个可执行文件。
+
+直接运行：
+
+```bash
+./build/pfm_tests
+```
+
+也可以通过 CTest 运行：
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+每一行 `PASS <test_name>` 表示一个测试通过；测试多时看到大量 `PASS` 是正常的。最后输出 `N test(s) passed` 并且退出码为 0，表示全部通过。如果某个测试失败，会输出 `FAIL <test_name>: <reason>`，程序返回非 0。
+
 ## 验证命令
 
 修改训练、推理、图像 IO、特征编解码或匹配逻辑后，至少运行：
@@ -256,7 +294,7 @@ ctest --test-dir build --output-on-failure
 
 当前限制：
 
-- 仅支持 CPU 训练和推理。
+- CUDA 目前只覆盖训练和推理模型 forward 相关计算，后处理仍在 CPU。
 - 当前训练是第一阶段 MVP，偏重链路正确性和可测试性。
 - 大图会被缩小，训练样本数也会被限制，因此不能代表完整训练效果。
 - 几何增强仍较简单，对强旋转、强透视、严重畸变和大尺度变化的鲁棒性还需要继续提升。
@@ -267,4 +305,4 @@ ctest --test-dir build --output-on-failure
 2. 增加多尺度训练和更真实的光照/阴影扰动。
 3. 完善 matcher 训练目标，提高稀疏匹配精度。
 4. 加入几何一致性评估和真实标注/伪标注 benchmark。
-5. 在 CPU smoke 之外增加可选 GPU 训练路径。
+5. 继续把匹配后处理、评估和更大规模数据管线逐步 GPU 化。

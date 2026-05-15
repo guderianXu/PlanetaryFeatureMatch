@@ -10,6 +10,7 @@
 #include <torch/serialize.h>
 #include <torch/torch.h>
 
+#include "core/device.h"
 #include "data/image_io.h"
 #include "infer/eval_pipeline.h"
 #include "infer/feature_codec.h"
@@ -77,7 +78,11 @@ struct InferenceModules {
     DenseHead dense_head{nullptr};
 };
 
-InferenceModules load_inference_modules(const std::string& checkpoint, const CheckpointConfig& config) {
+InferenceModules load_inference_modules(
+    const std::string& checkpoint,
+    const CheckpointConfig& config,
+    torch::Device device
+) {
     InferenceModules modules;
     modules.backbone = Backbone(config.input_channels, config.base_channels);
     modules.sparse_head = SparseHead(config.base_channels, config.descriptor_dim);
@@ -95,15 +100,23 @@ InferenceModules load_inference_modules(const std::string& checkpoint, const Che
     modules.sparse_head->load(sparse_head_archive);
     modules.dense_head->load(dense_head_archive);
 
+    modules.backbone->to(device);
+    modules.sparse_head->to(device);
+    modules.dense_head->to(device);
     modules.backbone->eval();
     modules.sparse_head->eval();
     modules.dense_head->eval();
     return modules;
 }
 
-RawFeatureMaps run_mvp_model(const torch::Tensor& image, InferenceModules& modules, const CheckpointConfig& config) {
+RawFeatureMaps run_mvp_model(
+    const torch::Tensor& image,
+    InferenceModules& modules,
+    const CheckpointConfig& config,
+    torch::Device device
+) {
     torch::NoGradGuard no_grad;
-    const auto input = adapt_image_channels(image, config.input_channels).unsqueeze(0).contiguous();
+    const auto input = adapt_image_channels(image, config.input_channels).unsqueeze(0).contiguous().to(device);
     const auto feature = modules.backbone->forward(input).front();
     const auto sparse = modules.sparse_head->forward(feature);
     const auto dense = modules.dense_head->forward(feature, feature);
@@ -120,18 +133,19 @@ FeatureSet extract_feature_set(
     const std::string& image_path,
     InferenceModules& modules,
     const CheckpointConfig& checkpoint_config,
+    torch::Device device,
     int max_keypoints,
     double semi_dense_threshold
 ) {
     const auto image = load_image_tensor(image_path);
-    const auto maps = run_mvp_model(image, modules, checkpoint_config);
+    const auto maps = run_mvp_model(image, modules, checkpoint_config, device);
     return decode_feature_maps(maps, max_keypoints, semi_dense_threshold);
 }
 
 bool inference_checkpoint_can_load(const std::string& checkpoint) {
     try {
         const auto checkpoint_config = load_checkpoint_config(checkpoint);
-        (void)load_inference_modules(checkpoint, checkpoint_config);
+        (void)load_inference_modules(checkpoint, checkpoint_config, torch::Device(torch::kCPU));
         return true;
     } catch (const c10::Error&) {
         return false;
@@ -189,15 +203,14 @@ int run_extract_command(const CliOptions& options) {
             std::cerr << "extract failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
         }
-        if (options.device != "cpu") {
-            throw std::invalid_argument("only cpu device is supported");
-        }
+        const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
-        auto modules = load_inference_modules(options.checkpoint, checkpoint_config);
+        auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
         const auto feature_set = extract_feature_set(
             options.image,
             modules,
             checkpoint_config,
+            device,
             options.max_keypoints,
             options.semi_dense_threshold
         );
@@ -221,15 +234,14 @@ int run_match_command(const CliOptions& options) {
             std::cerr << "match failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
         }
-        if (options.device != "cpu") {
-            throw std::invalid_argument("only cpu device is supported");
-        }
+        const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
-        auto modules = load_inference_modules(options.checkpoint, checkpoint_config);
+        auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
         const auto features_a = extract_feature_set(
             options.image_a,
             modules,
             checkpoint_config,
+            device,
             options.max_keypoints,
             options.semi_dense_threshold
         );
@@ -237,6 +249,7 @@ int run_match_command(const CliOptions& options) {
             options.image_b,
             modules,
             checkpoint_config,
+            device,
             options.max_keypoints,
             options.semi_dense_threshold
         );
@@ -260,12 +273,10 @@ int run_eval_command(const CliOptions& options) {
             std::cerr << "eval failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
         }
-        if (options.device != "cpu") {
-            throw std::invalid_argument("only cpu device is supported");
-        }
+        const auto device = resolve_compute_device(options.device);
         const auto pairs = loadEvalPairs(options.pairs);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
-        auto modules = load_inference_modules(options.checkpoint, checkpoint_config);
+        auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
 
         std::vector<std::pair<FeatureSet, FeatureSet>> feature_sets;
         std::vector<MatchSet> match_sets;
@@ -276,6 +287,7 @@ int run_eval_command(const CliOptions& options) {
                 pair.first,
                 modules,
                 checkpoint_config,
+                device,
                 options.max_keypoints,
                 options.semi_dense_threshold
             );
@@ -283,6 +295,7 @@ int run_eval_command(const CliOptions& options) {
                 pair.second,
                 modules,
                 checkpoint_config,
+                device,
                 options.max_keypoints,
                 options.semi_dense_threshold
             );
