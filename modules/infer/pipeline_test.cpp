@@ -9,6 +9,9 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
+#include <torch/serialize.h>
+#include <torch/torch.h>
+
 #include "cli/commands.h"
 #include "infer/feature_codec.h"
 #include "infer/pipeline.h"
@@ -83,6 +86,18 @@ std::string write_checkpoint(TempPipelineDirectory& temp_dir) {
     return config.checkpoint;
 }
 
+std::string write_config_only_checkpoint(TempPipelineDirectory& temp_dir) {
+    const auto checkpoint = temp_dir.file("config_only.pt");
+    torch::serialize::OutputArchive archive;
+    torch::serialize::OutputArchive config_archive;
+    config_archive.write("base_channels", torch::tensor({2}, torch::kInt64));
+    config_archive.write("descriptor_dim", torch::tensor({4}, torch::kInt64));
+    config_archive.write("input_channels", torch::tensor({1}, torch::kInt64));
+    archive.write("config", config_archive);
+    archive.save_to(checkpoint.string());
+    return checkpoint.string();
+}
+
 }  // namespace
 
 static void pipeline_train_writes_loadable_checkpoint() {
@@ -132,6 +147,19 @@ static void pipeline_export_writes_loadable_checkpoint() {
     PFM_REQUIRE(pfm::checkpoint_can_load(options.output));
 }
 
+static void pipeline_export_rejects_config_only_checkpoint() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_export_config_only");
+    const auto checkpoint = write_config_only_checkpoint(temp_dir);
+    const auto output = temp_dir.file("exported_config_only.pt");
+
+    pfm::CliOptions options;
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+
+    PFM_REQUIRE(pfm::run_export_command(options) != 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.output));
+}
+
 static void pipeline_match_is_deferred_to_task_8() {
     pfm::CliOptions options;
     options.image_a = "a.png";
@@ -155,6 +183,7 @@ void register_pipeline_tests() {
     register_test("pipeline_train_writes_loadable_checkpoint", pipeline_train_writes_loadable_checkpoint);
     register_test("pipeline_extract_writes_loadable_feature_file", pipeline_extract_writes_loadable_feature_file);
     register_test("pipeline_export_writes_loadable_checkpoint", pipeline_export_writes_loadable_checkpoint);
+    register_test("pipeline_export_rejects_config_only_checkpoint", pipeline_export_rejects_config_only_checkpoint);
     register_test("pipeline_match_is_deferred_to_task_8", pipeline_match_is_deferred_to_task_8);
     register_test("pipeline_eval_is_deferred_to_task_8", pipeline_eval_is_deferred_to_task_8);
 }

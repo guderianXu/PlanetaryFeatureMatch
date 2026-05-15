@@ -111,6 +111,18 @@ RawFeatureMaps run_mvp_model(const torch::Tensor& image, InferenceModules& modul
         dense.confidence.detach().cpu().contiguous()};
 }
 
+bool inference_checkpoint_can_load(const std::string& checkpoint) {
+    try {
+        const auto checkpoint_config = load_checkpoint_config(checkpoint);
+        (void)load_inference_modules(checkpoint, checkpoint_config);
+        return true;
+    } catch (const c10::Error&) {
+        return false;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 void copy_file_contents(const std::string& source, const std::string& destination) {
     std::ifstream input(source, std::ios::binary);
     if (!input) {
@@ -203,12 +215,12 @@ int run_export_command(const CliOptions& options) {
     }
 
     try {
-        if (!checkpoint_can_load(options.checkpoint)) {
+        if (!inference_checkpoint_can_load(options.checkpoint)) {
             std::cerr << "export failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
         }
         copy_file_contents(options.checkpoint, options.output);
-        if (!checkpoint_can_load(options.output)) {
+        if (!inference_checkpoint_can_load(options.output)) {
             std::cerr << "export failed: exported checkpoint cannot load: " << options.output << '\n';
             return 1;
         }
