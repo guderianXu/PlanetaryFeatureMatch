@@ -9,6 +9,7 @@
 #include <torch/nn/functional/upsampling.h>
 #include <torch/torch.h>
 
+#include "core/device.h"
 #include "core/tensor_utils.h"
 #include "data/image_dataset.h"
 #include "data/synthetic_pair.h"
@@ -31,9 +32,6 @@ void validate_config(const TrainConfig& config) {
     }
     if (config.checkpoint.empty()) {
         throw std::invalid_argument("checkpoint must not be empty");
-    }
-    if (config.device != "cpu") {
-        throw std::invalid_argument("only cpu device is supported");
     }
     if (config.epochs <= 0) {
         throw std::invalid_argument("epochs must be positive");
@@ -147,11 +145,14 @@ struct TrainModules {
     DenseHead dense_head{nullptr};
 };
 
-TrainModules make_modules(const TrainConfig& config) {
+TrainModules make_modules(const TrainConfig& config, torch::Device device) {
     TrainModules modules;
     modules.backbone = Backbone(INPUT_CHANNELS, config.base_channels);
     modules.sparse_head = SparseHead(config.base_channels, config.descriptor_dim);
     modules.dense_head = DenseHead(config.base_channels);
+    modules.backbone->to(device);
+    modules.sparse_head->to(device);
+    modules.dense_head->to(device);
     modules.backbone->train();
     modules.sparse_head->train();
     modules.dense_head->train();
@@ -215,7 +216,14 @@ torch::Tensor training_loss(TrainModules& modules, const torch::Tensor& batch) {
            confidence_bce_loss(dense.confidence, heatmap_mask);
 }
 
+void move_modules_to_device(TrainModules& modules, torch::Device device) {
+    modules.backbone->to(device);
+    modules.sparse_head->to(device);
+    modules.dense_head->to(device);
+}
+
 void save_checkpoint(const TrainConfig& config, TrainModules& modules) {
+    move_modules_to_device(modules, torch::Device(torch::kCPU));
     torch::serialize::OutputArchive archive;
     torch::serialize::OutputArchive config_archive;
     config_archive.write("base_channels", torch::tensor({config.base_channels}, torch::kInt64));
@@ -261,8 +269,9 @@ torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image) {
 
 TrainResult train_model(const TrainConfig& config) {
     validate_config(config);
+    const auto device = resolve_compute_device(config.device);
     ImageDataset dataset(config.image_dir);
-    auto modules = make_modules(config);
+    auto modules = make_modules(config, device);
     auto optimizer = torch::optim::Adam(module_parameters(modules), torch::optim::AdamOptions(config.learning_rate));
 
     TrainResult result;
@@ -281,7 +290,7 @@ TrainResult train_model(const TrainConfig& config) {
                 images.push_back(limit_training_image_size(ensure_grayscale(dataset.load(index))));
             }
 
-            auto batch = stack_batch(images);
+            auto batch = stack_batch(images).to(device);
             auto loss = training_loss(modules, batch);
             optimizer.zero_grad();
             loss.backward();

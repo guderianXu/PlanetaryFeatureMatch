@@ -134,6 +134,49 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument() {
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_learning_rate));
 }
 
+static void trainer_invalid_device_throws_invalid_argument() {
+    TempTrainingDirectory temp_dir("pfm_trainer_invalid_device");
+    require_image_written(temp_dir.file("image.png"), 0);
+    auto config = tiny_config(temp_dir);
+    config.device = "cuda:abc";
+    temp_dir.file("checkpoint.pt");
+
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(config));
+}
+
+static void trainer_cuda_device_is_strictly_validated() {
+    if (torch::cuda::is_available()) {
+        return;
+    }
+
+    TempTrainingDirectory temp_dir("pfm_trainer_cuda_unavailable");
+    require_image_written(temp_dir.file("image.png"), 0);
+    auto config = tiny_config(temp_dir);
+    config.device = "cuda";
+    temp_dir.file("checkpoint.pt");
+
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(config));
+}
+
+static void trainer_cuda_one_epoch_saves_cpu_loadable_checkpoint_when_available() {
+    if (!torch::cuda::is_available()) {
+        return;
+    }
+
+    TempTrainingDirectory temp_dir("pfm_trainer_cuda_checkpoint");
+    require_image_written(temp_dir.file("image.png"), 0);
+    auto config = tiny_config(temp_dir);
+    config.device = "cuda";
+    temp_dir.file("checkpoint.pt");
+
+    auto result = pfm::train_model(config);
+
+    PFM_REQUIRE(result.epochs_completed == 1);
+    PFM_REQUIRE(result.final_loss > 0.0);
+    PFM_REQUIRE(std::filesystem::exists(config.checkpoint));
+    PFM_REQUIRE(pfm::checkpoint_can_load(config.checkpoint));
+}
+
 static void trainer_resizes_dense_warp_as_local_offsets() {
     auto xy = torch::meshgrid({torch::arange(32, torch::kFloat32), torch::arange(32, torch::kFloat32)}, "ij");
     auto warp = torch::stack({xy[1] + 1.0F, xy[0]}, 2).unsqueeze(0);
@@ -181,6 +224,11 @@ void register_trainer_tests() {
                   trainer_missing_image_dir_throws_invalid_argument);
     register_test("trainer_invalid_numeric_parameters_throw_invalid_argument",
                   trainer_invalid_numeric_parameters_throw_invalid_argument);
+    register_test("trainer_invalid_device_throws_invalid_argument", trainer_invalid_device_throws_invalid_argument);
+    register_test("trainer_cuda_device_is_strictly_validated", trainer_cuda_device_is_strictly_validated);
+    register_test(
+        "trainer_cuda_one_epoch_saves_cpu_loadable_checkpoint_when_available",
+        trainer_cuda_one_epoch_saves_cpu_loadable_checkpoint_when_available);
     register_test("trainer_resizes_dense_warp_as_local_offsets",
                   trainer_resizes_dense_warp_as_local_offsets);
     register_test("trainer_bounds_descriptor_loss_spatial_samples",

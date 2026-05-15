@@ -22,7 +22,7 @@ struct TrainResult {
 };
 
 /// Trains the real-image MVP model for the configured number of epochs and saves a checkpoint.
-/// @param config Training image directory, checkpoint path, CPU device, model dimensions, and optimizer settings.
+/// @param config Training image directory, checkpoint path, compute device, model dimensions, and optimizer settings.
 /// @return Completed epoch count with first and final observed training losses.
 /// @throws std::invalid_argument if paths, numeric settings, or the requested device are invalid.
 TrainResult train_model(const TrainConfig& config);
