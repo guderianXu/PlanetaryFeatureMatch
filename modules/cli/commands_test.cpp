@@ -160,13 +160,13 @@ static void run_extract_without_checkpoint_path_fails_cleanly() {
     PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_extract_with_required_paths_succeeds() {
+static void run_extract_with_required_paths_fails_without_loadable_checkpoint() {
     const char* argv[] = {"pfm", "extract", "--image", "a.png", "--checkpoint", "model.pt", "--output", "a.pfm"};
 
-    PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) == 0);
+    PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_match_with_required_paths_succeeds() {
+static void run_match_with_required_paths_returns_task_8_failure() {
     const char* argv[] = {
         "pfm",
         "match",
@@ -180,10 +180,10 @@ static void run_match_with_required_paths_succeeds() {
         "matches.json",
     };
 
-    PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) == 0);
+    PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) != 0);
 }
 
-static void run_eval_with_required_paths_succeeds() {
+static void run_eval_with_required_paths_returns_task_8_failure() {
     const char* argv[] = {
         "pfm",
         "eval",
@@ -195,10 +195,10 @@ static void run_eval_with_required_paths_succeeds() {
         "report.json",
     };
 
-    PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) == 0);
+    PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_train_with_required_paths_succeeds() {
+static void run_train_with_required_paths_fails_without_image_directory() {
     const char* argv[] = {
         "pfm",
         "train",
@@ -212,13 +212,13 @@ static void run_train_with_required_paths_succeeds() {
         "1",
     };
 
-    PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) == 0);
+    PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) != 0);
 }
 
-static void run_export_with_required_paths_succeeds() {
+static void run_export_with_required_paths_fails_without_loadable_checkpoint() {
     const char* argv[] = {"pfm", "export", "--checkpoint", "model.pt", "--output", "exported.pt"};
 
-    PFM_REQUIRE(pfm::run_cli(6, const_cast<char**>(argv)) == 0);
+    PFM_REQUIRE(pfm::run_cli(6, const_cast<char**>(argv)) != 0);
 }
 
 void register_cli_tests() {
@@ -235,9 +235,14 @@ void register_cli_tests() {
         "run_extract_without_checkpoint_path_fails_cleanly",
         run_extract_without_checkpoint_path_fails_cleanly
     );
-    register_test("run_extract_with_required_paths_succeeds", run_extract_with_required_paths_succeeds);
-    register_test("run_match_with_required_paths_succeeds", run_match_with_required_paths_succeeds);
-    register_test("run_eval_with_required_paths_succeeds", run_eval_with_required_paths_succeeds);
-    register_test("run_train_with_required_paths_succeeds", run_train_with_required_paths_succeeds);
-    register_test("run_export_with_required_paths_succeeds", run_export_with_required_paths_succeeds);
+    register_test("run_extract_with_required_paths_fails_without_loadable_checkpoint",
+                  run_extract_with_required_paths_fails_without_loadable_checkpoint);
+    register_test("run_match_with_required_paths_returns_task_8_failure",
+                  run_match_with_required_paths_returns_task_8_failure);
+    register_test("run_eval_with_required_paths_returns_task_8_failure",
+                  run_eval_with_required_paths_returns_task_8_failure);
+    register_test("run_train_with_required_paths_fails_without_image_directory",
+                  run_train_with_required_paths_fails_without_image_directory);
+    register_test("run_export_with_required_paths_fails_without_loadable_checkpoint",
+                  run_export_with_required_paths_fails_without_loadable_checkpoint);
 }

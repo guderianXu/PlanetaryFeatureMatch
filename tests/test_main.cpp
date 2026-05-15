@@ -20,6 +20,8 @@ void register_test(const std::string& name, TestFn fn) {
 }
 
 void register_tensor_utils_tests();
+void register_image_dataset_tests();
+void register_image_io_tests();
 void register_normalization_tests();
 void register_warp_tests();
 void register_synthetic_pair_tests();
@@ -27,12 +29,21 @@ void register_backbone_tests();
 void register_sparse_head_tests();
 void register_dense_head_tests();
 void register_matcher_tests();
+void register_feature_codec_tests();
+void register_feature_extractor_tests();
+void register_match_codec_tests();
+void register_matching_pipeline_tests();
+void register_eval_pipeline_tests();
+void register_pipeline_tests();
 void register_loss_tests();
 void register_metric_tests();
 void register_cli_tests();
+void register_trainer_tests();
 
 int main() {
     register_tensor_utils_tests();
+    register_image_dataset_tests();
+    register_image_io_tests();
     register_normalization_tests();
     register_warp_tests();
     register_synthetic_pair_tests();
@@ -40,9 +51,16 @@ int main() {
     register_sparse_head_tests();
     register_dense_head_tests();
     register_matcher_tests();
+    register_feature_codec_tests();
+    register_feature_extractor_tests();
+    register_match_codec_tests();
+    register_matching_pipeline_tests();
+    register_eval_pipeline_tests();
+    register_pipeline_tests();
     register_loss_tests();
     register_metric_tests();
     register_cli_tests();
+    register_trainer_tests();
 
     int failures = 0;
     for (const auto& test : registry()) {
