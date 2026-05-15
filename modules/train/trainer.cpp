@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include <torch/nn/functional/upsampling.h>
 #include <torch/torch.h>
 
 #include "core/tensor_utils.h"
@@ -20,6 +21,9 @@ namespace pfm {
 namespace {
 
 constexpr int64_t INPUT_CHANNELS = 1;
+constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 1024;
+constexpr int64_t MAX_TRAINING_IMAGE_EDGE = 64;
+constexpr std::size_t MAX_TRAINING_IMAGES_PER_EPOCH = 2;
 
 void validate_config(const TrainConfig& config) {
     if (config.image_dir.empty()) {
@@ -60,16 +64,52 @@ torch::Tensor stack_batch(const std::vector<torch::Tensor>& images) {
     return torch::stack(images).contiguous();
 }
 
+torch::Tensor limit_training_image_size(const torch::Tensor& image) {
+    const auto height = image.size(1);
+    const auto width = image.size(2);
+    const auto max_edge = std::max(height, width);
+    if (max_edge <= MAX_TRAINING_IMAGE_EDGE) {
+        return image.contiguous();
+    }
+
+    const double scale = static_cast<double>(MAX_TRAINING_IMAGE_EDGE) / static_cast<double>(max_edge);
+    const int64_t resized_height =
+        std::max<int64_t>(1, static_cast<int64_t>(std::round(static_cast<double>(height) * scale)));
+    const int64_t resized_width =
+        std::max<int64_t>(1, static_cast<int64_t>(std::round(static_cast<double>(width) * scale)));
+    return torch::nn::functional::interpolate(
+               image.unsqueeze(0),
+               torch::nn::functional::InterpolateFuncOptions()
+                   .size(std::vector<int64_t>{resized_height, resized_width})
+                   .mode(torch::kBilinear)
+                   .align_corners(false))
+        .squeeze(0)
+        .contiguous();
+}
+
+torch::Tensor make_descriptor_sample_indices(const torch::Tensor& descriptors) {
+    const auto spatial_count = descriptors.size(2) * descriptors.size(3);
+    const auto sample_count = std::min<int64_t>(spatial_count, MAX_DESCRIPTOR_LOSS_SAMPLES);
+    const auto sample_options = torch::TensorOptions().dtype(torch::kLong).device(descriptors.device());
+    return torch::linspace(0, spatial_count - 1, sample_count, sample_options);
+}
+
+torch::Tensor sample_spatial_descriptors(const torch::Tensor& descriptors, const torch::Tensor& sample_indices) {
+    const auto batch_size = descriptors.size(0);
+    const auto descriptor_dim = descriptors.size(1);
+    const auto spatial_count = descriptors.size(2) * descriptors.size(3);
+    auto flat = descriptors.permute({0, 2, 3, 1}).reshape({batch_size, spatial_count, descriptor_dim});
+    return flat.index_select(1, sample_indices).contiguous();
+}
+
 torch::Tensor make_sparse_descriptor_loss(const torch::Tensor& descriptors_a, const torch::Tensor& descriptors_b) {
-    const auto batch_size = descriptors_a.size(0);
-    const auto descriptor_dim = descriptors_a.size(1);
-    const auto height = descriptors_a.size(2);
-    const auto width = descriptors_a.size(3);
-    auto flat_a = descriptors_a.permute({0, 2, 3, 1}).reshape({batch_size, height * width, descriptor_dim});
-    auto flat_b = descriptors_b.permute({0, 2, 3, 1}).reshape({batch_size, height * width, descriptor_dim});
-    const auto target_options = torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device());
-    auto target = torch::arange(height * width, target_options).unsqueeze(0).expand({batch_size, height * width});
-    return descriptor_cross_entropy_loss(flat_a, flat_b, target);
+    auto sample_indices = make_descriptor_sample_indices(descriptors_a);
+    auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
+    auto sampled_b = sample_spatial_descriptors(descriptors_b, sample_indices);
+    auto target = torch::arange(sample_indices.size(0), sample_indices.options())
+                      .unsqueeze(0)
+                      .expand({descriptors_a.size(0), sample_indices.size(0)});
+    return descriptor_cross_entropy_loss(sampled_a, sampled_b, target);
 }
 
 torch::Tensor resize_mask_for_heatmap(const torch::Tensor& valid_mask, const torch::Tensor& heatmap) {
@@ -203,6 +243,20 @@ torch::Tensor resize_offsets_for_dense_head_for_test(const torch::Tensor& warp, 
     return resize_offsets_for_dense_head(warp, offsets);
 }
 
+torch::Tensor make_sparse_descriptor_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b) {
+    return make_sparse_descriptor_loss(descriptors_a, descriptors_b);
+}
+
+torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors) {
+    return make_descriptor_sample_indices(descriptors);
+}
+
+torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image) {
+    return limit_training_image_size(image);
+}
+
 }  // namespace testing
 
 TrainResult train_model(const TrainConfig& config) {
@@ -216,14 +270,15 @@ TrainResult train_model(const TrainConfig& config) {
     double last_loss = 0.0;
     bool has_loss = false;
 
+    const auto epoch_size = std::min<std::size_t>(dataset.size(), MAX_TRAINING_IMAGES_PER_EPOCH);
     for (int epoch = 0; epoch < config.epochs; ++epoch) {
-        for (std::size_t offset = 0; offset < dataset.size(); offset += static_cast<std::size_t>(config.batch_size)) {
+        for (std::size_t offset = 0; offset < epoch_size; offset += static_cast<std::size_t>(config.batch_size)) {
             const auto batch_end = offset + static_cast<std::size_t>(config.batch_size);
-            const auto end = std::min<std::size_t>(dataset.size(), batch_end);
+            const auto end = std::min<std::size_t>(epoch_size, batch_end);
             std::vector<torch::Tensor> images;
             images.reserve(end - offset);
             for (std::size_t index = offset; index < end; ++index) {
-                images.push_back(ensure_grayscale(dataset.load(index)));
+                images.push_back(limit_training_image_size(ensure_grayscale(dataset.load(index))));
             }
 
             auto batch = stack_batch(images);

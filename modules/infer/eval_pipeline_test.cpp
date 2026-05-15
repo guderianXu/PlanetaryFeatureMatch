@@ -88,6 +88,21 @@ static void eval_pipeline_rejects_empty_pairs_file() {
     PFM_REQUIRE_INVALID_ARG(pfm::loadEvalPairs(pairs.string()));
 }
 
+static void eval_pipeline_loads_quoted_paths_with_spaces() {
+    TempEvalDirectory temp_dir("pfm_eval_pairs_quoted");
+    const auto pairs = temp_dir.file("pairs.txt");
+    {
+        std::ofstream stream(pairs);
+        stream << "\"/tmp/path with spaces/a.tif\" \"/tmp/path with spaces/b.tif\"\n";
+    }
+
+    const auto loaded = pfm::loadEvalPairs(pairs.string());
+
+    PFM_REQUIRE(loaded.size() == 1);
+    PFM_REQUIRE(loaded[0].first == "/tmp/path with spaces/a.tif");
+    PFM_REQUIRE(loaded[0].second == "/tmp/path with spaces/b.tif");
+}
+
 static void eval_pipeline_aggregates_known_metrics() {
     const std::vector<std::pair<pfm::FeatureSet, pfm::FeatureSet>> feature_sets = {
         {makeEvalFeatureSet(4), makeEvalFeatureSet(9)},
@@ -139,6 +154,7 @@ static void eval_pipeline_saves_report_archive_fields() {
 
 void register_eval_pipeline_tests() {
     register_test("eval_pipeline_rejects_empty_pairs_file", eval_pipeline_rejects_empty_pairs_file);
+    register_test("eval_pipeline_loads_quoted_paths_with_spaces", eval_pipeline_loads_quoted_paths_with_spaces);
     register_test("eval_pipeline_aggregates_known_metrics", eval_pipeline_aggregates_known_metrics);
     register_test(
         "eval_pipeline_no_sparse_matches_returns_zero_sparse_score",

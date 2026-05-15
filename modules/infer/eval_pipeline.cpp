@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 #include <torch/serialize.h>
@@ -17,6 +18,23 @@ float tensorAverageOrZero(const torch::Tensor& tensor) {
     return tensor.to(torch::kCPU, torch::kFloat32).mean().item<float>();
 }
 
+std::string parsePathToken(std::istringstream& stream) {
+    stream >> std::ws;
+    if (!stream) {
+        return {};
+    }
+    if (stream.peek() != '"') {
+        std::string token;
+        stream >> token;
+        return token;
+    }
+
+    stream.get();
+    std::string token;
+    std::getline(stream, token, '"');
+    return token;
+}
+
 }  // namespace
 
 std::vector<std::pair<std::string, std::string>> loadEvalPairs(const std::string& path) {
@@ -26,10 +44,14 @@ std::vector<std::pair<std::string, std::string>> loadEvalPairs(const std::string
     }
 
     std::vector<std::pair<std::string, std::string>> pairs;
-    std::string image_a;
-    std::string image_b;
-    while (input >> image_a >> image_b) {
-        pairs.push_back(std::make_pair(image_a, image_b));
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream stream(line);
+        auto image_a = parsePathToken(stream);
+        auto image_b = parsePathToken(stream);
+        if (!image_a.empty() && !image_b.empty()) {
+            pairs.push_back(std::make_pair(image_a, image_b));
+        }
     }
     if (pairs.empty()) {
         throw std::invalid_argument("pairs file is empty: " + path);

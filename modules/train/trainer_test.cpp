@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <random>
@@ -16,6 +17,11 @@
 namespace pfm::testing {
 
 torch::Tensor resize_offsets_for_dense_head_for_test(const torch::Tensor& warp, const torch::Tensor& offsets);
+torch::Tensor make_sparse_descriptor_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b);
+torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors);
+torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image);
 
 }  // namespace pfm::testing
 
@@ -142,6 +148,33 @@ static void trainer_resizes_dense_warp_as_local_offsets() {
     PFM_REQUIRE(torch::allclose(target.index({0, 1}), expected_y, 1.0e-6, 1.0e-6));
 }
 
+static void trainer_bounds_descriptor_loss_spatial_samples() {
+    const int64_t height = 80;
+    const int64_t width = 80;
+    auto grid = torch::arange(height * width, torch::kFloat32).reshape({1, 1, height, width});
+    auto descriptors_a = torch::cat({grid, grid + 1.0F, grid + 2.0F, grid + 3.0F}, 1);
+    auto descriptors_b = descriptors_a.clone();
+
+    auto sample_indices = pfm::testing::make_descriptor_sample_indices_for_test(descriptors_a);
+    auto loss = pfm::testing::make_sparse_descriptor_loss_for_test(descriptors_a, descriptors_b);
+
+    PFM_REQUIRE(sample_indices.size(0) == 1024);
+    PFM_REQUIRE(sample_indices[0].item<int64_t>() == 0);
+    PFM_REQUIRE(sample_indices[-1].item<int64_t>() == height * width - 1);
+    PFM_REQUIRE(loss.defined());
+    PFM_REQUIRE(loss.dim() == 0);
+    PFM_REQUIRE(std::isfinite(loss.item<float>()));
+}
+
+static void trainer_limits_large_training_image_edge() {
+    auto image = torch::zeros({1, 900, 600}, torch::kFloat32);
+
+    auto resized = pfm::testing::limit_training_image_size_for_test(image);
+
+    PFM_REQUIRE(resized.sizes() == torch::IntArrayRef({1, 64, 43}));
+    PFM_REQUIRE(resized.is_contiguous());
+}
+
 void register_trainer_tests() {
     register_test("trainer_one_epoch_saves_loadable_checkpoint", trainer_one_epoch_saves_loadable_checkpoint);
     register_test("trainer_missing_image_dir_throws_invalid_argument",
@@ -150,4 +183,7 @@ void register_trainer_tests() {
                   trainer_invalid_numeric_parameters_throw_invalid_argument);
     register_test("trainer_resizes_dense_warp_as_local_offsets",
                   trainer_resizes_dense_warp_as_local_offsets);
+    register_test("trainer_bounds_descriptor_loss_spatial_samples",
+                  trainer_bounds_descriptor_loss_spatial_samples);
+    register_test("trainer_limits_large_training_image_edge", trainer_limits_large_training_image_edge);
 }
