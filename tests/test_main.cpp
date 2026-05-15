@@ -19,6 +19,7 @@ void register_test(const std::string& name, TestFn fn) {
     registry().push_back({name, fn});
 }
 
+void register_device_tests();
 void register_tensor_utils_tests();
 void register_image_dataset_tests();
 void register_image_io_tests();
@@ -41,6 +42,7 @@ void register_cli_tests();
 void register_trainer_tests();
 
 int main() {
+    register_device_tests();
     register_tensor_utils_tests();
     register_image_dataset_tests();
     register_image_io_tests();
