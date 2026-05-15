@@ -49,6 +49,7 @@ add_executable(pfm_tests
     modules/infer/feature_codec_test.cpp
     modules/infer/feature_extractor_test.cpp
     modules/infer/match_codec_test.cpp
+    modules/infer/pipeline_test.cpp
     modules/data/image_dataset_test.cpp
     modules/data/image_io_test.cpp
     modules/data/normalization_test.cpp
