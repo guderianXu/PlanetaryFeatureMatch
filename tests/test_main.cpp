@@ -32,6 +32,8 @@ void register_matcher_tests();
 void register_feature_codec_tests();
 void register_feature_extractor_tests();
 void register_match_codec_tests();
+void register_matching_pipeline_tests();
+void register_eval_pipeline_tests();
 void register_pipeline_tests();
 void register_loss_tests();
 void register_metric_tests();
@@ -52,6 +54,8 @@ int main() {
     register_feature_codec_tests();
     register_feature_extractor_tests();
     register_match_codec_tests();
+    register_matching_pipeline_tests();
+    register_eval_pipeline_tests();
     register_pipeline_tests();
     register_loss_tests();
     register_metric_tests();

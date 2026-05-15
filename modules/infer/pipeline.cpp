@@ -1,6 +1,5 @@
 #include "infer/pipeline.h"
 
-#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -12,9 +11,11 @@
 #include <torch/torch.h>
 
 #include "data/image_io.h"
+#include "infer/eval_pipeline.h"
 #include "infer/feature_codec.h"
 #include "infer/feature_extractor.h"
 #include "infer/match_codec.h"
+#include "infer/matching_pipeline.h"
 #include "models/backbone.h"
 #include "models/dense_head.h"
 #include "models/sparse_head.h"
@@ -154,129 +155,6 @@ void copy_file_contents(const std::string& source, const std::string& destinatio
     }
 }
 
-std::pair<torch::Tensor, torch::Tensor> match_sparse_features(
-    const FeatureSet& features_a,
-    const FeatureSet& features_b
-) {
-    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-    if (!features_a.descriptors.defined() || !features_b.descriptors.defined()) {
-        throw std::invalid_argument("descriptors must be defined");
-    }
-    if (features_a.descriptors.dim() != 2 || features_b.descriptors.dim() != 2) {
-        throw std::invalid_argument("descriptors must be 2D");
-    }
-    if (features_a.descriptors.size(1) != features_b.descriptors.size(1)) {
-        throw std::invalid_argument("descriptor dimensions must match");
-    }
-    if (features_a.descriptors.size(0) == 0 || features_b.descriptors.size(0) == 0) {
-        return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
-    }
-
-    const auto descriptors_a = torch::nn::functional::normalize(
-        features_a.descriptors.to(torch::kCPU, torch::kFloat32),
-        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1).eps(1.0e-12)
-    );
-    const auto descriptors_b = torch::nn::functional::normalize(
-        features_b.descriptors.to(torch::kCPU, torch::kFloat32),
-        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1).eps(1.0e-12)
-    );
-    const auto similarity = torch::matmul(descriptors_a, descriptors_b.transpose(0, 1));
-    const auto best_b = std::get<1>(torch::max(similarity, 1)).to(torch::kCPU, torch::kInt64).contiguous();
-    const auto best_score = std::get<0>(torch::max(similarity, 1)).to(torch::kCPU, torch::kFloat32).contiguous();
-    const auto best_a = std::get<1>(torch::max(similarity, 0)).to(torch::kCPU, torch::kInt64).contiguous();
-
-    std::vector<int64_t> match_indices;
-    std::vector<float> match_scores;
-    auto best_b_accessor = best_b.accessor<int64_t, 1>();
-    auto best_a_accessor = best_a.accessor<int64_t, 1>();
-    auto score_accessor = best_score.accessor<float, 1>();
-    for (int64_t index_a = 0; index_a < best_b.size(0); ++index_a) {
-        const int64_t index_b = best_b_accessor[index_a];
-        if (best_a_accessor[index_b] == index_a) {
-            match_indices.push_back(index_a);
-            match_indices.push_back(index_b);
-            match_scores.push_back(score_accessor[index_a]);
-        }
-    }
-
-    const int64_t match_count = static_cast<int64_t>(match_scores.size());
-    if (match_count == 0) {
-        return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
-    }
-    return {
-        torch::from_blob(match_indices.data(), {match_count, 2}, long_options).clone().contiguous(),
-        torch::from_blob(match_scores.data(), {match_count}, float_options).clone().contiguous()};
-}
-
-MatchSet match_features(const FeatureSet& features_a, const FeatureSet& features_b) {
-    if (!features_a.dense_points.defined() || !features_b.dense_points.defined() ||
-        !features_a.dense_confidence.defined() || !features_b.dense_confidence.defined()) {
-        throw std::invalid_argument("dense features must be defined");
-    }
-    const auto sparse = match_sparse_features(features_a, features_b);
-    const int64_t dense_count = std::min(features_a.dense_points.size(0), features_b.dense_points.size(0));
-    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    if (dense_count == 0) {
-        return MatchSet{
-            sparse.first,
-            sparse.second,
-            torch::empty({0, 2}, float_options),
-            torch::empty({0, 2}, float_options),
-            torch::empty({0}, float_options)};
-    }
-
-    const auto confidence_a = features_a.dense_confidence.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count);
-    const auto confidence_b = features_b.dense_confidence.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count);
-    return MatchSet{
-        sparse.first,
-        sparse.second,
-        features_a.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
-        features_b.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
-        torch::minimum(confidence_a, confidence_b).contiguous()};
-}
-
-std::vector<std::pair<std::string, std::string>> load_pairs(const std::string& path) {
-    std::ifstream input(path);
-    if (!input) {
-        throw std::invalid_argument("failed to open pairs file: " + path);
-    }
-
-    std::vector<std::pair<std::string, std::string>> pairs;
-    std::string image_a;
-    std::string image_b;
-    while (input >> image_a >> image_b) {
-        pairs.push_back(std::make_pair(image_a, image_b));
-    }
-    if (pairs.empty()) {
-        throw std::invalid_argument("pairs file is empty: " + path);
-    }
-    return pairs;
-}
-
-float tensor_average_or_zero(const torch::Tensor& tensor) {
-    if (!tensor.defined() || tensor.numel() == 0) {
-        return 0.0F;
-    }
-    return tensor.to(torch::kCPU, torch::kFloat32).mean().item<float>();
-}
-
-void save_eval_report(
-    const std::string& path,
-    double average_matches,
-    double average_sparse_score,
-    double average_dense_confidence,
-    double semi_dense_coverage
-) {
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::serialize::OutputArchive archive;
-    archive.write("average_matches", torch::tensor({static_cast<float>(average_matches)}, options));
-    archive.write("average_sparse_score", torch::tensor({static_cast<float>(average_sparse_score)}, options));
-    archive.write("average_dense_confidence", torch::tensor({static_cast<float>(average_dense_confidence)}, options));
-    archive.write("semi_dense_coverage", torch::tensor({static_cast<float>(semi_dense_coverage)}, options));
-    archive.save_to(path);
-}
-
 }  // namespace
 
 int run_train_command(const CliOptions& options) {
@@ -362,7 +240,7 @@ int run_match_command(const CliOptions& options) {
             options.max_keypoints,
             options.semi_dense_threshold
         );
-        save_match_set(match_features(features_a, features_b), options.output);
+        save_match_set(matchFeatureSets(features_a, features_b), options.output);
         std::cout << "matching complete: matches=" << options.output << '\n';
         return 0;
     } catch (const std::exception& error) {
@@ -385,45 +263,34 @@ int run_eval_command(const CliOptions& options) {
         if (options.device != "cpu") {
             throw std::invalid_argument("only cpu device is supported");
         }
-        const auto pairs = load_pairs(options.pairs);
+        const auto pairs = loadEvalPairs(options.pairs);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config);
 
-        double total_matches = 0.0;
-        double total_sparse_score = 0.0;
-        double total_dense_confidence = 0.0;
-        double total_coverage = 0.0;
+        std::vector<std::pair<FeatureSet, FeatureSet>> feature_sets;
+        std::vector<MatchSet> match_sets;
+        feature_sets.reserve(pairs.size());
+        match_sets.reserve(pairs.size());
         for (const auto& pair : pairs) {
-            const auto features_a = extract_feature_set(
+            auto features_a = extract_feature_set(
                 pair.first,
                 modules,
                 checkpoint_config,
                 options.max_keypoints,
                 options.semi_dense_threshold
             );
-            const auto features_b = extract_feature_set(
+            auto features_b = extract_feature_set(
                 pair.second,
                 modules,
                 checkpoint_config,
                 options.max_keypoints,
                 options.semi_dense_threshold
             );
-            const auto matches = match_features(features_a, features_b);
-            total_matches += static_cast<double>(matches.sparse_matches.size(0));
-            total_sparse_score += static_cast<double>(tensor_average_or_zero(matches.sparse_scores));
-            total_dense_confidence += static_cast<double>(tensor_average_or_zero(matches.confidence));
-            const int64_t dense_base = std::max<int64_t>(features_a.dense_points.size(0), 1);
-            total_coverage += static_cast<double>(matches.points_a.size(0)) / static_cast<double>(dense_base);
+            match_sets.push_back(matchFeatureSets(features_a, features_b));
+            feature_sets.push_back(std::make_pair(std::move(features_a), std::move(features_b)));
         }
 
-        const double pair_count = static_cast<double>(pairs.size());
-        save_eval_report(
-            options.output,
-            total_matches / pair_count,
-            total_sparse_score / pair_count,
-            total_dense_confidence / pair_count,
-            total_coverage / pair_count
-        );
+        saveEvalReport(options.output, aggregateEvalReport(feature_sets, match_sets));
         std::cout << "evaluation complete: report=" << options.output << '\n';
         return 0;
     } catch (const std::exception& error) {

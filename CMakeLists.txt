@@ -13,9 +13,11 @@ enable_testing()
 add_library(pfm STATIC
     modules/cli/commands.cpp
     modules/core/tensor_utils.cpp
+    modules/infer/eval_pipeline.cpp
     modules/infer/feature_codec.cpp
     modules/infer/feature_extractor.cpp
     modules/infer/match_codec.cpp
+    modules/infer/matching_pipeline.cpp
     modules/infer/pipeline.cpp
     modules/data/image_dataset.cpp
     modules/data/image_io.cpp
@@ -46,9 +48,11 @@ add_executable(pfm_tests
     tests/test_main.cpp
     modules/cli/commands_test.cpp
     modules/core/tensor_utils_test.cpp
+    modules/infer/eval_pipeline_test.cpp
     modules/infer/feature_codec_test.cpp
     modules/infer/feature_extractor_test.cpp
     modules/infer/match_codec_test.cpp
+    modules/infer/matching_pipeline_test.cpp
     modules/infer/pipeline_test.cpp
     modules/data/image_dataset_test.cpp
     modules/data/image_io_test.cpp
