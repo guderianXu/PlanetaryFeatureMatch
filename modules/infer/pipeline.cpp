@@ -139,7 +139,13 @@ RawFeatureMaps run_mvp_model(
         dense_confidence.detach().cpu().contiguous()};
 }
 
-FeatureSet extract_feature_set(
+struct ExtractedFeatureSet {
+    FeatureSet features;
+    int64_t feature_map_width = 0;
+    int64_t feature_map_height = 0;
+};
+
+ExtractedFeatureSet extract_feature_set(
     const std::string& image_path,
     InferenceModules& modules,
     const CheckpointConfig& checkpoint_config,
@@ -151,7 +157,10 @@ FeatureSet extract_feature_set(
     const auto image = load_image_tensor(image_path);
     const auto maps = run_mvp_model(image, modules, checkpoint_config, device);
     const auto intensity_mask = make_intensity_mask(image, min_keypoint_intensity).to(torch::kCPU);
-    return decode_feature_maps(maps, max_keypoints, semi_dense_threshold, intensity_mask);
+    return ExtractedFeatureSet{
+        decode_feature_maps(maps, max_keypoints, semi_dense_threshold, intensity_mask),
+        maps.heatmap.size(3),
+        maps.heatmap.size(2)};
 }
 
 bool inference_checkpoint_can_load(const std::string& checkpoint) {
@@ -225,7 +234,7 @@ int run_extract_command(const CliOptions& options) {
         const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
-        const auto feature_set = extract_feature_set(
+        const auto extracted = extract_feature_set(
             options.image,
             modules,
             checkpoint_config,
@@ -234,9 +243,14 @@ int run_extract_command(const CliOptions& options) {
             options.semi_dense_threshold,
             options.min_keypoint_intensity
         );
-        save_feature_set(feature_set, options.output);
+        save_feature_set(extracted.features, options.output);
         if (!options.visualization_dir.empty()) {
-            (void)save_feature_visualization(options.image, feature_set, options.visualization_dir);
+            (void)save_feature_visualization(
+                options.image,
+                extracted.features,
+                options.visualization_dir,
+                extracted.feature_map_width,
+                extracted.feature_map_height);
         }
         std::cout << "extraction complete: features=" << options.output << '\n';
         return 0;
@@ -260,7 +274,7 @@ int run_match_command(const CliOptions& options) {
         const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
-        const auto features_a = extract_feature_set(
+        const auto extracted_a = extract_feature_set(
             options.image_a,
             modules,
             checkpoint_config,
@@ -269,7 +283,7 @@ int run_match_command(const CliOptions& options) {
             options.semi_dense_threshold,
             options.min_keypoint_intensity
         );
-        const auto features_b = extract_feature_set(
+        const auto extracted_b = extract_feature_set(
             options.image_b,
             modules,
             checkpoint_config,
@@ -278,10 +292,18 @@ int run_match_command(const CliOptions& options) {
             options.semi_dense_threshold,
             options.min_keypoint_intensity
         );
-        const auto match_set = matchFeatureSets(features_a, features_b);
+        const auto match_set = matchFeatureSets(extracted_a.features, extracted_b.features);
         save_match_set(match_set, options.output);
         if (!options.visualization_dir.empty()) {
-            (void)save_match_visualization(options.image_a, options.image_b, match_set, options.visualization_dir);
+            (void)save_match_visualization(
+                options.image_a,
+                options.image_b,
+                match_set,
+                options.visualization_dir,
+                extracted_a.feature_map_width,
+                extracted_a.feature_map_height,
+                extracted_b.feature_map_width,
+                extracted_b.feature_map_height);
         }
         std::cout << "matching complete: matches=" << options.output << '\n';
         return 0;
@@ -312,7 +334,7 @@ int run_eval_command(const CliOptions& options) {
         feature_sets.reserve(pairs.size());
         match_sets.reserve(pairs.size());
         for (const auto& pair : pairs) {
-            auto features_a = extract_feature_set(
+            auto extracted_a = extract_feature_set(
                 pair.first,
                 modules,
                 checkpoint_config,
@@ -321,7 +343,7 @@ int run_eval_command(const CliOptions& options) {
                 options.semi_dense_threshold,
                 options.min_keypoint_intensity
             );
-            auto features_b = extract_feature_set(
+            auto extracted_b = extract_feature_set(
                 pair.second,
                 modules,
                 checkpoint_config,
@@ -330,8 +352,8 @@ int run_eval_command(const CliOptions& options) {
                 options.semi_dense_threshold,
                 options.min_keypoint_intensity
             );
-            match_sets.push_back(matchFeatureSets(features_a, features_b));
-            feature_sets.push_back(std::make_pair(std::move(features_a), std::move(features_b)));
+            match_sets.push_back(matchFeatureSets(extracted_a.features, extracted_b.features));
+            feature_sets.push_back(std::make_pair(std::move(extracted_a.features), std::move(extracted_b.features)));
         }
 
         saveEvalReport(options.output, aggregateEvalReport(feature_sets, match_sets));

@@ -45,6 +45,26 @@ void write_png(const std::filesystem::path& output_path, const cv::Mat& image) {
     }
 }
 
+torch::Tensor scaled_keypoints(const torch::Tensor& keypoints, int image_width, int image_height, int64_t map_width, int64_t map_height) {
+    if (!keypoints.defined() || keypoints.numel() == 0) {
+        return keypoints;
+    }
+    if (map_width <= 0 || map_height <= 0) {
+        throw std::invalid_argument("feature visualization map dimensions must be positive");
+    }
+    auto points = keypoints.to(torch::kCPU, torch::kFloat32).contiguous();
+    if (points.dim() != 2 || points.size(1) != 2) {
+        throw std::invalid_argument("feature visualization keypoints must have shape {N,2}");
+    }
+    points.index_put_({torch::indexing::Slice(), 0},
+                      points.index({torch::indexing::Slice(), 0}) * static_cast<double>(image_width) /
+                          static_cast<double>(map_width));
+    points.index_put_({torch::indexing::Slice(), 1},
+                      points.index({torch::indexing::Slice(), 1}) * static_cast<double>(image_height) /
+                          static_cast<double>(map_height));
+    return points;
+}
+
 void draw_keypoints(cv::Mat& image, const torch::Tensor& keypoints) {
     if (!keypoints.defined() || keypoints.numel() == 0) {
         return;
@@ -97,6 +117,25 @@ std::vector<int64_t> sorted_match_indices(const torch::Tensor& confidence) {
     return indices;
 }
 
+MatchSet scaled_match_set(
+    const MatchSet& match_set,
+    int image_a_width,
+    int image_a_height,
+    int image_b_width,
+    int image_b_height,
+    int64_t map_a_width,
+    int64_t map_a_height,
+    int64_t map_b_width,
+    int64_t map_b_height
+) {
+    return MatchSet{
+        match_set.sparse_matches,
+        match_set.sparse_scores,
+        scaled_keypoints(match_set.points_a, image_a_width, image_a_height, map_a_width, map_a_height),
+        scaled_keypoints(match_set.points_b, image_b_width, image_b_height, map_b_width, map_b_height),
+        match_set.confidence};
+}
+
 void draw_matches(cv::Mat& canvas, int image_b_offset, const MatchSet& match_set) {
     const auto points_a = match_set.points_a.to(torch::kCPU, torch::kFloat32).contiguous();
     const auto points_b = match_set.points_b.to(torch::kCPU, torch::kFloat32).contiguous();
@@ -131,6 +170,22 @@ std::filesystem::path save_feature_visualization(
     return output_path;
 }
 
+std::filesystem::path save_feature_visualization(
+    const std::string& image_path,
+    const FeatureSet& feature_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_width,
+    int64_t feature_map_height
+) {
+    auto image = read_color_image(image_path);
+    draw_keypoints(
+        image,
+        scaled_keypoints(feature_set.keypoints, image.cols, image.rows, feature_map_width, feature_map_height));
+    const auto output_path = std::filesystem::path(visualization_dir) / (sanitized_stem(image_path) + "_features.png");
+    write_png(output_path, image);
+    return output_path;
+}
+
 std::filesystem::path save_match_visualization(
     const std::string& image_a_path,
     const std::string& image_b_path,
@@ -141,6 +196,38 @@ std::filesystem::path save_match_visualization(
     const auto image_b = read_color_image(image_b_path);
     auto canvas = make_side_by_side(image_a, image_b);
     draw_matches(canvas, image_a.cols, match_set);
+    const auto output_path = std::filesystem::path(visualization_dir) /
+                             (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
+    write_png(output_path, canvas);
+    return output_path;
+}
+
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_a_width,
+    int64_t feature_map_a_height,
+    int64_t feature_map_b_width,
+    int64_t feature_map_b_height
+) {
+    const auto image_a = read_color_image(image_a_path);
+    const auto image_b = read_color_image(image_b_path);
+    auto canvas = make_side_by_side(image_a, image_b);
+    draw_matches(
+        canvas,
+        image_a.cols,
+        scaled_match_set(
+            match_set,
+            image_a.cols,
+            image_a.rows,
+            image_b.cols,
+            image_b.rows,
+            feature_map_a_width,
+            feature_map_a_height,
+            feature_map_b_width,
+            feature_map_b_height));
     const auto output_path = std::filesystem::path(visualization_dir) /
                              (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
     write_png(output_path, canvas);
