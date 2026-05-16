@@ -32,7 +32,7 @@ void validateSpatialSize(const torch::Tensor& tensor, const char* name, int64_t 
     }
 }
 
-void validate_decode_config(const FeatureDecodeConfig& config) {
+void validateDecodeConfig(const FeatureDecodeConfig& config) {
     if (config.max_keypoints <= 0) {
         throw std::invalid_argument("max_keypoints must be positive");
     }
@@ -100,7 +100,7 @@ struct SparseCandidate {
     float score = 0.0F;
 };
 
-bool is_suppressed_by_selected(
+bool isSuppressedBySelected(
     const std::vector<SparseCandidate>& selected,
     const SparseCandidate& candidate,
     int radius
@@ -113,7 +113,7 @@ bool is_suppressed_by_selected(
     return false;
 }
 
-std::vector<SparseCandidate> make_nms_candidates(
+std::vector<SparseCandidate> makeNmsCandidates(
     const torch::Tensor& heatmap,
     const torch::Tensor& valid_mask,
     int nms_radius
@@ -139,7 +139,7 @@ std::vector<SparseCandidate> make_nms_candidates(
     std::vector<SparseCandidate> selected;
     selected.reserve(candidates.size());
     for (const auto& candidate : candidates) {
-        if (!is_suppressed_by_selected(selected, candidate, nms_radius)) {
+        if (!isSuppressedBySelected(selected, candidate, nms_radius)) {
             selected.push_back(candidate);
         }
     }
@@ -195,7 +195,7 @@ FeatureSet decode_feature_maps(
     const FeatureDecodeConfig& config,
     const torch::Tensor& intensity_mask
 ) {
-    validate_decode_config(config);
+    validateDecodeConfig(config);
     validateRawMaps(maps);
 
     const auto heatmap = maps.heatmap.to(torch::kFloat32).contiguous();
@@ -208,7 +208,7 @@ FeatureSet decode_feature_maps(
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
     const auto valid_mask = prepare_decode_mask(intensity_mask, height, width);
-    const auto candidates = make_nms_candidates(heatmap, valid_mask, config.nms_radius);
+    const auto candidates = makeNmsCandidates(heatmap, valid_mask, config.nms_radius);
     const int64_t sparse_count = std::min<int64_t>(config.max_keypoints, static_cast<int64_t>(candidates.size()));
 
     std::vector<float> sparse_points;
