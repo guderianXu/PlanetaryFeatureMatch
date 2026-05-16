@@ -119,6 +119,12 @@ bool has_formatted_seconds_after_label(const std::string& output, const std::str
     return decimal_count >= 3 && index < output.size() && output[index] == 's';
 }
 
+void write_text_file(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream output(path);
+    PFM_REQUIRE(static_cast<bool>(output));
+    output << text;
+}
+
 pfm::CliOptions make_train_options(TempPipelineDirectory& temp_dir) {
     pfm::CliOptions options;
     options.image_dir = temp_dir.path().string();
@@ -288,6 +294,32 @@ static void pipeline_extract_uses_keypoint_distribution_options() {
     PFM_REQUIRE(features.keypoints.size(0) == 1);
 }
 
+static void pipeline_extract_prints_stage_timing() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_extract_timing");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image = temp_dir.file("timed_extract.png");
+    write_test_image(image, 101);
+
+    pfm::CliOptions options;
+    options.command = pfm::Command::Extract;
+    options.image = image.string();
+    options.checkpoint = checkpoint;
+    options.output = temp_dir.file("features.pt").string();
+    options.visualization_dir = temp_dir.file("vis").string();
+    options.device = "cpu";
+
+    CoutCapture capture;
+    PFM_REQUIRE(pfm::run_extract_command(options) == 0);
+    const auto output = capture.str();
+
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "elapsed="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "image_load="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "model_forward="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "decode="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "save="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "visualization="));
+}
+
 static void pipeline_extract_filters_keypoints_below_min_intensity() {
     TempPipelineDirectory temp_dir("pfm_pipeline_extract_intensity_mask");
     const auto checkpoint = write_checkpoint(temp_dir);
@@ -392,10 +424,7 @@ static void pipeline_eval_writes_report_archive() {
     const auto output = temp_dir.file("report.pt");
     write_test_image(image_a, 71);
     write_test_image(image_b, 91);
-    {
-        std::ofstream stream(pairs);
-        stream << image_a.string() << ' ' << image_b.string() << '\n';
-    }
+    write_text_file(pairs, image_a.string() + " " + image_b.string() + "\n");
 
     pfm::CliOptions options;
     options.pairs = pairs.string();
@@ -413,6 +442,59 @@ static void pipeline_eval_writes_report_archive() {
     PFM_REQUIRE(average_matches.defined());
     PFM_REQUIRE(average_matches.numel() == 1);
     PFM_REQUIRE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>() >= 0.0F);
+}
+
+static void pipeline_match_eval_and_export_print_timing() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_command_timing");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("timed_match_a.png");
+    const auto image_b = temp_dir.file("timed_match_b.png");
+    write_test_image(image_a, 17);
+    write_test_image(image_b, 29);
+
+    pfm::CliOptions match_options;
+    match_options.command = pfm::Command::Match;
+    match_options.image_a = image_a.string();
+    match_options.image_b = image_b.string();
+    match_options.checkpoint = checkpoint;
+    match_options.output = temp_dir.file("matches.pt").string();
+    match_options.visualization_dir = temp_dir.file("match_vis").string();
+    match_options.device = "cpu";
+
+    CoutCapture match_capture;
+    PFM_REQUIRE(pfm::run_match_command(match_options) == 0);
+    const auto match_output = match_capture.str();
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "elapsed="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "extract_a="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "extract_b="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "match_time="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "save="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(match_output, "visualization="));
+
+    const auto pairs_path = temp_dir.file("pairs.txt");
+    write_text_file(pairs_path, match_options.image_a + " " + match_options.image_b + "\n");
+    pfm::CliOptions eval_options;
+    eval_options.command = pfm::Command::Eval;
+    eval_options.pairs = pairs_path.string();
+    eval_options.checkpoint = checkpoint;
+    eval_options.output = temp_dir.file("report.pt").string();
+    eval_options.device = "cpu";
+
+    CoutCapture eval_capture;
+    PFM_REQUIRE(pfm::run_eval_command(eval_options) == 0);
+    const auto eval_output = eval_capture.str();
+    PFM_REQUIRE(eval_output.find("pairs=1") != std::string::npos);
+    PFM_REQUIRE(has_formatted_seconds_after_label(eval_output, "elapsed="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(eval_output, "avg_pair_time="));
+
+    pfm::CliOptions export_options;
+    export_options.command = pfm::Command::Export;
+    export_options.checkpoint = checkpoint;
+    export_options.output = temp_dir.file("exported.pt").string();
+
+    CoutCapture export_capture;
+    PFM_REQUIRE(pfm::run_export_command(export_options) == 0);
+    PFM_REQUIRE(has_formatted_seconds_after_label(export_capture.str(), "elapsed="));
 }
 
 static void pipeline_extract_rejects_invalid_device() {
@@ -536,12 +618,14 @@ void register_pipeline_tests() {
     register_test("pipeline_extract_writes_loadable_feature_file", pipeline_extract_writes_loadable_feature_file);
     register_test("pipeline_extract_uses_keypoint_distribution_options",
                   pipeline_extract_uses_keypoint_distribution_options);
+    register_test("pipeline_extract_prints_stage_timing", pipeline_extract_prints_stage_timing);
     register_test("pipeline_extract_filters_keypoints_below_min_intensity",
                   pipeline_extract_filters_keypoints_below_min_intensity);
     register_test("pipeline_export_writes_loadable_checkpoint", pipeline_export_writes_loadable_checkpoint);
     register_test("pipeline_export_rejects_config_only_checkpoint", pipeline_export_rejects_config_only_checkpoint);
     register_test("pipeline_match_writes_match_file", pipeline_match_writes_match_file);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);
+    register_test("pipeline_match_eval_and_export_print_timing", pipeline_match_eval_and_export_print_timing);
     register_test("pipeline_extract_rejects_invalid_device", pipeline_extract_rejects_invalid_device);
     register_test("pipeline_match_rejects_invalid_device", pipeline_match_rejects_invalid_device);
     register_test("pipeline_eval_rejects_invalid_device", pipeline_eval_rejects_invalid_device);

@@ -140,10 +140,17 @@ RawFeatureMaps run_mvp_model(
         dense_confidence.detach().cpu().contiguous()};
 }
 
+struct ExtractionTiming {
+    double image_load_seconds = 0.0;
+    double model_forward_seconds = 0.0;
+    double decode_seconds = 0.0;
+};
+
 struct ExtractedFeatureSet {
     FeatureSet features;
     int64_t feature_map_width = 0;
     int64_t feature_map_height = 0;
+    ExtractionTiming timing;
 };
 
 FeatureDecodeConfig makeFeatureDecodeConfig(const CliOptions& options) {
@@ -165,13 +172,21 @@ ExtractedFeatureSet extract_feature_set(
     const FeatureDecodeConfig& decode_config,
     double min_keypoint_intensity
 ) {
+    ExtractionTiming timing;
+    Timer image_timer;
     const auto image = load_image_tensor(image_path);
+    timing.image_load_seconds = image_timer.elapsedSeconds();
+
+    Timer forward_timer;
     const auto maps = run_mvp_model(image, modules, checkpoint_config, device);
+    timing.model_forward_seconds = forward_timer.elapsedSeconds();
+
+    Timer decode_timer;
     const auto intensity_mask = make_intensity_mask(image, min_keypoint_intensity).to(torch::kCPU);
-    return ExtractedFeatureSet{
-        decode_feature_maps(maps, decode_config, intensity_mask),
-        maps.heatmap.size(3),
-        maps.heatmap.size(2)};
+    auto features = decode_feature_maps(maps, decode_config, intensity_mask);
+    timing.decode_seconds = decode_timer.elapsedSeconds();
+
+    return ExtractedFeatureSet{std::move(features), maps.heatmap.size(3), maps.heatmap.size(2), timing};
 }
 
 bool inference_checkpoint_can_load(const std::string& checkpoint) {
@@ -241,6 +256,7 @@ int run_extract_command(const CliOptions& options) {
     }
 
     try {
+        Timer total_timer;
         if (!checkpoint_can_load(options.checkpoint)) {
             std::cerr << "extract failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
@@ -257,16 +273,27 @@ int run_extract_command(const CliOptions& options) {
             decode_config,
             options.min_keypoint_intensity
         );
+        Timer save_timer;
         save_feature_set(extracted.features, options.output);
+        const auto save_seconds = save_timer.elapsedSeconds();
+        double visualization_seconds = 0.0;
         if (!options.visualization_dir.empty()) {
+            Timer visualization_timer;
             (void)save_feature_visualization(
                 options.image,
                 extracted.features,
                 options.visualization_dir,
                 extracted.feature_map_width,
                 extracted.feature_map_height);
+            visualization_seconds = visualization_timer.elapsedSeconds();
         }
-        std::cout << "extraction complete: features=" << options.output << '\n';
+        std::cout << "extraction complete: features=" << options.output
+                  << " elapsed=" << formatSeconds(total_timer.elapsedSeconds()) << "s"
+                  << " image_load=" << formatSeconds(extracted.timing.image_load_seconds) << "s"
+                  << " model_forward=" << formatSeconds(extracted.timing.model_forward_seconds) << "s"
+                  << " decode=" << formatSeconds(extracted.timing.decode_seconds) << "s"
+                  << " save=" << formatSeconds(save_seconds) << "s"
+                  << " visualization=" << formatSeconds(visualization_seconds) << "s\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "extract failed: " << error.what() << '\n';
@@ -281,6 +308,7 @@ int run_match_command(const CliOptions& options) {
     }
 
     try {
+        Timer total_timer;
         if (!checkpoint_can_load(options.checkpoint)) {
             std::cerr << "match failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
@@ -305,9 +333,19 @@ int run_match_command(const CliOptions& options) {
             decode_config,
             options.min_keypoint_intensity
         );
+        const auto extract_a_seconds = extracted_a.timing.image_load_seconds + extracted_a.timing.model_forward_seconds +
+                                       extracted_a.timing.decode_seconds;
+        const auto extract_b_seconds = extracted_b.timing.image_load_seconds + extracted_b.timing.model_forward_seconds +
+                                       extracted_b.timing.decode_seconds;
+        Timer match_timer;
         const auto match_set = matchFeatureSets(extracted_a.features, extracted_b.features);
+        const auto match_seconds = match_timer.elapsedSeconds();
+        Timer save_timer;
         save_match_set(match_set, options.output);
+        const auto save_seconds = save_timer.elapsedSeconds();
+        double visualization_seconds = 0.0;
         if (!options.visualization_dir.empty()) {
+            Timer visualization_timer;
             (void)save_match_visualization(
                 options.image_a,
                 options.image_b,
@@ -317,8 +355,15 @@ int run_match_command(const CliOptions& options) {
                 extracted_a.feature_map_height,
                 extracted_b.feature_map_width,
                 extracted_b.feature_map_height);
+            visualization_seconds = visualization_timer.elapsedSeconds();
         }
-        std::cout << "matching complete: matches=" << options.output << '\n';
+        std::cout << "matching complete: matches=" << options.output
+                  << " elapsed=" << formatSeconds(total_timer.elapsedSeconds()) << "s"
+                  << " extract_a=" << formatSeconds(extract_a_seconds) << "s"
+                  << " extract_b=" << formatSeconds(extract_b_seconds) << "s"
+                  << " match_time=" << formatSeconds(match_seconds) << "s"
+                  << " save=" << formatSeconds(save_seconds) << "s"
+                  << " visualization=" << formatSeconds(visualization_seconds) << "s\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "match failed: " << error.what() << '\n';
@@ -333,6 +378,7 @@ int run_eval_command(const CliOptions& options) {
     }
 
     try {
+        Timer total_timer;
         if (!checkpoint_can_load(options.checkpoint)) {
             std::cerr << "eval failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
@@ -369,7 +415,12 @@ int run_eval_command(const CliOptions& options) {
         }
 
         saveEvalReport(options.output, aggregateEvalReport(feature_sets, match_sets));
-        std::cout << "evaluation complete: report=" << options.output << '\n';
+        const auto elapsed = total_timer.elapsedSeconds();
+        const auto avg_pair_time = pairs.empty() ? 0.0 : elapsed / static_cast<double>(pairs.size());
+        std::cout << "evaluation complete: report=" << options.output
+                  << " pairs=" << pairs.size()
+                  << " elapsed=" << formatSeconds(elapsed) << "s"
+                  << " avg_pair_time=" << formatSeconds(avg_pair_time) << "s\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "eval failed: " << error.what() << '\n';
@@ -383,6 +434,7 @@ int run_export_command(const CliOptions& options) {
     }
 
     try {
+        Timer total_timer;
         if (!inference_checkpoint_can_load(options.checkpoint)) {
             std::cerr << "export failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;
@@ -392,7 +444,8 @@ int run_export_command(const CliOptions& options) {
             std::cerr << "export failed: exported checkpoint cannot load: " << options.output << '\n';
             return 1;
         }
-        std::cout << "export complete: checkpoint=" << options.output << '\n';
+        std::cout << "export complete: checkpoint=" << options.output
+                  << " elapsed=" << formatSeconds(total_timer.elapsedSeconds()) << "s\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "export failed: " << error.what() << '\n';
