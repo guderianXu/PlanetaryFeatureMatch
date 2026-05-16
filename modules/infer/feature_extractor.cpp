@@ -199,7 +199,7 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(
                 if (taken >= per_cell || static_cast<int>(selected.size()) >= config.max_keypoints) {
                     break;
                 }
-                if (candidate.score > 0.0F && candidateInCell(candidate, row, col, config, height, width)) {
+                if (candidateInCell(candidate, row, col, config, height, width)) {
                     selected.push_back(candidate);
                     ++taken;
                 }
