@@ -94,6 +94,33 @@ static void decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty
     PFM_REQUIRE(features.affine.sizes() == torch::IntArrayRef({0, 2, 2}));
 }
 
+static void decode_feature_maps_suppresses_neighbors_with_nms_radius() {
+    auto heatmap = torch::zeros({1, 1, 4, 4}, torch::kFloat32);
+    heatmap.index_put_({0, 0, 1, 1}, 10.0F);
+    heatmap.index_put_({0, 0, 1, 2}, 9.0F);
+    heatmap.index_put_({0, 0, 3, 3}, 8.0F);
+    auto maps = makeMaps(heatmap, torch::ones({1, 1, 4, 4}, torch::kFloat32));
+    maps.descriptors = torch::ones({1, 4, 4, 4}, torch::kFloat32);
+    maps.scale = torch::ones({1, 1, 4, 4}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 4, 4}, torch::kFloat32);
+    maps.affine = torch::ones({1, 4, 4, 4}, torch::kFloat32);
+    pfm::FeatureDecodeConfig config;
+    config.max_keypoints = 3;
+    config.semi_dense_threshold = 0.5;
+    config.keypoint_grid_rows = 1;
+    config.keypoint_grid_cols = 1;
+    config.keypoints_per_cell = 3;
+    config.nms_radius = 1;
+
+    const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
+
+    PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({2, 2}));
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
+}
+
 static void decode_feature_maps_filters_dense_points_with_mask() {
     const auto heatmap = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
     const auto dense_confidence = torch::ones({1, 1, 2, 2}, torch::kFloat32);
@@ -211,6 +238,9 @@ void register_feature_extractor_tests() {
     register_test(
         "decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty",
         decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty);
+    register_test(
+        "decode_feature_maps_suppresses_neighbors_with_nms_radius",
+        decode_feature_maps_suppresses_neighbors_with_nms_radius);
     register_test(
         "decode_feature_maps_filters_dense_points_with_mask",
         decode_feature_maps_filters_dense_points_with_mask);

@@ -55,4 +55,17 @@ FeatureSet decode_feature_maps(
     const torch::Tensor& intensity_mask
 );
 
+/// Decodes sparse and dense feature tensors using an explicit decode configuration.
+/// @param maps Raw heatmap, descriptor, scale, orientation, affine, and dense confidence maps.
+/// @param config Sparse keypoint and semi-dense decoding parameters; counts must be valid and non-negative where
+/// documented by FeatureDecodeConfig.
+/// @param intensity_mask Optional H x W CPU mask in image coordinates; nonzero values are valid.
+/// @return FeatureSet containing sparse locations after local NMS and dense locations above the configured threshold.
+/// @throws std::invalid_argument if maps, config, or mask shape/device are invalid.
+FeatureSet decode_feature_maps(
+    const RawFeatureMaps& maps,
+    const FeatureDecodeConfig& config,
+    const torch::Tensor& intensity_mask
+);
+
 }  // namespace pfm

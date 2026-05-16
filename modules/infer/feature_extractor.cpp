@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <limits>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,6 +29,24 @@ void validateMap(const torch::Tensor& tensor, const char* name) {
 void validateSpatialSize(const torch::Tensor& tensor, const char* name, int64_t height, int64_t width) {
     if (tensor.size(2) != height || tensor.size(3) != width) {
         throw std::invalid_argument(std::string(name) + " spatial size must match heatmap");
+    }
+}
+
+void validate_decode_config(const FeatureDecodeConfig& config) {
+    if (config.max_keypoints <= 0) {
+        throw std::invalid_argument("max_keypoints must be positive");
+    }
+    if (config.keypoint_grid_rows <= 0) {
+        throw std::invalid_argument("keypoint_grid_rows must be positive");
+    }
+    if (config.keypoint_grid_cols <= 0) {
+        throw std::invalid_argument("keypoint_grid_cols must be positive");
+    }
+    if (config.keypoints_per_cell < 0) {
+        throw std::invalid_argument("keypoints_per_cell must be non-negative");
+    }
+    if (config.nms_radius < 0) {
+        throw std::invalid_argument("nms_radius must be non-negative");
     }
 }
 
@@ -76,6 +94,61 @@ void appendPoint(std::vector<float>& points, int64_t y, int64_t x) {
     points.push_back(static_cast<float>(y));
 }
 
+struct SparseCandidate {
+    int64_t y = 0;
+    int64_t x = 0;
+    float score = 0.0F;
+};
+
+bool is_suppressed_by_selected(
+    const std::vector<SparseCandidate>& selected,
+    const SparseCandidate& candidate,
+    int radius
+) {
+    for (const auto& point : selected) {
+        if (std::abs(point.y - candidate.y) <= radius && std::abs(point.x - candidate.x) <= radius) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<SparseCandidate> make_nms_candidates(
+    const torch::Tensor& heatmap,
+    const torch::Tensor& valid_mask,
+    int nms_radius
+) {
+    std::vector<SparseCandidate> candidates;
+    for (int64_t y = 0; y < heatmap.size(2); ++y) {
+        for (int64_t x = 0; x < heatmap.size(3); ++x) {
+            if (valid_mask.index({y, x}).item<bool>()) {
+                candidates.push_back(SparseCandidate{y, x, heatmap.index({0, 0, y, x}).item<float>()});
+            }
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const SparseCandidate& lhs, const SparseCandidate& rhs) {
+        if (lhs.score == rhs.score) {
+            if (lhs.y == rhs.y) {
+                return lhs.x < rhs.x;
+            }
+            return lhs.y < rhs.y;
+        }
+        return lhs.score > rhs.score;
+    });
+
+    std::vector<SparseCandidate> selected;
+    selected.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        if (candidate.score <= 0.0F) {
+            continue;
+        }
+        if (!is_suppressed_by_selected(selected, candidate, nms_radius)) {
+            selected.push_back(candidate);
+        }
+    }
+    return selected;
+}
+
 torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width) {
     if (!mask.defined()) {
         return torch::ones({height, width}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
@@ -100,7 +173,11 @@ torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int
 }  // namespace
 
 FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, double semi_dense_threshold) {
-    return decode_feature_maps(maps, max_keypoints, semi_dense_threshold, torch::Tensor());
+    FeatureDecodeConfig config;
+    config.max_keypoints = max_keypoints;
+    config.semi_dense_threshold = semi_dense_threshold;
+    config.nms_radius = 0;
+    return decode_feature_maps(maps, config, torch::Tensor());
 }
 
 FeatureSet decode_feature_maps(
@@ -109,9 +186,19 @@ FeatureSet decode_feature_maps(
     double semi_dense_threshold,
     const torch::Tensor& intensity_mask
 ) {
-    if (max_keypoints <= 0) {
-        throw std::invalid_argument("max_keypoints must be positive");
-    }
+    FeatureDecodeConfig config;
+    config.max_keypoints = max_keypoints;
+    config.semi_dense_threshold = semi_dense_threshold;
+    config.nms_radius = 0;
+    return decode_feature_maps(maps, config, intensity_mask);
+}
+
+FeatureSet decode_feature_maps(
+    const RawFeatureMaps& maps,
+    const FeatureDecodeConfig& config,
+    const torch::Tensor& intensity_mask
+) {
+    validate_decode_config(config);
     validateRawMaps(maps);
 
     const auto heatmap = maps.heatmap.to(torch::kFloat32).contiguous();
@@ -124,16 +211,8 @@ FeatureSet decode_feature_maps(
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
     const auto valid_mask = prepare_decode_mask(intensity_mask, height, width);
-    const auto valid_flat = valid_mask.flatten();
-    const int64_t valid_count = valid_flat.to(torch::kLong).sum().item<int64_t>();
-    const int64_t sparse_count = std::min<int64_t>(max_keypoints, valid_count);
-    const auto masked_heatmap = heatmap.flatten().masked_fill(valid_flat.logical_not(), -std::numeric_limits<float>::infinity());
-    const auto topk = sparse_count == 0
-        ? std::make_tuple(torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32)),
-                          torch::empty({0}, torch::TensorOptions().dtype(torch::kLong)))
-        : torch::topk(masked_heatmap, sparse_count);
-    const auto topk_values = std::get<0>(topk).contiguous();
-    const auto topk_indices = std::get<1>(topk).to(torch::kLong).contiguous();
+    const auto candidates = make_nms_candidates(heatmap, valid_mask, config.nms_radius);
+    const int64_t sparse_count = std::min<int64_t>(config.max_keypoints, static_cast<int64_t>(candidates.size()));
 
     std::vector<float> sparse_points;
     std::vector<float> sparse_descriptors;
@@ -146,12 +225,14 @@ FeatureSet decode_feature_maps(
     sparse_orientation.reserve(static_cast<size_t>(sparse_count * 2));
     sparse_affine.reserve(static_cast<size_t>(sparse_count * 4));
 
-    auto index_accessor = topk_indices.accessor<int64_t, 1>();
+    std::vector<float> sparse_scores;
+    sparse_scores.reserve(static_cast<size_t>(sparse_count));
     for (int64_t i = 0; i < sparse_count; ++i) {
-        const int64_t index = index_accessor[i];
-        const int64_t y = index / width;
-        const int64_t x = index % width;
+        const auto& candidate = candidates[static_cast<size_t>(i)];
+        const int64_t y = candidate.y;
+        const int64_t x = candidate.x;
         appendPoint(sparse_points, y, x);
+        sparse_scores.push_back(candidate.score);
         for (int64_t channel = 0; channel < descriptors.size(1); ++channel) {
             sparse_descriptors.push_back(descriptors.index({0, channel, y, x}).item<float>());
         }
@@ -172,7 +253,7 @@ FeatureSet decode_feature_maps(
     for (int64_t y = 0; y < dense_height; ++y) {
         for (int64_t x = 0; x < dense_width; ++x) {
             const float confidence = dense_confidence_map.index({0, 0, y, x}).item<float>();
-            if (confidence >= semi_dense_threshold && dense_valid_mask.index({y, x}).item<bool>()) {
+            if (confidence >= config.semi_dense_threshold && dense_valid_mask.index({y, x}).item<bool>()) {
                 appendPoint(dense_points, y, x);
                 dense_confidence.push_back(confidence);
             }
@@ -188,13 +269,26 @@ FeatureSet decode_feature_maps(
         ? torch::empty({0}, tensor_options)
         : torch::from_blob(dense_confidence.data(), {dense_count}, tensor_options).clone().contiguous();
 
+    const auto sparse_points_tensor = torch::from_blob(
+        sparse_points.data(), {sparse_count, 2}, tensor_options).clone().contiguous();
+    const auto sparse_scores_tensor = torch::from_blob(
+        sparse_scores.data(), {sparse_count}, tensor_options).clone().contiguous();
+    const auto sparse_descriptors_tensor = torch::from_blob(
+        sparse_descriptors.data(), {sparse_count, descriptors.size(1)}, tensor_options).clone().contiguous();
+    const auto sparse_scale_tensor = torch::from_blob(
+        sparse_scale.data(), {sparse_count}, tensor_options).clone().contiguous();
+    const auto sparse_orientation_tensor = torch::from_blob(
+        sparse_orientation.data(), {sparse_count, orientation.size(1)}, tensor_options).clone().contiguous();
+    const auto sparse_affine_tensor = torch::from_blob(
+        sparse_affine.data(), {sparse_count, 2, 2}, tensor_options).clone().contiguous();
+
     return FeatureSet{
-        torch::from_blob(sparse_points.data(), {sparse_count, 2}, tensor_options).clone().contiguous(),
-        topk_values.to(torch::kCPU, torch::kFloat32).contiguous(),
-        torch::from_blob(sparse_descriptors.data(), {sparse_count, descriptors.size(1)}, tensor_options).clone().contiguous(),
-        torch::from_blob(sparse_scale.data(), {sparse_count}, tensor_options).clone().contiguous(),
-        torch::from_blob(sparse_orientation.data(), {sparse_count, orientation.size(1)}, tensor_options).clone().contiguous(),
-        torch::from_blob(sparse_affine.data(), {sparse_count, 2, 2}, tensor_options).clone().contiguous(),
+        sparse_points_tensor,
+        sparse_scores_tensor,
+        sparse_descriptors_tensor,
+        sparse_scale_tensor,
+        sparse_orientation_tensor,
+        sparse_affine_tensor,
         dense_points_tensor,
         dense_confidence_tensor};
 }
