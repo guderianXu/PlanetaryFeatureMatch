@@ -64,7 +64,7 @@ PlanetaryFeatureMatch 面向火星、月球和小行星影像，目标是训练�
 - `masked_l1_loss`
 - `confidence_bce_loss`
 
-为了让真实大幅面 TIFF 能在 CPU 本地 smoke 中稳定运行，第一阶段训练会限制输入图像尺寸、限制每轮参与训练的图像数量，并对 descriptor loss 的空间位置做采样。
+为了让真实大幅面 TIFF 能在 CPU 本地 smoke 中稳定运行，第一阶段训练会限制输入图像尺寸，并对 descriptor loss 的空间位置做采样；默认每个 epoch 使用目录中的全部训练图像，样本总数为 `图像数 × pairs_per_image`。
 
 ## 构建
 
@@ -138,7 +138,7 @@ cmake -S . -B build -DBUILD_TESTS=ON \
 
 ```text
 train progress: epoch=1/1 batch=1/4 images=16/64 loss=...
-epoch summary: epoch=1/1 epoch_time=...s avg_loss=...
+train epoch summary: epoch=1/1 epoch_time=...s
 training complete: epochs=1 final_loss=... total_time=...s avg_batch_time=...s
 ```
 
