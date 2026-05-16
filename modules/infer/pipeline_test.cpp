@@ -200,6 +200,31 @@ static void pipeline_extract_writes_loadable_feature_file() {
     PFM_REQUIRE(features.descriptors.size(0) == features.keypoints.size(0));
 }
 
+static void pipeline_extract_uses_keypoint_distribution_options() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_decode_distribution");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image = temp_dir.file("distributed_extract.png");
+    write_test_image(image, 97);
+    const auto output = temp_dir.file("features.pt");
+
+    pfm::CliOptions options;
+    options.image = image.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.max_keypoints = 64;
+    options.semi_dense_threshold = 0.0;
+    options.keypoint_grid_rows = 1;
+    options.keypoint_grid_cols = 1;
+    options.keypoints_per_cell = 64;
+    options.nms_radius = 100;
+    options.device = "cpu";
+
+    PFM_REQUIRE(pfm::run_extract_command(options) == 0);
+    const auto features = pfm::load_feature_set(options.output);
+
+    PFM_REQUIRE(features.keypoints.size(0) == 1);
+}
+
 static void pipeline_extract_filters_keypoints_below_min_intensity() {
     TempPipelineDirectory temp_dir("pfm_pipeline_extract_intensity_mask");
     const auto checkpoint = write_checkpoint(temp_dir);
@@ -444,6 +469,8 @@ void register_pipeline_tests() {
     register_test("pipeline_train_forwards_pairs_per_image_to_cache_generation",
                   pipeline_train_forwards_pairs_per_image_to_cache_generation);
     register_test("pipeline_extract_writes_loadable_feature_file", pipeline_extract_writes_loadable_feature_file);
+    register_test("pipeline_extract_uses_keypoint_distribution_options",
+                  pipeline_extract_uses_keypoint_distribution_options);
     register_test("pipeline_extract_filters_keypoints_below_min_intensity",
                   pipeline_extract_filters_keypoints_below_min_intensity);
     register_test("pipeline_export_writes_loadable_checkpoint", pipeline_export_writes_loadable_checkpoint);

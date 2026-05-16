@@ -145,20 +145,30 @@ struct ExtractedFeatureSet {
     int64_t feature_map_height = 0;
 };
 
+FeatureDecodeConfig makeFeatureDecodeConfig(const CliOptions& options) {
+    FeatureDecodeConfig config;
+    config.max_keypoints = options.max_keypoints;
+    config.semi_dense_threshold = options.semi_dense_threshold;
+    config.keypoint_grid_rows = options.keypoint_grid_rows;
+    config.keypoint_grid_cols = options.keypoint_grid_cols;
+    config.keypoints_per_cell = options.keypoints_per_cell;
+    config.nms_radius = options.nms_radius;
+    return config;
+}
+
 ExtractedFeatureSet extract_feature_set(
     const std::string& image_path,
     InferenceModules& modules,
     const CheckpointConfig& checkpoint_config,
     torch::Device device,
-    int max_keypoints,
-    double semi_dense_threshold,
+    const FeatureDecodeConfig& decode_config,
     double min_keypoint_intensity
 ) {
     const auto image = load_image_tensor(image_path);
     const auto maps = run_mvp_model(image, modules, checkpoint_config, device);
     const auto intensity_mask = make_intensity_mask(image, min_keypoint_intensity).to(torch::kCPU);
     return ExtractedFeatureSet{
-        decode_feature_maps(maps, max_keypoints, semi_dense_threshold, intensity_mask),
+        decode_feature_maps(maps, decode_config, intensity_mask),
         maps.heatmap.size(3),
         maps.heatmap.size(2)};
 }
@@ -233,14 +243,14 @@ int run_extract_command(const CliOptions& options) {
         }
         const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
+        const auto decode_config = makeFeatureDecodeConfig(options);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
         const auto extracted = extract_feature_set(
             options.image,
             modules,
             checkpoint_config,
             device,
-            options.max_keypoints,
-            options.semi_dense_threshold,
+            decode_config,
             options.min_keypoint_intensity
         );
         save_feature_set(extracted.features, options.output);
@@ -273,14 +283,14 @@ int run_match_command(const CliOptions& options) {
         }
         const auto device = resolve_compute_device(options.device);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
+        const auto decode_config = makeFeatureDecodeConfig(options);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
         const auto extracted_a = extract_feature_set(
             options.image_a,
             modules,
             checkpoint_config,
             device,
-            options.max_keypoints,
-            options.semi_dense_threshold,
+            decode_config,
             options.min_keypoint_intensity
         );
         const auto extracted_b = extract_feature_set(
@@ -288,8 +298,7 @@ int run_match_command(const CliOptions& options) {
             modules,
             checkpoint_config,
             device,
-            options.max_keypoints,
-            options.semi_dense_threshold,
+            decode_config,
             options.min_keypoint_intensity
         );
         const auto match_set = matchFeatureSets(extracted_a.features, extracted_b.features);
@@ -327,6 +336,7 @@ int run_eval_command(const CliOptions& options) {
         const auto device = resolve_compute_device(options.device);
         const auto pairs = loadEvalPairs(options.pairs);
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
+        const auto decode_config = makeFeatureDecodeConfig(options);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
 
         std::vector<std::pair<FeatureSet, FeatureSet>> feature_sets;
@@ -339,8 +349,7 @@ int run_eval_command(const CliOptions& options) {
                 modules,
                 checkpoint_config,
                 device,
-                options.max_keypoints,
-                options.semi_dense_threshold,
+                decode_config,
                 options.min_keypoint_intensity
             );
             auto extracted_b = extract_feature_set(
@@ -348,8 +357,7 @@ int run_eval_command(const CliOptions& options) {
                 modules,
                 checkpoint_config,
                 device,
-                options.max_keypoints,
-                options.semi_dense_threshold,
+                decode_config,
                 options.min_keypoint_intensity
             );
             match_sets.push_back(matchFeatureSets(extracted_a.features, extracted_b.features));
