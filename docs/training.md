@@ -138,7 +138,8 @@ cmake -S . -B build -DBUILD_TESTS=ON \
 
 ```text
 train progress: epoch=1/1 batch=1/4 images=16/64 loss=...
-training complete: epochs=1 final_loss=...
+epoch summary: epoch=1/1 epoch_time=...s avg_loss=...
+training complete: epochs=1 final_loss=... total_time=...s avg_batch_time=...s
 ```
 
 训练命令每个 epoch 会输出 `epoch_time=<seconds>s`，训练结束输出 `total_time=<seconds>s` 和 `avg_batch_time=<seconds>s`，用于判断整体耗时和 batch 级吞吐。

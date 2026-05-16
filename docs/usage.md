@@ -57,7 +57,7 @@ cmake --build build -j$(nproc)
   --nms-radius 4
 ```
 
-推理阶段的稀疏特征点默认会先应用低灰度过滤，再做局部 NMS，随后按网格分块选点，最后用全局高分候选补足 `--max-keypoints`。`--keypoints-per-cell 0` 表示按 `max_keypoints / (rows * cols)` 自动推导，每个 cell 至少 1 个候选。
+推理阶段的稀疏特征点默认会先应用低灰度过滤，再做局部 NMS，随后按网格分块选点，最后用全局高分候选补足 `--max-keypoints`。`--keypoints-per-cell 0` 表示根据 `max_keypoints` 和网格数量自动推导，采用向上取整且每个 cell 至少 1 个候选。
 
 ## 图像匹配
 
