@@ -1,7 +1,7 @@
-#include "core/timer.h"
-
 #include <iomanip>
 #include <sstream>
+
+#include "core/timer.h"
 
 namespace pfm {
 
