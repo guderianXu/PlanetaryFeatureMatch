@@ -139,9 +139,6 @@ std::vector<SparseCandidate> make_nms_candidates(
     std::vector<SparseCandidate> selected;
     selected.reserve(candidates.size());
     for (const auto& candidate : candidates) {
-        if (candidate.score <= 0.0F) {
-            continue;
-        }
         if (!is_suppressed_by_selected(selected, candidate, nms_radius)) {
             selected.push_back(candidate);
         }

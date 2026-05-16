@@ -76,6 +76,22 @@ static void decode_feature_maps_excludes_masked_sparse_locations() {
     PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 9.0F, 1.0e-6F);
 }
 
+static void decode_feature_maps_returns_zero_score_sparse_keypoints() {
+    const auto heatmap = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
+    auto maps = makeMaps(heatmap, torch::ones({1, 1, 2, 2}, torch::kFloat32));
+    maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    maps.scale = torch::ones({1, 1, 2, 2}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    maps.affine = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+
+    const auto features = pfm::decode_feature_maps(maps, 2, 0.5);
+
+    PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({2, 2}));
+    PFM_REQUIRE(features.scores.sizes() == torch::IntArrayRef({2}));
+    PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 0.0F, 1.0e-6F);
+}
+
 static void decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty() {
     auto maps = makeMaps(torch::ones({1, 1, 2, 2}, torch::kFloat32), torch::ones({1, 1, 2, 2}, torch::kFloat32));
     maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
@@ -105,11 +121,11 @@ static void decode_feature_maps_suppresses_neighbors_with_nms_radius() {
     maps.orientation = torch::zeros({1, 2, 4, 4}, torch::kFloat32);
     maps.affine = torch::ones({1, 4, 4, 4}, torch::kFloat32);
     pfm::FeatureDecodeConfig config;
-    config.max_keypoints = 3;
+    config.max_keypoints = 2;
     config.semi_dense_threshold = 0.5;
     config.keypoint_grid_rows = 1;
     config.keypoint_grid_cols = 1;
-    config.keypoints_per_cell = 3;
+    config.keypoints_per_cell = 2;
     config.nms_radius = 1;
 
     const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
@@ -235,6 +251,9 @@ void register_feature_extractor_tests() {
     register_test(
         "decode_feature_maps_excludes_masked_sparse_locations",
         decode_feature_maps_excludes_masked_sparse_locations);
+    register_test(
+        "decode_feature_maps_returns_zero_score_sparse_keypoints",
+        decode_feature_maps_returns_zero_score_sparse_keypoints);
     register_test(
         "decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty",
         decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty);
