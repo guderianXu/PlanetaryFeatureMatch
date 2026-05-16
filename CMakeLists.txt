@@ -14,6 +14,7 @@ add_library(pfm STATIC
     modules/cli/commands.cpp
     modules/core/device.cpp
     modules/core/tensor_utils.cpp
+    modules/core/timer.cpp
     modules/infer/eval_pipeline.cpp
     modules/infer/feature_codec.cpp
     modules/infer/feature_extractor.cpp
@@ -53,6 +54,7 @@ add_executable(pfm_tests
     modules/cli/commands_test.cpp
     modules/core/device_test.cpp
     modules/core/tensor_utils_test.cpp
+    modules/core/timer_test.cpp
     modules/infer/eval_pipeline_test.cpp
     modules/infer/feature_codec_test.cpp
     modules/infer/feature_extractor_test.cpp
