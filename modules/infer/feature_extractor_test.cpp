@@ -137,6 +137,36 @@ static void decode_feature_maps_suppresses_neighbors_with_nms_radius() {
     PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
 }
 
+static void decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills() {
+    auto heatmap = torch::zeros({1, 1, 4, 4}, torch::kFloat32);
+    heatmap.index_put_({0, 0, 0, 0}, 10.0F);
+    heatmap.index_put_({0, 0, 0, 1}, 9.0F);
+    heatmap.index_put_({0, 0, 1, 0}, 8.0F);
+    heatmap.index_put_({0, 0, 3, 3}, 7.0F);
+    auto maps = makeMaps(heatmap, torch::ones({1, 1, 4, 4}, torch::kFloat32));
+    maps.descriptors = torch::ones({1, 4, 4, 4}, torch::kFloat32);
+    maps.scale = torch::ones({1, 1, 4, 4}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 4, 4}, torch::kFloat32);
+    maps.affine = torch::ones({1, 4, 4, 4}, torch::kFloat32);
+    pfm::FeatureDecodeConfig config;
+    config.max_keypoints = 3;
+    config.semi_dense_threshold = 0.5;
+    config.keypoint_grid_rows = 2;
+    config.keypoint_grid_cols = 2;
+    config.keypoints_per_cell = 1;
+    config.nms_radius = 0;
+
+    const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
+
+    PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({3, 2}));
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 0.0F, 1.0e-6F);
+}
+
 static void decode_feature_maps_filters_dense_points_with_mask() {
     const auto heatmap = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
     const auto dense_confidence = torch::ones({1, 1, 2, 2}, torch::kFloat32);
@@ -260,6 +290,9 @@ void register_feature_extractor_tests() {
     register_test(
         "decode_feature_maps_suppresses_neighbors_with_nms_radius",
         decode_feature_maps_suppresses_neighbors_with_nms_radius);
+    register_test(
+        "decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills",
+        decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills);
     register_test(
         "decode_feature_maps_filters_dense_points_with_mask",
         decode_feature_maps_filters_dense_points_with_mask);

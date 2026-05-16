@@ -146,6 +146,77 @@ std::vector<SparseCandidate> makeNmsCandidates(
     return selected;
 }
 
+int resolvedKeypointsPerCell(const FeatureDecodeConfig& config) {
+    if (config.keypoints_per_cell > 0) {
+        return config.keypoints_per_cell;
+    }
+    const int cell_count = config.keypoint_grid_rows * config.keypoint_grid_cols;
+    return std::max(1, (config.max_keypoints + cell_count - 1) / cell_count);
+}
+
+int64_t cellStart(int64_t extent, int cell_index, int cell_count) {
+    return extent * cell_index / cell_count;
+}
+
+bool candidateInCell(
+    const SparseCandidate& candidate,
+    int row,
+    int col,
+    const FeatureDecodeConfig& config,
+    int64_t height,
+    int64_t width
+) {
+    const auto y0 = cellStart(height, row, config.keypoint_grid_rows);
+    const auto y1 = cellStart(height, row + 1, config.keypoint_grid_rows);
+    const auto x0 = cellStart(width, col, config.keypoint_grid_cols);
+    const auto x1 = cellStart(width, col + 1, config.keypoint_grid_cols);
+    return candidate.y >= y0 && candidate.y < y1 && candidate.x >= x0 && candidate.x < x1;
+}
+
+bool sameCandidate(const SparseCandidate& lhs, const SparseCandidate& rhs) {
+    return lhs.y == rhs.y && lhs.x == rhs.x;
+}
+
+bool containsCandidate(const std::vector<SparseCandidate>& candidates, const SparseCandidate& candidate) {
+    return std::any_of(candidates.begin(), candidates.end(), [&](const SparseCandidate& selected) {
+        return sameCandidate(selected, candidate);
+    });
+}
+
+std::vector<SparseCandidate> selectGridBalancedCandidates(
+    const std::vector<SparseCandidate>& candidates,
+    const FeatureDecodeConfig& config,
+    int64_t height,
+    int64_t width
+) {
+    std::vector<SparseCandidate> selected;
+    selected.reserve(static_cast<size_t>(std::min<int64_t>(config.max_keypoints, candidates.size())));
+    const int per_cell = resolvedKeypointsPerCell(config);
+    for (int row = 0; row < config.keypoint_grid_rows; ++row) {
+        for (int col = 0; col < config.keypoint_grid_cols; ++col) {
+            int taken = 0;
+            for (const auto& candidate : candidates) {
+                if (taken >= per_cell || static_cast<int>(selected.size()) >= config.max_keypoints) {
+                    break;
+                }
+                if (candidate.score > 0.0F && candidateInCell(candidate, row, col, config, height, width)) {
+                    selected.push_back(candidate);
+                    ++taken;
+                }
+            }
+        }
+    }
+    for (const auto& candidate : candidates) {
+        if (static_cast<int>(selected.size()) >= config.max_keypoints) {
+            break;
+        }
+        if (!containsCandidate(selected, candidate)) {
+            selected.push_back(candidate);
+        }
+    }
+    return selected;
+}
+
 torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width) {
     if (!mask.defined()) {
         return torch::ones({height, width}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
@@ -173,6 +244,9 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
     FeatureDecodeConfig config;
     config.max_keypoints = max_keypoints;
     config.semi_dense_threshold = semi_dense_threshold;
+    config.keypoint_grid_rows = 1;
+    config.keypoint_grid_cols = 1;
+    config.keypoints_per_cell = max_keypoints;
     config.nms_radius = 0;
     return decode_feature_maps(maps, config, torch::Tensor());
 }
@@ -186,6 +260,9 @@ FeatureSet decode_feature_maps(
     FeatureDecodeConfig config;
     config.max_keypoints = max_keypoints;
     config.semi_dense_threshold = semi_dense_threshold;
+    config.keypoint_grid_rows = 1;
+    config.keypoint_grid_cols = 1;
+    config.keypoints_per_cell = max_keypoints;
     config.nms_radius = 0;
     return decode_feature_maps(maps, config, intensity_mask);
 }
@@ -208,8 +285,9 @@ FeatureSet decode_feature_maps(
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
     const auto valid_mask = prepare_decode_mask(intensity_mask, height, width);
-    const auto candidates = makeNmsCandidates(heatmap, valid_mask, config.nms_radius);
-    const int64_t sparse_count = std::min<int64_t>(config.max_keypoints, static_cast<int64_t>(candidates.size()));
+    const auto nms_candidates = makeNmsCandidates(heatmap, valid_mask, config.nms_radius);
+    const auto selected_candidates = selectGridBalancedCandidates(nms_candidates, config, height, width);
+    const int64_t sparse_count = static_cast<int64_t>(selected_candidates.size());
 
     std::vector<float> sparse_points;
     std::vector<float> sparse_descriptors;
@@ -224,8 +302,7 @@ FeatureSet decode_feature_maps(
 
     std::vector<float> sparse_scores;
     sparse_scores.reserve(static_cast<size_t>(sparse_count));
-    for (int64_t i = 0; i < sparse_count; ++i) {
-        const auto& candidate = candidates[static_cast<size_t>(i)];
+    for (const auto& candidate : selected_candidates) {
         const int64_t y = candidate.y;
         const int64_t x = candidate.x;
         appendPoint(sparse_points, y, x);
