@@ -149,7 +149,7 @@ static void decode_feature_maps_suppresses_neighbors_with_nms_radius() {
     PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
 }
 
-static void decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills() {
+static void decode_feature_maps_avoids_row_major_grid_truncation_bias() {
     auto heatmap = torch::zeros({1, 1, 4, 4}, torch::kFloat32);
     heatmap.index_put_({0, 0, 0, 0}, 10.0F);
     heatmap.index_put_({0, 0, 0, 1}, 9.0F);
@@ -173,10 +173,13 @@ static void decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backf
     PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({3, 2}));
     PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 2.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 0.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 0.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 2.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 10.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 7.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({2}).item<float>(), 9.0F, 1.0e-6F);
 }
 
 static void decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell() {
@@ -325,8 +328,8 @@ void register_feature_extractor_tests() {
         "decode_feature_maps_suppresses_neighbors_with_nms_radius",
         decode_feature_maps_suppresses_neighbors_with_nms_radius);
     register_test(
-        "decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills",
-        decode_feature_maps_limits_sparse_keypoints_per_grid_cell_then_backfills);
+        "decode_feature_maps_avoids_row_major_grid_truncation_bias",
+        decode_feature_maps_avoids_row_major_grid_truncation_bias);
     register_test(
         "decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell",
         decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell);

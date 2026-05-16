@@ -183,28 +183,55 @@ bool containsCandidate(const std::vector<SparseCandidate>& candidates, const Spa
     });
 }
 
+bool hasHigherScoreThanPosition(const SparseCandidate& lhs, const SparseCandidate& rhs) {
+    if (lhs.score == rhs.score) {
+        if (lhs.y == rhs.y) {
+            return lhs.x < rhs.x;
+        }
+        return lhs.y < rhs.y;
+    }
+    return lhs.score > rhs.score;
+}
+
 std::vector<SparseCandidate> selectGridBalancedCandidates(
     const std::vector<SparseCandidate>& candidates,
     const FeatureDecodeConfig& config,
     int64_t height,
     int64_t width
 ) {
-    std::vector<SparseCandidate> selected;
-    selected.reserve(static_cast<size_t>(std::min<int64_t>(config.max_keypoints, candidates.size())));
+    std::vector<SparseCandidate> grid_candidates;
     const int per_cell = resolvedKeypointsPerCell(config);
     for (int row = 0; row < config.keypoint_grid_rows; ++row) {
         for (int col = 0; col < config.keypoint_grid_cols; ++col) {
             int taken = 0;
             for (const auto& candidate : candidates) {
-                if (taken >= per_cell || static_cast<int>(selected.size()) >= config.max_keypoints) {
+                if (taken >= per_cell) {
                     break;
                 }
                 if (candidateInCell(candidate, row, col, config, height, width)) {
-                    selected.push_back(candidate);
+                    grid_candidates.push_back(candidate);
                     ++taken;
                 }
             }
         }
+    }
+    std::sort(grid_candidates.begin(), grid_candidates.end(), hasHigherScoreThanPosition);
+
+    std::vector<SparseCandidate> selected;
+    selected.reserve(static_cast<size_t>(std::min<int64_t>(config.max_keypoints, candidates.size())));
+    const float fallback_score = candidates.empty() ? 0.0F : candidates.back().score;
+    const bool has_meaningful_grid_candidate = std::any_of(
+        grid_candidates.begin(), grid_candidates.end(), [&](const SparseCandidate& candidate) {
+            return candidate.score > fallback_score;
+        });
+    for (const auto& candidate : grid_candidates) {
+        if (static_cast<int>(selected.size()) >= config.max_keypoints) {
+            break;
+        }
+        if (has_meaningful_grid_candidate && candidate.score == fallback_score) {
+            continue;
+        }
+        selected.push_back(candidate);
     }
     for (const auto& candidate : candidates) {
         if (static_cast<int>(selected.size()) >= config.max_keypoints) {
