@@ -118,8 +118,14 @@ ctest --test-dir build --output-on-failure
   --output features.pt \
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5 \
-  --visualization-dir vis
+  --visualization-dir vis \
+  --keypoint-grid-rows 8 \
+  --keypoint-grid-cols 8 \
+  --keypoints-per-cell 0 \
+  --nms-radius 4
 ```
+
+推理阶段的稀疏特征点默认会先应用低灰度过滤，再做局部 NMS，随后按网格分块选点，最后用全局高分候选补足 `--max-keypoints`。`--keypoints-per-cell 0` 表示按 `max_keypoints / (rows * cols)` 自动推导，每个 cell 至少 1 个候选。
 
 匹配两张图像：
 

@@ -50,8 +50,14 @@ cmake --build build -j$(nproc)
   --max-keypoints 1024 \
   --semi-dense-threshold 0.5 \
   --visualization-dir vis \
-  --min-keypoint-intensity 0.0
+  --min-keypoint-intensity 0.0 \
+  --keypoint-grid-rows 8 \
+  --keypoint-grid-cols 8 \
+  --keypoints-per-cell 0 \
+  --nms-radius 4
 ```
+
+推理阶段的稀疏特征点默认会先应用低灰度过滤，再做局部 NMS，随后按网格分块选点，最后用全局高分候选补足 `--max-keypoints`。`--keypoints-per-cell 0` 表示按 `max_keypoints / (rows * cols)` 自动推导，每个 cell 至少 1 个候选。
 
 ## 图像匹配
 
@@ -69,6 +75,8 @@ cmake --build build -j$(nproc)
 ```
 
 `--visualization-dir` 会自动创建目录并保存 PNG：特征提取保存特征点覆盖图，图像匹配保存左右拼接的匹配连线图。`--min-keypoint-intensity` 会按归一化灰度过滤低灰度区域，减少行星边缘暗背景伪影上的特征点。两个参数都不改变 `.pt` 文件格式。
+
+`extract` 输出 `elapsed`、`image_load`、`model_forward`、`decode`、`save`、`visualization`。`match` 输出两张图的 `extract_a`、`extract_b`、`match_time`、`save`、`visualization`。`eval` 输出 `pairs`、`elapsed`、`avg_pair_time`。`export` 输出 `elapsed`。
 
 ## 批量评估
 
