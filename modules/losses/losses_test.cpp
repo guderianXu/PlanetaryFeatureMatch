@@ -51,6 +51,36 @@ static void descriptor_loss_lower_for_matching_pairs() {
     PFM_REQUIRE(loss.item<float>() < 0.4F);
 }
 
+static void descriptor_loss_separates_many_matching_candidates() {
+    auto descriptors = torch::eye(32, torch::kFloat32).unsqueeze(0);
+    auto labels = torch::arange(32, torch::kLong).unsqueeze(0);
+
+    auto loss = pfm::descriptor_cross_entropy_loss(descriptors, descriptors, labels);
+
+    PFM_REQUIRE(loss.item<float>() < 0.1F);
+}
+
+static void descriptor_candidate_loss_uses_per_query_candidates() {
+    auto queries = torch::tensor({{{1.0F, 0.0F}, {0.0F, 1.0F}}}, torch::kFloat32);
+    auto candidates = torch::tensor({{{{1.0F, 0.0F}, {0.0F, 1.0F}}, {{0.0F, 1.0F}, {1.0F, 0.0F}}}}, torch::kFloat32);
+    auto labels = torch::zeros({1, 2}, torch::kLong);
+
+    auto loss = pfm::descriptor_candidate_cross_entropy_loss(queries, candidates, labels);
+
+    PFM_REQUIRE(loss.item<float>() < 0.4F);
+}
+
+static void descriptor_diversity_loss_penalizes_collapsed_descriptors() {
+    auto collapsed = torch::ones({1, 4, 2}, torch::kFloat32);
+    auto diverse = torch::tensor({{{1.0F, 0.0F}, {0.0F, 1.0F}, {-1.0F, 0.0F}, {0.0F, -1.0F}}}, torch::kFloat32);
+
+    auto collapsed_loss = pfm::descriptor_diversity_loss(collapsed);
+    auto diverse_loss = pfm::descriptor_diversity_loss(diverse);
+
+    PFM_REQUIRE(collapsed_loss.item<float>() > 0.9F);
+    PFM_REQUIRE(diverse_loss.item<float>() < collapsed_loss.item<float>());
+}
+
 static void descriptor_loss_rejects_non_long_labels() {
     auto a = torch::tensor({{{1.0F, 0.0F}, {0.0F, 1.0F}}}, torch::kFloat32);
     auto b = torch::tensor({{{1.0F, 0.0F}, {0.0F, 1.0F}}}, torch::kFloat32);
@@ -204,6 +234,10 @@ void register_loss_tests() {
     register_test("repeatability loss returns zero for empty mask", repeatability_loss_returns_zero_for_empty_mask);
     register_test("repeatability loss rejects negative mask values", repeatability_loss_rejects_negative_mask_values);
     register_test("descriptor loss lower for matching pairs", descriptor_loss_lower_for_matching_pairs);
+    register_test("descriptor loss separates many matching candidates", descriptor_loss_separates_many_matching_candidates);
+    register_test("descriptor candidate loss uses per query candidates", descriptor_candidate_loss_uses_per_query_candidates);
+    register_test("descriptor diversity loss penalizes collapsed descriptors",
+                  descriptor_diversity_loss_penalizes_collapsed_descriptors);
     register_test("descriptor loss rejects non long labels", descriptor_loss_rejects_non_long_labels);
     register_test(
         "descriptor loss rejects descriptor dtype mismatch",

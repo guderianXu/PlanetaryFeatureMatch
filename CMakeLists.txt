@@ -20,10 +20,13 @@ add_library(pfm STATIC
     modules/infer/match_codec.cpp
     modules/infer/matching_pipeline.cpp
     modules/infer/pipeline.cpp
+    modules/infer/visualization.cpp
     modules/data/image_dataset.cpp
     modules/data/image_io.cpp
+    modules/data/intensity_mask.cpp
     modules/data/normalization.cpp
     modules/data/synthetic_pair.cpp
+    modules/data/synthetic_pair_cache.cpp
     modules/eval/metrics.cpp
     modules/geometry/warp.cpp
     modules/losses/losses.cpp
@@ -56,10 +59,13 @@ add_executable(pfm_tests
     modules/infer/match_codec_test.cpp
     modules/infer/matching_pipeline_test.cpp
     modules/infer/pipeline_test.cpp
+    modules/infer/visualization_test.cpp
     modules/data/image_dataset_test.cpp
     modules/data/image_io_test.cpp
+    modules/data/intensity_mask_test.cpp
     modules/data/normalization_test.cpp
     modules/data/synthetic_pair_test.cpp
+    modules/data/synthetic_pair_cache_test.cpp
     modules/eval/metrics_test.cpp
     modules/geometry/warp_test.cpp
     modules/losses/losses_test.cpp

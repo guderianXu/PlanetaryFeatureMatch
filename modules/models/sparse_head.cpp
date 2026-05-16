@@ -25,7 +25,11 @@ SparseHeadImpl::SparseHeadImpl(int64_t input_channels, int64_t descriptor_dim)
 
     _heatmap = register_module("heatmap", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
     _descriptors = register_module(
-        "descriptors", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, _descriptor_dim, 1)));
+        "descriptors",
+        torch::nn::Sequential(
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, _input_channels, 3).padding(1)),
+            torch::nn::ReLU(torch::nn::ReLUOptions().inplace(true)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, _descriptor_dim, 1))));
     _scale = register_module("scale", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
     _orientation = register_module("orientation", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 2, 1)));
     _affine = register_module("affine", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 4, 1)));

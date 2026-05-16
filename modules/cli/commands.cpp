@@ -15,6 +15,24 @@ namespace pfm {
 std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     auto app = std::make_unique<CLI::App>("Planetary feature matching");
     app->require_subcommand(1);
+    app->get_formatter()->enable_footer_formatting(false);
+    app->footer(
+        "\nCommon command options:\n"
+        "  train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu] "
+        "[--resize 512] [--pairs-per-image 1] [--augmentation-profile mixed] "
+        "[--extreme-pair-ratio 0.2] [--synthetic-pair-cache-dir build/pair_cache] "
+        "[--synthetic-pair-cache-rebuild] [--min-keypoint-intensity 0.0]\n"
+        "  extract --image a.tif --checkpoint model.pt --output features.pt [--device cpu] "
+        "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
+        "[--min-keypoint-intensity 0.0]\n"
+        "  match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] "
+        "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
+        "[--min-keypoint-intensity 0.0]\n"
+        "  eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--device cpu] "
+        "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--min-keypoint-intensity 0.0]\n"
+        "  export --checkpoint model.pt --output exported.pt\n"
+        "\nUse '<subcommand> --help' for detailed descriptions."
+    );
 
     CLI::App* train = app->add_subcommand("train", "Train a feature matching model");
     train->add_option("--image-dir", options.image_dir, "Training image directory")->required();
@@ -25,6 +43,24 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     train->add_option("--device", options.device, "Compute device");
     train->add_option("--epochs", options.epochs, "Training epochs");
     train->add_option("--batch-size", options.batch_size, "Training batch size");
+    train->add_option("--resize", options.resize, "Resize training image max edge; use 0 to keep original size");
+    train->add_option("--pairs-per-image", options.pairs_per_image, "Synthetic training pairs generated per source image");
+    train->add_option("--augmentation-profile",
+                      options.augmentation_profile,
+                      "Synthetic augmentation profile: mixed, mild, medium, hard, or extreme");
+    train->add_option("--extreme-pair-ratio",
+                      options.extreme_pair_ratio,
+                      "Extreme pair ratio used by mixed augmentation profile");
+    train->add_option("--synthetic-pair-cache-dir",
+                      options.synthetic_pair_cache_dir,
+                      "Directory for cached synthetic training pairs");
+    train->add_option("--min-keypoint-intensity",
+                      options.min_keypoint_intensity,
+                      "Minimum normalized image intensity for keypoint supervision")
+        ->check(CLI::Range(0.0, 1.0));
+    train->add_flag("--synthetic-pair-cache-rebuild",
+                    options.synthetic_pair_cache_rebuild,
+                    "Rebuild cached synthetic training pairs");
     train->callback([&options]() { options.command = Command::Train; });
 
     CLI::App* extract = app->add_subcommand("extract", "Extract image features");
@@ -34,6 +70,11 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     extract->add_option("--device", options.device, "Compute device");
     extract->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     extract->add_option("--semi-dense-threshold", options.semi_dense_threshold, "Semi-dense confidence threshold");
+    extract->add_option("--visualization-dir", options.visualization_dir, "Directory for feature visualization PNG output");
+    extract->add_option("--min-keypoint-intensity",
+                        options.min_keypoint_intensity,
+                        "Minimum normalized image intensity for output keypoints")
+        ->check(CLI::Range(0.0, 1.0));
     extract->callback([&options]() { options.command = Command::Extract; });
 
     CLI::App* match = app->add_subcommand("match", "Match two images");
@@ -44,6 +85,11 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     match->add_option("--device", options.device, "Compute device");
     match->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     match->add_option("--semi-dense-threshold", options.semi_dense_threshold, "Semi-dense confidence threshold");
+    match->add_option("--visualization-dir", options.visualization_dir, "Directory for match visualization PNG output");
+    match->add_option("--min-keypoint-intensity",
+                      options.min_keypoint_intensity,
+                      "Minimum normalized image intensity for output keypoints")
+        ->check(CLI::Range(0.0, 1.0));
     match->callback([&options]() { options.command = Command::Match; });
 
     CLI::App* eval = app->add_subcommand("eval", "Evaluate feature matching results");
@@ -53,6 +99,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     eval->add_option("--device", options.device, "Compute device");
     eval->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     eval->add_option("--semi-dense-threshold", options.semi_dense_threshold, "Semi-dense confidence threshold");
+    eval->add_option("--min-keypoint-intensity",
+                     options.min_keypoint_intensity,
+                     "Minimum normalized image intensity for output keypoints")
+        ->check(CLI::Range(0.0, 1.0));
     eval->callback([&options]() { options.command = Command::Eval; });
 
     CLI::App* export_command = app->add_subcommand("export", "Export a trained model");

@@ -1,15 +1,43 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+
 #include <torch/torch.h>
 
 namespace pfm {
 
+enum class SyntheticPairAugmentationProfile {
+    Mixed,
+    Mild,
+    Medium,
+    Hard,
+    Extreme,
+};
+
+/// Parses a synthetic pair augmentation profile name.
+/// @param value Profile name: mixed, mild, medium, hard, or extreme.
+/// @return Parsed profile enum.
+/// @throws std::invalid_argument if the profile name is unsupported.
+SyntheticPairAugmentationProfile parse_synthetic_pair_augmentation_profile(const std::string& value);
+
+/// Converts a synthetic pair augmentation profile to its CLI name.
+/// @param profile Profile enum value.
+/// @return Stable lowercase profile name.
+std::string synthetic_pair_augmentation_profile_name(SyntheticPairAugmentationProfile profile);
+
 struct SyntheticPairConfig {
     float translation_x = 0.0F;
     float translation_y = 0.0F;
+    float rotation_degrees = 0.0F;
+    float scale = 1.0F;
     float brightness_delta = 0.0F;
     float contrast_scale = 1.0F;
     float noise_sigma = 0.0F;
+    int64_t variant_index = 0;
+    int64_t source_index = 0;
+    SyntheticPairAugmentationProfile augmentation_profile = SyntheticPairAugmentationProfile::Mixed;
+    double extreme_pair_ratio = 0.2;
 };
 
 struct SyntheticPair {

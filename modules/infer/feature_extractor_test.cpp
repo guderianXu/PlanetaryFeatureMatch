@@ -61,6 +61,58 @@ static void decode_sparse_features_gathers_values_at_top_k_points() {
     PFM_REQUIRE_CLOSE(features.affine.index({1, 1, 1}).item<float>(), 24.0F, 1.0e-6F);
 }
 
+static void decode_feature_maps_excludes_masked_sparse_locations() {
+    auto heatmap = torch::zeros({1, 1, 2, 3}, torch::kFloat32);
+    heatmap.index_put_({0, 0, 0, 0}, 10.0F);
+    heatmap.index_put_({0, 0, 1, 2}, 9.0F);
+    auto maps = makeMaps(heatmap, torch::ones({1, 1, 2, 3}, torch::kFloat32));
+    const auto mask = torch::tensor({{0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}}, torch::kFloat32);
+
+    const auto features = pfm::decode_feature_maps(maps, 2, 0.5, mask);
+
+    PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({1, 2}));
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 2.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 9.0F, 1.0e-6F);
+}
+
+static void decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty() {
+    auto maps = makeMaps(torch::ones({1, 1, 2, 2}, torch::kFloat32), torch::ones({1, 1, 2, 2}, torch::kFloat32));
+    maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    maps.scale = torch::ones({1, 1, 2, 2}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    maps.affine = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    const auto mask = torch::zeros({2, 2}, torch::kFloat32);
+
+    const auto features = pfm::decode_feature_maps(maps, 4, 0.5, mask);
+
+    PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({0, 2}));
+    PFM_REQUIRE(features.scores.sizes() == torch::IntArrayRef({0}));
+    PFM_REQUIRE(features.descriptors.sizes() == torch::IntArrayRef({0, 4}));
+    PFM_REQUIRE(features.scale.sizes() == torch::IntArrayRef({0}));
+    PFM_REQUIRE(features.orientation.sizes() == torch::IntArrayRef({0, 2}));
+    PFM_REQUIRE(features.affine.sizes() == torch::IntArrayRef({0, 2, 2}));
+}
+
+static void decode_feature_maps_filters_dense_points_with_mask() {
+    const auto heatmap = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
+    const auto dense_confidence = torch::ones({1, 1, 2, 2}, torch::kFloat32);
+    auto maps = makeMaps(heatmap, dense_confidence);
+    maps.descriptors = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    maps.scale = torch::ones({1, 1, 2, 2}, torch::kFloat32);
+    maps.orientation = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    maps.affine = torch::ones({1, 4, 2, 2}, torch::kFloat32);
+    const auto mask = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+
+    const auto features = pfm::decode_feature_maps(maps, 1, 0.5, mask);
+
+    PFM_REQUIRE(features.dense_points.sizes() == torch::IntArrayRef({2, 2}));
+    PFM_REQUIRE_CLOSE(features.dense_points.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.dense_points.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.dense_points.index({1, 0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.dense_points.index({1, 1}).item<float>(), 1.0F, 1.0e-6F);
+}
+
 static void decode_dense_features_returns_exact_points_and_confidence() {
     const auto heatmap = torch::zeros({1, 1, 2, 2}, torch::kFloat32);
     const auto dense_confidence = torch::tensor({{{{0.1F, 0.9F}, {0.8F, 0.2F}}}}, torch::kFloat32);
@@ -153,6 +205,15 @@ void register_feature_extractor_tests() {
     register_test(
         "decode_sparse_features_gathers_values_at_top_k_points",
         decode_sparse_features_gathers_values_at_top_k_points);
+    register_test(
+        "decode_feature_maps_excludes_masked_sparse_locations",
+        decode_feature_maps_excludes_masked_sparse_locations);
+    register_test(
+        "decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty",
+        decode_feature_maps_returns_empty_sparse_features_when_mask_is_empty);
+    register_test(
+        "decode_feature_maps_filters_dense_points_with_mask",
+        decode_feature_maps_filters_dense_points_with_mask);
     register_test(
         "decode_dense_features_returns_exact_points_and_confidence",
         decode_dense_features_returns_exact_points_and_confidence);

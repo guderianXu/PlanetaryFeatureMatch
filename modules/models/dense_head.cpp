@@ -2,6 +2,9 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include "core/tensor_utils.h"
 
 namespace pfm {
 namespace {
@@ -17,7 +20,7 @@ void require_positive_channels(int64_t channels, const char* name) {
 DenseHeadImpl::DenseHeadImpl(int64_t feature_channels) : _feature_channels(feature_channels) {
     require_positive_channels(_feature_channels, "feature_channels");
 
-    const int64_t input_channels = _feature_channels * 3;
+    const int64_t input_channels = _feature_channels * 3 + 2;
     _predictor = register_module(
         "predictor",
         torch::nn::Sequential(
@@ -40,7 +43,17 @@ DenseHeadOutput DenseHeadImpl::forward(const torch::Tensor& feature_a, const tor
         throw std::invalid_argument("feature tensor channel count does not match dense head");
     }
 
-    auto pair_feature = torch::cat({feature_a, feature_b, torch::abs(feature_a - feature_b)}, 1);
+    auto coordinates = make_xy_grid(feature_a.size(2), feature_a.size(3), feature_a.device()).to(feature_a.dtype());
+    coordinates.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 0},
+                           coordinates.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}) /
+                                   std::max<int64_t>(1, feature_a.size(3) - 1) * 2.0 -
+                               1.0);
+    coordinates.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 1},
+                           coordinates.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}) /
+                                   std::max<int64_t>(1, feature_a.size(2) - 1) * 2.0 -
+                               1.0);
+    auto coordinate_channels = coordinates.permute({2, 0, 1}).unsqueeze(0).expand({feature_a.size(0), 2, feature_a.size(2), feature_a.size(3)});
+    auto pair_feature = torch::cat({feature_a, feature_b, torch::abs(feature_a - feature_b), coordinate_channels}, 1);
     auto prediction = _predictor->forward(pair_feature);
 
     using torch::indexing::Slice;

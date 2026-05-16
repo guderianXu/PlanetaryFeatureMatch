@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -75,9 +76,39 @@ void appendPoint(std::vector<float>& points, int64_t y, int64_t x) {
     points.push_back(static_cast<float>(y));
 }
 
+torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width) {
+    if (!mask.defined()) {
+        return torch::ones({height, width}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
+    }
+    if (!mask.device().is_cpu()) {
+        throw std::invalid_argument("intensity_mask must be a CPU tensor");
+    }
+    if (mask.dim() != 2) {
+        throw std::invalid_argument("intensity_mask must be 2D");
+    }
+    auto float_mask = mask.to(torch::kFloat32).unsqueeze(0).unsqueeze(0);
+    if (mask.size(0) != height || mask.size(1) != width) {
+        float_mask = torch::nn::functional::interpolate(
+            float_mask,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{height, width})
+                .mode(torch::kNearest));
+    }
+    return float_mask.squeeze().gt(0.0).contiguous();
+}
+
 }  // namespace
 
 FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, double semi_dense_threshold) {
+    return decode_feature_maps(maps, max_keypoints, semi_dense_threshold, torch::Tensor());
+}
+
+FeatureSet decode_feature_maps(
+    const RawFeatureMaps& maps,
+    int max_keypoints,
+    double semi_dense_threshold,
+    const torch::Tensor& intensity_mask
+) {
     if (max_keypoints <= 0) {
         throw std::invalid_argument("max_keypoints must be positive");
     }
@@ -92,8 +123,15 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
 
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
-    const int64_t sparse_count = std::min<int64_t>(max_keypoints, height * width);
-    const auto topk = torch::topk(heatmap.flatten(), sparse_count);
+    const auto valid_mask = prepare_decode_mask(intensity_mask, height, width);
+    const auto valid_flat = valid_mask.flatten();
+    const int64_t valid_count = valid_flat.to(torch::kLong).sum().item<int64_t>();
+    const int64_t sparse_count = std::min<int64_t>(max_keypoints, valid_count);
+    const auto masked_heatmap = heatmap.flatten().masked_fill(valid_flat.logical_not(), -std::numeric_limits<float>::infinity());
+    const auto topk = sparse_count == 0
+        ? std::make_tuple(torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32)),
+                          torch::empty({0}, torch::TensorOptions().dtype(torch::kLong)))
+        : torch::topk(masked_heatmap, sparse_count);
     const auto topk_values = std::get<0>(topk).contiguous();
     const auto topk_indices = std::get<1>(topk).to(torch::kLong).contiguous();
 
@@ -130,10 +168,11 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
     std::vector<float> dense_confidence;
     const int64_t dense_height = dense_confidence_map.size(2);
     const int64_t dense_width = dense_confidence_map.size(3);
+    const auto dense_valid_mask = prepare_decode_mask(intensity_mask, dense_height, dense_width);
     for (int64_t y = 0; y < dense_height; ++y) {
         for (int64_t x = 0; x < dense_width; ++x) {
             const float confidence = dense_confidence_map.index({0, 0, y, x}).item<float>();
-            if (confidence >= semi_dense_threshold) {
+            if (confidence >= semi_dense_threshold && dense_valid_mask.index({y, x}).item<bool>()) {
                 appendPoint(dense_points, y, x);
                 dense_confidence.push_back(confidence);
             }

@@ -28,8 +28,16 @@ cmake --build build -j$(nproc)
   --checkpoint model.pt \
   --epochs 1 \
   --batch-size 1 \
-  --device cpu
+  --device cpu \
+  --resize 512 \
+  --pairs-per-image 4 \
+  --augmentation-profile mixed \
+  --extreme-pair-ratio 0.2 \
+  --synthetic-pair-cache-dir build/pair_cache \
+  --min-keypoint-intensity 0.0
 ```
+
+指定 `--synthetic-pair-cache-dir` 后会先生成合成训练对缓存；后续缓存完整且配置匹配时直接复用。`--pairs-per-image` 可让每张真实图像生成多组不同变换的合成匹配对，用于增加训练样本。`--min-keypoint-intensity` 会把低于阈值的灰度区域从训练监督中排除，适合屏蔽行星边缘低灰度伪影。`--augmentation-profile mixed` 会混合 mild/medium/hard/extreme 强度；想检查极端现象时可用 `--augmentation-profile extreme`。缓存中 PNG 用于查看变换后的图，`.pt` 文件保存训练用的 `view_a`、`view_b`、`warp_a_to_b` 和 `valid_mask`。需要强制重建时添加 `--synthetic-pair-cache-rebuild`。
 
 ## 特征提取
 
@@ -40,7 +48,9 @@ cmake --build build -j$(nproc)
   --output features.pt \
   --device cpu \
   --max-keypoints 1024 \
-  --semi-dense-threshold 0.5
+  --semi-dense-threshold 0.5 \
+  --visualization-dir vis \
+  --min-keypoint-intensity 0.0
 ```
 
 ## 图像匹配
@@ -53,8 +63,12 @@ cmake --build build -j$(nproc)
   --output matches.pt \
   --device cpu \
   --max-keypoints 1024 \
-  --semi-dense-threshold 0.5
+  --semi-dense-threshold 0.5 \
+  --visualization-dir vis \
+  --min-keypoint-intensity 0.0
 ```
+
+`--visualization-dir` 会自动创建目录并保存 PNG：特征提取保存特征点覆盖图，图像匹配保存左右拼接的匹配连线图。`--min-keypoint-intensity` 会按归一化灰度过滤低灰度区域，减少行星边缘暗背景伪影上的特征点。两个参数都不改变 `.pt` 文件格式。
 
 ## 批量评估
 
@@ -95,6 +109,22 @@ images/a.tif images/b.tif
 ```
 
 `cuda` 等价于 `cuda:0`。CUDA 不可用、索引越界或格式错误时会明确失败，不会静默退回 CPU。当前 CUDA 覆盖训练 forward/backward/loss 和推理模型 forward；图像读取、特征解码、匹配后处理、评估汇总和 `.pt` 写出仍在 CPU。
+
+GPU 训练时可调大 `--resize`、`--batch-size` 或增加训练图像数量，以增加每轮计算量和显存占用，例如：
+
+```bash
+./build/pfm_cli train \
+  --image-dir build/img \
+  --checkpoint train.pt \
+  --epochs 100 \
+  --batch-size 16 \
+  --device cuda \
+  --resize 512 \
+  --pairs-per-image 4 \
+  --augmentation-profile mixed \
+  --extreme-pair-ratio 0.2 \
+  --synthetic-pair-cache-dir build/pair_cache
+```
 
 ## 测试程序 `pfm_tests`
 

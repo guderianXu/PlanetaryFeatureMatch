@@ -30,7 +30,7 @@ private:
     int64_t _input_channels;
     int64_t _descriptor_dim;
     torch::nn::Conv2d _heatmap{nullptr};
-    torch::nn::Conv2d _descriptors{nullptr};
+    torch::nn::Sequential _descriptors{nullptr};
     torch::nn::Conv2d _scale{nullptr};
     torch::nn::Conv2d _orientation{nullptr};
     torch::nn::Conv2d _affine{nullptr};

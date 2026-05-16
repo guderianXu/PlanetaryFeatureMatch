@@ -9,6 +9,8 @@
 namespace pfm {
 namespace {
 
+constexpr float DESCRIPTOR_LOGIT_SCALE = 20.0F;
+
 void requireSameShape(const torch::Tensor& lhs, const torch::Tensor& rhs, const char* lhs_name, const char* rhs_name) {
     if (!lhs.sizes().equals(rhs.sizes())) {
         throw std::invalid_argument(std::string(lhs_name) + " and " + rhs_name + " must have the same shape");
@@ -144,8 +146,61 @@ torch::Tensor descriptor_cross_entropy_loss(
 
     auto normalized_a = normalizeDescriptors(descriptors_a);
     auto normalized_b = normalizeDescriptors(descriptors_b);
-    auto logits = torch::bmm(normalized_a, normalized_b.transpose(1, 2));
+    auto logits = torch::bmm(normalized_a, normalized_b.transpose(1, 2)) * DESCRIPTOR_LOGIT_SCALE;
     return torch::nn::functional::cross_entropy(logits.reshape({-1, candidate_count}), target_indices.reshape({-1}));
+}
+
+torch::Tensor descriptor_candidate_cross_entropy_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& candidate_descriptors,
+    const torch::Tensor& target_indices) {
+    if (descriptors_a.dim() != 3 || candidate_descriptors.dim() != 4) {
+        throw std::invalid_argument("descriptor tensors must have shape BxNxD and BxNxKxD");
+    }
+    if (descriptors_a.size(0) != candidate_descriptors.size(0) ||
+        descriptors_a.size(1) != candidate_descriptors.size(1) ||
+        descriptors_a.size(2) != candidate_descriptors.size(3)) {
+        throw std::invalid_argument("candidate descriptors must share batch, query count, and descriptor dimension");
+    }
+    requireSameDtype(descriptors_a, candidate_descriptors, "descriptors_a", "candidate_descriptors");
+    requireSameDevice(descriptors_a, candidate_descriptors, "descriptors_a", "candidate_descriptors");
+    requireSameDevice(descriptors_a, target_indices, "descriptors_a", "target_indices");
+    if (target_indices.dtype() != torch::kLong) {
+        throw std::invalid_argument("target_indices must have dtype torch::kLong");
+    }
+    if (target_indices.dim() != 2 || target_indices.size(0) != descriptors_a.size(0) ||
+        target_indices.size(1) != descriptors_a.size(1)) {
+        throw std::invalid_argument("target_indices must have shape BxN");
+    }
+
+    const auto candidate_count = candidate_descriptors.size(2);
+    if (target_indices.numel() > 0 && target_indices.lt(0).any().item<bool>()) {
+        throw std::invalid_argument("target_indices cannot contain negative labels");
+    }
+    if (target_indices.numel() > 0 && target_indices.ge(candidate_count).any().item<bool>()) {
+        throw std::invalid_argument("target_indices labels must be less than descriptor candidate count");
+    }
+
+    auto normalized_a = normalizeDescriptors(descriptors_a).unsqueeze(2);
+    auto normalized_candidates = candidate_descriptors / candidate_descriptors.pow(2).sum(3, true).clamp_min(1.0e-12).sqrt();
+    auto logits = (normalized_a * normalized_candidates).sum(3) * DESCRIPTOR_LOGIT_SCALE;
+    return torch::nn::functional::cross_entropy(logits.reshape({-1, candidate_count}), target_indices.reshape({-1}));
+}
+
+torch::Tensor descriptor_diversity_loss(const torch::Tensor& descriptors) {
+    if (descriptors.dim() != 3) {
+        throw std::invalid_argument("descriptors must have shape BxNxD");
+    }
+    const auto descriptor_count = descriptors.size(1);
+    if (descriptor_count < 2) {
+        return torch::zeros({}, descriptors.options());
+    }
+
+    auto normalized = normalizeDescriptors(descriptors);
+    auto similarity = torch::bmm(normalized, normalized.transpose(1, 2));
+    auto eye = torch::eye(descriptor_count, descriptors.options()).unsqueeze(0).to(torch::kBool);
+    auto off_diagonal = similarity.masked_select(eye.logical_not());
+    return torch::relu(off_diagonal).mean();
 }
 
 torch::Tensor masked_l1_loss(const torch::Tensor& prediction, const torch::Tensor& target, const torch::Tensor& mask) {

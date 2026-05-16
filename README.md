@@ -8,6 +8,7 @@ PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影�
 
 - OpenCV 图像读取：支持常见 8/16 位灰度图和 RGB/BGR 图像。
 - LibTorch 训练：使用真实图像生成自监督合成图像对并执行最小训练循环。
+- 合成对缓存：可在训练前把变换后的图像和 `.pt` 监督文件生成到指定目录，后续训练直接复用。
 - CUDA 设备选择：训练和推理 forward 支持 `cpu`、`cuda`、`cuda:N`。
 - Checkpoint：使用 LibTorch `.pt` archive 保存和加载模型，CUDA 训练后仍保存为 CPU 权重。
 - 特征提取：输出稀疏关键点、描述子、尺度、方向、仿射形状和半稠密点。
@@ -33,7 +34,7 @@ PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影�
 modules/
   cli/        CLI11 命令解析与测试
   core/       张量校验和网格工具
-  data/       图像 IO、ImageDataset、归一化与自监督合成图像对
+  data/       图像 IO、ImageDataset、归一化、自监督合成图像对和缓存
   eval/       匹配指标和半稠密覆盖率指标
   geometry/   仿射 warp 辅助函数
   infer/      特征/匹配编解码、特征解码、匹配与评估流水线
@@ -46,6 +47,8 @@ tests/
   test_main.cpp
   test_harness.h
 ```
+
+合成训练对缓存由 `modules/data/synthetic_pair_cache.*` 管理：PNG 文件用于人工检查变换结果，`.pt` 文件保存训练实际需要的 `view_a`、`view_b`、`warp_a_to_b` 和 `valid_mask`。
 
 项目按模块组织代码，不使用 `include/` 与 `src/` 分离的库式布局。
 
@@ -92,6 +95,20 @@ ctest --test-dir build --output-on-failure
   --batch-size 1
 ```
 
+如果希望先离线生成变换后的训练对，再从缓存训练，可以加缓存目录：
+
+```bash
+./build/pfm_cli train \
+  --image-dir images \
+  --checkpoint model.pt \
+  --epochs 1 \
+  --batch-size 1 \
+  --pairs-per-image 4 \
+  --synthetic-pair-cache-dir build/pair_cache
+```
+
+第一次运行会生成 `manifest.pt`、`pair_000000.pt`、`source_000000_view_a.png` 和 `pair_000000_view_b.png` 等文件；`--pairs-per-image` 可让每张原图生成多组不同平移、旋转、尺度和光照扰动的匹配对。同一源图的 A 视图只保存一个 `source_XXXXXX_view_a.png`，每个增强 pair 保存自己的 `pair_XXXXXX_view_b.png`。默认 `--augmentation-profile mixed` 会混合 mild/medium/hard/extreme 强度；如果想明显检查极端变换，可临时使用 `--augmentation-profile extreme`。后续配置匹配时直接复用。需要强制重建时添加 `--synthetic-pair-cache-rebuild`。
+
 训练完成后提取单张图像特征：
 
 ```bash
@@ -100,7 +117,8 @@ ctest --test-dir build --output-on-failure
   --checkpoint model.pt \
   --output features.pt \
   --max-keypoints 1024 \
-  --semi-dense-threshold 0.5
+  --semi-dense-threshold 0.5 \
+  --visualization-dir vis
 ```
 
 匹配两张图像：
@@ -112,8 +130,11 @@ ctest --test-dir build --output-on-failure
   --checkpoint model.pt \
   --output matches.pt \
   --max-keypoints 1024 \
-  --semi-dense-threshold 0.5
+  --semi-dense-threshold 0.5 \
+  --visualization-dir vis
 ```
+
+推理命令可以加 `--device cuda` 使用 GPU 跑模型 forward。当前 CUDA 覆盖模型前向；图像读取、特征解码、匹配后处理、PNG 可视化和 `.pt` 写出仍在 CPU。若要肉眼观察效果，可以给 `extract` 或 `match` 添加 `--visualization-dir vis`：`extract` 会生成 `<image_stem>_features.png`，`match` 会生成 `<image_a_stem>__<image_b_stem>_matches.png`。
 
 准备评估 pairs 文件：
 
@@ -145,7 +166,7 @@ images/a.tif images/b.tif
 ### `train`
 
 ```bash
-./build/pfm_cli train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu]
+./build/pfm_cli train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu] [--resize 512] [--pairs-per-image 1] [--augmentation-profile mixed] [--extreme-pair-ratio 0.2] [--synthetic-pair-cache-dir build/pair_cache] [--synthetic-pair-cache-rebuild] [--min-keypoint-intensity 0.0]
 ```
 
 - `--image-dir`：训练图像目录。
@@ -153,26 +174,51 @@ images/a.tif images/b.tif
 - `--epochs`：训练轮数，默认 1。
 - `--batch-size`：batch 大小，默认 1。
 - `--device`：计算设备，默认 `cpu`；可写 `cuda` 或 `cuda:0`，其中 `cuda` 等价于 `cuda:0`。
+- `--resize`：训练前将图像最大边缩放到该值以内；默认 512，传 0 才保持原图尺寸，必须为非负数。
+- `--pairs-per-image`：每张真实图像生成多少组自监督合成匹配对，默认 1；增大后每轮训练样本数变为 `图像数 × pairs_per_image`。
+- `--augmentation-profile`：合成增强强度，支持 `mixed`、`mild`、`medium`、`hard`、`extreme`；默认 `mixed`。
+- `--extreme-pair-ratio`：`mixed` 中极端样本比例控制入口，默认 0.2，取值范围 `[0, 1]`。
+- `--synthetic-pair-cache-dir`：合成训练对缓存目录；未指定时仍在训练循环中在线生成。
+- `--synthetic-pair-cache-rebuild`：忽略已有缓存并强制重新生成。
+- `--min-keypoint-intensity`：关键点监督和输出的最低归一化灰度阈值，默认 0.0，取值范围 `[0, 1]`。
 
-第一阶段训练会对大图做 CPU 友好的尺寸限幅，并限制每轮样本数，避免真实大幅面 TIFF 在本地 smoke 中占用过多内存和时间。显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。
+默认每轮使用目录中的全部训练图像；设置 `--pairs-per-image N` 后，每张图会派生 N 个不同合成 pair。训练时 `--min-keypoint-intensity` 会同时要求源视图和目标视图对应位置达到阈值，低灰度区域不参与 repeatability、descriptor、offset 和 confidence 监督。`--batch-size` 只控制每次反向传播的样本分组大小。CUDA 训练时可以调大 `--resize`、`--batch-size`、`--pairs-per-image` 或增加训练图像数量，以增加 GPU 计算量和显存占用。显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。
+
+指定缓存目录后，训练开始前会先生成合成对缓存。缓存完整且配置匹配时会复用；缓存缺失、数量不匹配、每图 pair 数、缩放尺寸、profile、极端比例或合成参数变化时会自动重建。PNG 只用于查看变换效果，训练读取 `.pt` 中的监督张量。
+
+```bash
+./build/pfm_cli train \
+  --image-dir build/img \
+  --checkpoint train.pt \
+  --epochs 100 \
+  --batch-size 16 \
+  --device cuda \
+  --resize 512 \
+  --pairs-per-image 4 \
+  --augmentation-profile mixed \
+  --extreme-pair-ratio 0.2 \
+  --synthetic-pair-cache-dir build/pair_cache
+```
 
 ### `extract`
 
 ```bash
-./build/pfm_cli extract --image a.tif --checkpoint model.pt --output features.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+./build/pfm_cli extract --image a.tif --checkpoint model.pt --output features.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] [--min-keypoint-intensity 0.0]
 ```
 
 - 输出为 LibTorch `.pt` archive。
 - 包含稀疏关键点、分数、描述子、尺度、方向、仿射形状、半稠密点和半稠密置信度。
+- `--min-keypoint-intensity` 会按原图归一化灰度生成掩码，低于阈值的位置不会输出为稀疏关键点或半稠密点。
 
 ### `match`
 
 ```bash
-./build/pfm_cli match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5]
+./build/pfm_cli match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] [--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] [--min-keypoint-intensity 0.0]
 ```
 
 - 输出为 LibTorch `.pt` archive。
 - 包含稀疏匹配索引、稀疏匹配分数、半稠密点对和置信度。
+- `--min-keypoint-intensity` 会分别过滤两张图中的低灰度特征点，再进行匹配。
 
 ### `eval`
 
@@ -226,10 +272,10 @@ ctest --test-dir build --output-on-failure
 
 ## 当前限制
 
-- 第一阶段训练使用轻量自监督扰动，主要验证链路，不保证最终匹配效果。
-- 真实大图训练会被缩小到较小边长以保证本地 smoke 可运行。
+- 当前合成增强已支持混合强度和极端旋转/尺度/光照扰动，但仍属于自监督近似，不保证最终匹配效果。
+- 真实大图训练默认会被缩小到较小边长以保证本地 smoke 可运行；正式 CUDA 训练应显式调大训练规模参数。
 - `train` 中的 `--pairs`、`--config`、`--output` 已保留在 CLI 中，但当前主要训练输出使用 `--checkpoint`。
-- 后续需要继续增强仿射、透视、畸变、阴影、遮挡和多尺度几何监督。
+- 后续还需要继续加入透视、相机畸变、遮挡和多尺度几何监督。
 
 ## 开发验证建议
 

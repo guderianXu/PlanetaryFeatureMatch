@@ -28,6 +28,25 @@ torch::Tensor descriptor_cross_entropy_loss(
     const torch::Tensor& descriptors_b,
     const torch::Tensor& target_indices);
 
+/// Computes descriptor matching cross entropy from per-query candidate descriptors.
+///
+/// \param descriptors_a Tensor shaped BxNxD containing query descriptors.
+/// \param candidate_descriptors Tensor shaped BxNxKxD containing candidates for each query.
+/// \param target_indices Long tensor shaped BxN containing the matching candidate index for each query.
+/// \return Scalar tensor containing cross entropy over per-query descriptor similarities.
+/// \throws std::invalid_argument if descriptors or labels have incompatible shape, dtype, device, or values.
+torch::Tensor descriptor_candidate_cross_entropy_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& candidate_descriptors,
+    const torch::Tensor& target_indices);
+
+/// Penalizes descriptor collapse by discouraging positive cosine similarity among descriptors from the same image.
+///
+/// \param descriptors Tensor shaped BxNxD containing descriptor samples.
+/// \return Scalar tensor containing zero for fewer than two descriptors, otherwise mean positive pairwise similarity.
+/// \throws std::invalid_argument if descriptors is not BxNxD.
+torch::Tensor descriptor_diversity_loss(const torch::Tensor& descriptors);
+
 /// Computes masked mean L1 loss.
 ///
 /// \param prediction Predicted tensor.
