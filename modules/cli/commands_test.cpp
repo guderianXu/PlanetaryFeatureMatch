@@ -50,6 +50,62 @@ static void parse_extract_command() {
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
 }
 
+static void parse_extract_keypoint_distribution_options() {
+    const auto options = pfm::parse_cli({
+        "pfm",
+        "extract",
+        "--image",
+        "a.png",
+        "--checkpoint",
+        "model.pt",
+        "--output",
+        "features.pt",
+        "--keypoint-grid-rows",
+        "4",
+        "--keypoint-grid-cols",
+        "6",
+        "--keypoints-per-cell",
+        "3",
+        "--nms-radius",
+        "2"});
+
+    PFM_REQUIRE(options.keypoint_grid_rows == 4);
+    PFM_REQUIRE(options.keypoint_grid_cols == 6);
+    PFM_REQUIRE(options.keypoints_per_cell == 3);
+    PFM_REQUIRE(options.nms_radius == 2);
+}
+
+static void parse_invalid_keypoint_distribution_options_throw() {
+    PFM_REQUIRE_THROWS_AS(
+        pfm::parse_cli({
+            "pfm",
+            "extract",
+            "--image",
+            "a.png",
+            "--checkpoint",
+            "model.pt",
+            "--output",
+            "features.pt",
+            "--keypoint-grid-rows",
+            "0"}),
+        CLI::ParseError);
+    PFM_REQUIRE_THROWS_AS(
+        pfm::parse_cli({
+            "pfm",
+            "match",
+            "--image-a",
+            "a.png",
+            "--image-b",
+            "b.png",
+            "--checkpoint",
+            "model.pt",
+            "--output",
+            "matches.pt",
+            "--nms-radius",
+            "-1"}),
+        CLI::ParseError);
+}
+
 static void parse_train_defaults_to_bounded_resize() {
     const auto parsed = pfm::parse_cli({
         "pfm",
@@ -239,6 +295,10 @@ static void top_level_help_lists_subcommand_options() {
     PFM_REQUIRE(help.find("--synthetic-pair-cache-dir") != std::string::npos);
     PFM_REQUIRE(help.find("--visualization-dir") != std::string::npos);
     PFM_REQUIRE(help.find("--min-keypoint-intensity") != std::string::npos);
+    PFM_REQUIRE(help.find("--keypoint-grid-rows") != std::string::npos);
+    PFM_REQUIRE(help.find("--keypoint-grid-cols") != std::string::npos);
+    PFM_REQUIRE(help.find("--keypoints-per-cell") != std::string::npos);
+    PFM_REQUIRE(help.find("--nms-radius") != std::string::npos);
     PFM_REQUIRE(help.find("extract --image") != std::string::npos);
     PFM_REQUIRE(help.find("match --image-a") != std::string::npos);
     PFM_REQUIRE(help.find("eval --pairs") != std::string::npos);
@@ -322,6 +382,8 @@ void register_cli_tests() {
     register_test("parse_missing_subcommand_throws", parse_missing_subcommand_throws);
     register_test("parse_extract_missing_required_option_throws", parse_extract_missing_required_option_throws);
     register_test("parse_extract_command", parse_extract_command);
+    register_test("parse_extract_keypoint_distribution_options", parse_extract_keypoint_distribution_options);
+    register_test("parse_invalid_keypoint_distribution_options_throw", parse_invalid_keypoint_distribution_options_throw);
     register_test("parse_train_defaults_to_bounded_resize", parse_train_defaults_to_bounded_resize);
     register_test("parse_train_command", parse_train_command);
     register_test("parse_match_command", parse_match_command);

@@ -15,6 +15,22 @@ struct RawFeatureMaps {
     torch::Tensor dense_confidence;
 };
 
+/// Controls sparse keypoint and semi-dense feature decoding.
+struct FeatureDecodeConfig {
+    /// Maximum sparse keypoints to return.
+    int max_keypoints = 1024;
+    /// Minimum dense confidence value for semi-dense output.
+    double semi_dense_threshold = 0.5;
+    /// Sparse keypoint grid row count.
+    int keypoint_grid_rows = 8;
+    /// Sparse keypoint grid column count.
+    int keypoint_grid_cols = 8;
+    /// Sparse keypoints per grid cell; 0 derives the value from max_keypoints.
+    int keypoints_per_cell = 0;
+    /// Sparse keypoint non-maximum suppression radius in feature-map pixels.
+    int nms_radius = 4;
+};
+
 /// Decodes sparse and dense feature tensors from raw network output maps.
 /// @param maps Raw heatmap, descriptor, scale, orientation, affine, and dense confidence maps; each must be
 /// defined CPU 4D tensors with batch size 1, matching positive spatial sizes, and valid channel counts.

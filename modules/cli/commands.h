@@ -34,6 +34,10 @@ struct CliOptions {
     int max_keypoints = 1024;
     double semi_dense_threshold = 0.5;
     double min_keypoint_intensity = 0.0;
+    int keypoint_grid_rows = 8;
+    int keypoint_grid_cols = 8;
+    int keypoints_per_cell = 0;
+    int nms_radius = 4;
     int epochs = 1;
     int batch_size = 1;
     int resize = 512;

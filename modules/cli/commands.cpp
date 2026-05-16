@@ -24,12 +24,15 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
         "[--synthetic-pair-cache-rebuild] [--min-keypoint-intensity 0.0]\n"
         "  extract --image a.tif --checkpoint model.pt --output features.pt [--device cpu] "
         "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
-        "[--min-keypoint-intensity 0.0]\n"
+        "[--min-keypoint-intensity 0.0] [--keypoint-grid-rows 8] [--keypoint-grid-cols 8] "
+        "[--keypoints-per-cell 0] [--nms-radius 4]\n"
         "  match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] "
         "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
-        "[--min-keypoint-intensity 0.0]\n"
+        "[--min-keypoint-intensity 0.0] [--keypoint-grid-rows 8] [--keypoint-grid-cols 8] "
+        "[--keypoints-per-cell 0] [--nms-radius 4]\n"
         "  eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--device cpu] "
-        "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--min-keypoint-intensity 0.0]\n"
+        "[--max-keypoints 1024] [--semi-dense-threshold 0.5] [--min-keypoint-intensity 0.0] "
+        "[--keypoint-grid-rows 8] [--keypoint-grid-cols 8] [--keypoints-per-cell 0] [--nms-radius 4]\n"
         "  export --checkpoint model.pt --output exported.pt\n"
         "\nUse '<subcommand> --help' for detailed descriptions."
     );
@@ -75,6 +78,16 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
                         options.min_keypoint_intensity,
                         "Minimum normalized image intensity for output keypoints")
         ->check(CLI::Range(0.0, 1.0));
+    extract->add_option("--keypoint-grid-rows", options.keypoint_grid_rows, "Sparse keypoint grid rows")
+        ->check(CLI::PositiveNumber);
+    extract->add_option("--keypoint-grid-cols", options.keypoint_grid_cols, "Sparse keypoint grid columns")
+        ->check(CLI::PositiveNumber);
+    extract->add_option("--keypoints-per-cell",
+                        options.keypoints_per_cell,
+                        "Sparse keypoints per grid cell; 0 derives from max-keypoints")
+        ->check(CLI::NonNegativeNumber);
+    extract->add_option("--nms-radius", options.nms_radius, "Sparse keypoint NMS radius in feature-map pixels")
+        ->check(CLI::NonNegativeNumber);
     extract->callback([&options]() { options.command = Command::Extract; });
 
     CLI::App* match = app->add_subcommand("match", "Match two images");
@@ -90,6 +103,16 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
                       options.min_keypoint_intensity,
                       "Minimum normalized image intensity for output keypoints")
         ->check(CLI::Range(0.0, 1.0));
+    match->add_option("--keypoint-grid-rows", options.keypoint_grid_rows, "Sparse keypoint grid rows")
+        ->check(CLI::PositiveNumber);
+    match->add_option("--keypoint-grid-cols", options.keypoint_grid_cols, "Sparse keypoint grid columns")
+        ->check(CLI::PositiveNumber);
+    match->add_option("--keypoints-per-cell",
+                      options.keypoints_per_cell,
+                      "Sparse keypoints per grid cell; 0 derives from max-keypoints")
+        ->check(CLI::NonNegativeNumber);
+    match->add_option("--nms-radius", options.nms_radius, "Sparse keypoint NMS radius in feature-map pixels")
+        ->check(CLI::NonNegativeNumber);
     match->callback([&options]() { options.command = Command::Match; });
 
     CLI::App* eval = app->add_subcommand("eval", "Evaluate feature matching results");
@@ -103,6 +126,16 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
                      options.min_keypoint_intensity,
                      "Minimum normalized image intensity for output keypoints")
         ->check(CLI::Range(0.0, 1.0));
+    eval->add_option("--keypoint-grid-rows", options.keypoint_grid_rows, "Sparse keypoint grid rows")
+        ->check(CLI::PositiveNumber);
+    eval->add_option("--keypoint-grid-cols", options.keypoint_grid_cols, "Sparse keypoint grid columns")
+        ->check(CLI::PositiveNumber);
+    eval->add_option("--keypoints-per-cell",
+                     options.keypoints_per_cell,
+                     "Sparse keypoints per grid cell; 0 derives from max-keypoints")
+        ->check(CLI::NonNegativeNumber);
+    eval->add_option("--nms-radius", options.nms_radius, "Sparse keypoint NMS radius in feature-map pixels")
+        ->check(CLI::NonNegativeNumber);
     eval->callback([&options]() { options.command = Command::Eval; });
 
     CLI::App* export_command = app->add_subcommand("export", "Export a trained model");
