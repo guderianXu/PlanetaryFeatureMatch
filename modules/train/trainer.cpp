@@ -13,6 +13,7 @@
 
 #include "core/device.h"
 #include "core/tensor_utils.h"
+#include "core/timer.h"
 #include "data/image_dataset.h"
 #include "data/intensity_mask.h"
 #include "data/synthetic_pair.h"
@@ -608,6 +609,9 @@ torch::Tensor make_training_valid_mask_for_test(
 
 TrainResult train_model(const TrainConfig& config) {
     validate_config(config);
+    Timer total_timer;
+    int64_t completed_batches = 0;
+    double accumulated_batch_seconds = 0.0;
     const auto device = resolve_compute_device(config.device);
     ImageDataset dataset(config.image_dir);
     auto modules = make_modules(config, device);
@@ -631,7 +635,9 @@ TrainResult train_model(const TrainConfig& config) {
     }
 
     for (int epoch = 0; epoch < config.epochs; ++epoch) {
+        Timer epoch_timer;
         for (std::size_t offset = 0; offset < epoch_size; offset += static_cast<std::size_t>(config.batch_size)) {
+            Timer batch_timer;
             const auto batch_end = offset + static_cast<std::size_t>(config.batch_size);
             const auto end = std::min<std::size_t>(epoch_size, batch_end);
             std::vector<SyntheticPair> pairs;
@@ -668,6 +674,9 @@ TrainResult train_model(const TrainConfig& config) {
             const auto offset_loss_value = loss.offset.detach().item<double>();
             const auto offset_error_value = loss.offset_error.detach().item<double>();
             const auto confidence_loss_value = loss.confidence.detach().item<double>();
+            const double batch_seconds = batch_timer.elapsedSeconds();
+            accumulated_batch_seconds += batch_seconds;
+            ++completed_batches;
             std::cout << "train progress: epoch=" << epoch + 1 << '/' << config.epochs
                       << " batch=" << (offset / static_cast<std::size_t>(config.batch_size)) + 1 << '/'
                       << (epoch_size + static_cast<std::size_t>(config.batch_size) - 1) /
@@ -685,11 +694,17 @@ TrainResult train_model(const TrainConfig& config) {
                 has_loss = true;
             }
         }
+        std::cout << "train epoch summary: epoch=" << epoch + 1 << '/' << config.epochs
+                  << " epoch_time=" << formatSeconds(epoch_timer.elapsedSeconds()) << "s\n";
         ++result.epochs_completed;
     }
 
     result.initial_loss = first_loss;
     result.final_loss = last_loss;
+    result.total_time_seconds = total_timer.elapsedSeconds();
+    result.avg_batch_time_seconds = completed_batches == 0
+        ? 0.0
+        : accumulated_batch_seconds / static_cast<double>(completed_batches);
     save_checkpoint(config, modules);
     return result;
 }

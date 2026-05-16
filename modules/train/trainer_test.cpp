@@ -48,6 +48,15 @@ torch::Tensor make_training_valid_mask_for_test(
 
 namespace {
 
+struct CoutCapture {
+    std::ostringstream stream;
+    std::streambuf* old = nullptr;
+
+    CoutCapture() : old(std::cout.rdbuf(stream.rdbuf())) {}
+    ~CoutCapture() { std::cout.rdbuf(old); }
+    std::string str() const { return stream.str(); }
+};
+
 class TempTrainingDirectory {
 public:
     explicit TempTrainingDirectory(const std::string& stem) {
@@ -364,19 +373,35 @@ static void trainer_progress_reports_loss_components() {
     config.resize = 32;
     temp_dir.file("checkpoint.pt");
 
-    std::ostringstream output;
-    auto* previous_buffer = std::cout.rdbuf(output.rdbuf());
+    CoutCapture capture;
     auto result = pfm::train_model(config);
-    std::cout.rdbuf(previous_buffer);
+    const auto output = capture.str();
 
     PFM_REQUIRE(result.epochs_completed == 1);
-    PFM_REQUIRE(output.str().find("repeatability=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("descriptor=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("descriptor_accuracy=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("descriptor_diversity=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("offset=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("offset_error=") != std::string::npos);
-    PFM_REQUIRE(output.str().find("confidence=") != std::string::npos);
+    PFM_REQUIRE(output.find("repeatability=") != std::string::npos);
+    PFM_REQUIRE(output.find("descriptor=") != std::string::npos);
+    PFM_REQUIRE(output.find("descriptor_accuracy=") != std::string::npos);
+    PFM_REQUIRE(output.find("descriptor_diversity=") != std::string::npos);
+    PFM_REQUIRE(output.find("offset=") != std::string::npos);
+    PFM_REQUIRE(output.find("offset_error=") != std::string::npos);
+    PFM_REQUIRE(output.find("confidence=") != std::string::npos);
+}
+
+static void trainer_reports_epoch_and_batch_timing() {
+    TempTrainingDirectory temp_dir("pfm_trainer_timing");
+    require_image_written(temp_dir.file("image_a.png"), 0);
+    require_image_written(temp_dir.file("image_b.png"), 37);
+    auto config = tiny_config(temp_dir);
+    config.resize = 32;
+    temp_dir.file("checkpoint.pt");
+
+    CoutCapture capture;
+    const auto result = pfm::train_model(config);
+    const auto output = capture.str();
+
+    PFM_REQUIRE(result.total_time_seconds >= 0.0);
+    PFM_REQUIRE(result.avg_batch_time_seconds >= 0.0);
+    PFM_REQUIRE(output.find("epoch_time=") != std::string::npos);
 }
 
 static void trainer_trains_full_dataset() {
@@ -543,6 +568,7 @@ void register_trainer_tests() {
     register_test("trainer_total_loss_reports_descriptor_spatial_collapse_without_weighting_it",
                   trainer_total_loss_reports_descriptor_spatial_collapse_without_weighting_it);
     register_test("trainer_progress_reports_loss_components", trainer_progress_reports_loss_components);
+    register_test("trainer_reports_epoch_and_batch_timing", trainer_reports_epoch_and_batch_timing);
     register_test("trainer_resizes_large_training_image", trainer_resizes_large_training_image);
     register_test("trainer_uses_configured_resize", trainer_uses_configured_resize);
     register_test("trainer_trains_full_dataset", trainer_trains_full_dataset);

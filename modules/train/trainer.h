@@ -26,6 +26,8 @@ struct TrainResult {
     int epochs_completed = 0;
     double initial_loss = 0.0;
     double final_loss = 0.0;
+    double total_time_seconds = 0.0;
+    double avg_batch_time_seconds = 0.0;
 };
 
 /// Trains the real-image MVP model for the configured number of epochs and saves a checkpoint.

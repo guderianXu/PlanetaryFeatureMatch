@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,15 @@
 #include "train/trainer.h"
 
 namespace {
+
+struct CoutCapture {
+    std::ostringstream stream;
+    std::streambuf* old = nullptr;
+
+    CoutCapture() : old(std::cout.rdbuf(stream.rdbuf())) {}
+    ~CoutCapture() { std::cout.rdbuf(old); }
+    std::string str() const { return stream.str(); }
+};
 
 class TempPipelineDirectory {
 public:
@@ -142,6 +152,21 @@ static void pipeline_train_writes_synthetic_pair_cache() {
     PFM_REQUIRE(std::filesystem::exists(options.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "pair_000000_view_b.png"));
+}
+
+static void pipeline_train_prints_total_and_average_batch_time() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_train_timing");
+    write_test_image(temp_dir.file("image_a.png"), 11);
+    write_test_image(temp_dir.file("image_b.png"), 23);
+    auto options = make_train_options(temp_dir);
+    options.checkpoint = temp_dir.file("timed_model.pt").string();
+
+    CoutCapture capture;
+    PFM_REQUIRE(pfm::run_train_command(options) == 0);
+    const auto output = capture.str();
+
+    PFM_REQUIRE(output.find("total_time=") != std::string::npos);
+    PFM_REQUIRE(output.find("avg_batch_time=") != std::string::npos);
 }
 
 static void pipeline_train_accepts_min_keypoint_intensity() {
@@ -465,6 +490,8 @@ void register_pipeline_tests() {
     register_test("pipeline_train_writes_loadable_checkpoint", pipeline_train_writes_loadable_checkpoint);
     register_test("pipeline_train_rejects_invalid_training_limits", pipeline_train_rejects_invalid_training_limits);
     register_test("pipeline_train_writes_synthetic_pair_cache", pipeline_train_writes_synthetic_pair_cache);
+    register_test("pipeline_train_prints_total_and_average_batch_time",
+                  pipeline_train_prints_total_and_average_batch_time);
     register_test("pipeline_train_accepts_min_keypoint_intensity", pipeline_train_accepts_min_keypoint_intensity);
     register_test("pipeline_train_forwards_pairs_per_image_to_cache_generation",
                   pipeline_train_forwards_pairs_per_image_to_cache_generation);

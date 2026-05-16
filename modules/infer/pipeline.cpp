@@ -12,6 +12,7 @@
 #include <torch/torch.h>
 
 #include "core/device.h"
+#include "core/timer.h"
 #include "data/image_io.h"
 #include "data/intensity_mask.h"
 #include "infer/eval_pipeline.h"
@@ -222,7 +223,10 @@ int run_train_command(const CliOptions& options) {
         config.synthetic_pair_cache_rebuild = options.synthetic_pair_cache_rebuild;
         config.min_keypoint_intensity = options.min_keypoint_intensity;
         const auto result = train_model(config);
-        std::cout << "training complete: epochs=" << result.epochs_completed << " final_loss=" << result.final_loss << '\n';
+        std::cout << "training complete: epochs=" << result.epochs_completed
+                  << " final_loss=" << result.final_loss
+                  << " total_time=" << formatSeconds(result.total_time_seconds) << "s"
+                  << " avg_batch_time=" << formatSeconds(result.avg_batch_time_seconds) << "s\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "train failed: " << error.what() << '\n';
