@@ -177,9 +177,9 @@ static void decode_feature_maps_avoids_row_major_grid_truncation_bias() {
     PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 3.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 3.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 7.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 2.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 0.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.scores.index({2}).item<float>(), 9.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.scores.index({2}).item<float>(), 0.0F, 1.0e-6F);
 }
 
 static void decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell() {
@@ -202,6 +202,61 @@ static void decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell() 
     PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 0.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 0.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 0.0F, 1.0e-6F);
+}
+
+static void decode_feature_maps_keeps_zero_score_grid_cells_when_positive_scores_exist() {
+    {
+        auto heatmap = torch::zeros({1, 1, 1, 3}, torch::kFloat32);
+        heatmap.index_put_({0, 0, 0, 0}, 5.0F);
+        const auto maps = makeUniformMaps(heatmap);
+        pfm::FeatureDecodeConfig config;
+        config.max_keypoints = 3;
+        config.semi_dense_threshold = 0.5;
+        config.keypoint_grid_rows = 1;
+        config.keypoint_grid_cols = 3;
+        config.keypoints_per_cell = 1;
+        config.nms_radius = 0;
+
+        const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
+
+        PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({3, 2}));
+        PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 5.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 1.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 2.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({2}).item<float>(), 0.0F, 1.0e-6F);
+    }
+    {
+        auto heatmap = torch::zeros({1, 1, 1, 4}, torch::kFloat32);
+        heatmap.index_put_({0, 0, 0, 0}, 5.0F);
+        heatmap.index_put_({0, 0, 0, 2}, 4.0F);
+        heatmap.index_put_({0, 0, 0, 3}, 3.0F);
+        const auto maps = makeUniformMaps(heatmap);
+        pfm::FeatureDecodeConfig config;
+        config.max_keypoints = 3;
+        config.semi_dense_threshold = 0.5;
+        config.keypoint_grid_rows = 1;
+        config.keypoint_grid_cols = 3;
+        config.keypoints_per_cell = 1;
+        config.nms_radius = 0;
+
+        const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
+
+        PFM_REQUIRE(features.keypoints.sizes() == torch::IntArrayRef({3, 2}));
+        PFM_REQUIRE_CLOSE(features.keypoints.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({0}).item<float>(), 5.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({1, 0}).item<float>(), 2.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({1, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({1}).item<float>(), 4.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({2, 0}).item<float>(), 1.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.keypoints.index({2, 1}).item<float>(), 0.0F, 1.0e-6F);
+        PFM_REQUIRE_CLOSE(features.scores.index({2}).item<float>(), 0.0F, 1.0e-6F);
+    }
 }
 
 static void decode_feature_maps_filters_dense_points_with_mask() {
@@ -333,6 +388,9 @@ void register_feature_extractor_tests() {
     register_test(
         "decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell",
         decode_feature_maps_allows_zero_score_candidate_in_each_grid_cell);
+    register_test(
+        "decode_feature_maps_keeps_zero_score_grid_cells_when_positive_scores_exist",
+        decode_feature_maps_keeps_zero_score_grid_cells_when_positive_scores_exist);
     register_test(
         "decode_feature_maps_filters_dense_points_with_mask",
         decode_feature_maps_filters_dense_points_with_mask);

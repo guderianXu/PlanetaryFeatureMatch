@@ -219,17 +219,9 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(
 
     std::vector<SparseCandidate> selected;
     selected.reserve(static_cast<size_t>(std::min<int64_t>(config.max_keypoints, candidates.size())));
-    const float fallback_score = candidates.empty() ? 0.0F : candidates.back().score;
-    const bool has_meaningful_grid_candidate = std::any_of(
-        grid_candidates.begin(), grid_candidates.end(), [&](const SparseCandidate& candidate) {
-            return candidate.score > fallback_score;
-        });
     for (const auto& candidate : grid_candidates) {
         if (static_cast<int>(selected.size()) >= config.max_keypoints) {
             break;
-        }
-        if (has_meaningful_grid_candidate && candidate.score == fallback_score) {
-            continue;
         }
         selected.push_back(candidate);
     }
