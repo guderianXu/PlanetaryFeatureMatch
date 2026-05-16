@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -28,7 +29,20 @@ struct CoutCapture {
     std::streambuf* old = nullptr;
 
     CoutCapture() : old(std::cout.rdbuf(stream.rdbuf())) {}
-    ~CoutCapture() { std::cout.rdbuf(old); }
+    CoutCapture(const CoutCapture&) = delete;
+    CoutCapture& operator=(const CoutCapture&) = delete;
+    CoutCapture(CoutCapture&&) = delete;
+    CoutCapture& operator=(CoutCapture&&) = delete;
+
+    ~CoutCapture() noexcept {
+        try {
+            if (old != nullptr) {
+                std::cout.rdbuf(old);
+            }
+        } catch (...) {
+        }
+    }
+
     std::string str() const { return stream.str(); }
 };
 
@@ -79,6 +93,30 @@ void write_test_image(const std::filesystem::path& path, int offset) {
         }
     }
     PFM_REQUIRE(cv::imwrite(path.string(), image));
+}
+
+bool has_formatted_seconds_after_label(const std::string& output, const std::string& label) {
+    const auto start = output.find(label);
+    if (start == std::string::npos) {
+        return false;
+    }
+    auto index = start + label.size();
+    if (index >= output.size() || !std::isdigit(static_cast<unsigned char>(output[index]))) {
+        return false;
+    }
+    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index]))) {
+        ++index;
+    }
+    if (index >= output.size() || output[index] != '.') {
+        return false;
+    }
+    ++index;
+    int decimal_count = 0;
+    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index]))) {
+        ++index;
+        ++decimal_count;
+    }
+    return decimal_count >= 3 && index < output.size() && output[index] == 's';
 }
 
 pfm::CliOptions make_train_options(TempPipelineDirectory& temp_dir) {
@@ -165,8 +203,8 @@ static void pipeline_train_prints_total_and_average_batch_time() {
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
     const auto output = capture.str();
 
-    PFM_REQUIRE(output.find("total_time=") != std::string::npos);
-    PFM_REQUIRE(output.find("avg_batch_time=") != std::string::npos);
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "total_time="));
+    PFM_REQUIRE(has_formatted_seconds_after_label(output, "avg_batch_time="));
 }
 
 static void pipeline_train_accepts_min_keypoint_intensity() {

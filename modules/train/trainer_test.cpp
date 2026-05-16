@@ -53,7 +53,20 @@ struct CoutCapture {
     std::streambuf* old = nullptr;
 
     CoutCapture() : old(std::cout.rdbuf(stream.rdbuf())) {}
-    ~CoutCapture() { std::cout.rdbuf(old); }
+    CoutCapture(const CoutCapture&) = delete;
+    CoutCapture& operator=(const CoutCapture&) = delete;
+    CoutCapture(CoutCapture&&) = delete;
+    CoutCapture& operator=(CoutCapture&&) = delete;
+
+    ~CoutCapture() noexcept {
+        try {
+            if (old != nullptr) {
+                std::cout.rdbuf(old);
+            }
+        } catch (...) {
+        }
+    }
+
     std::string str() const { return stream.str(); }
 };
 
@@ -399,8 +412,8 @@ static void trainer_reports_epoch_and_batch_timing() {
     const auto result = pfm::train_model(config);
     const auto output = capture.str();
 
-    PFM_REQUIRE(result.total_time_seconds >= 0.0);
-    PFM_REQUIRE(result.avg_batch_time_seconds >= 0.0);
+    PFM_REQUIRE(result.total_time_seconds > 0.0);
+    PFM_REQUIRE(result.avg_batch_time_seconds > 0.0);
     PFM_REQUIRE(output.find("epoch_time=") != std::string::npos);
 }
 
