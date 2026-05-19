@@ -63,11 +63,7 @@ void validate_matcher_inputs(
 
 torch::Tensor normalize_keypoints_for_embedding(const torch::Tensor& keypoints) {
     auto points = keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
-    if (points.numel() == 0) {
-        return points;
-    }
-    auto scale = points.abs().amax().clamp_min(1.0);
-    return points / scale;
+    return points.clamp(-1.0, 1.0);
 }
 
 }  // namespace
