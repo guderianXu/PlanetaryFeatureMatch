@@ -45,6 +45,9 @@ constexpr int64_t INPUT_CHANNELS = 1;
 constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 256;
 constexpr double DESCRIPTOR_DIVERSITY_WEIGHT = 0.1;
 constexpr int64_t DESCRIPTOR_NEGATIVE_SAMPLE_COUNT = 63;
+constexpr int64_t GRAPH_MATCHING_MAX_QUERIES = 256;
+constexpr int64_t GRAPH_MATCHING_MAX_CANDIDATES = 64;
+constexpr double GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS = 3.0;
 constexpr float OFFSET_LOSS_WEIGHT = 0.2F;
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
 constexpr std::size_t TRAINING_VISUALIZATION_QUEUE_CAPACITY = 2048;
@@ -687,6 +690,14 @@ struct DescriptorTrainingMetrics {
     torch::Tensor diversity;
 };
 
+struct GraphMatchingTrainingMetrics {
+    torch::Tensor loss;
+    torch::Tensor accuracy;
+    int64_t query_count = 0;
+    int64_t positive_count = 0;
+    int64_t dustbin_count = 0;
+};
+
 DescriptorTrainingMetrics make_sparse_descriptor_metrics(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
@@ -808,6 +819,102 @@ torch::Tensor make_graph_candidate_indices(
 
     candidates.push_back(dustbin);
     return torch::tensor(candidates, torch::TensorOptions().dtype(torch::kLong).device(target_indices.device()));
+}
+
+torch::Tensor scale_feature_keypoints_to_image(
+    const torch::Tensor& keypoints,
+    int64_t feature_width,
+    int64_t feature_height,
+    int64_t image_width,
+    int64_t image_height
+) {
+    if (feature_width <= 0 || feature_height <= 0) {
+        return keypoints;
+    }
+    auto scale = torch::tensor(
+        {static_cast<float>(image_width) / static_cast<float>(feature_width),
+         static_cast<float>(image_height) / static_cast<float>(feature_height)},
+        keypoints.options());
+    return keypoints * scale;
+}
+
+GraphMatchingTrainingMetrics make_keypoint_graph_matching_metrics(
+    PlanetaryGraphMatcherImpl& graph_matcher,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto zero = torch::zeros({}, warp.options());
+    if (!features_a.keypoints.defined() || !features_b.keypoints.defined() ||
+        features_a.keypoints.size(0) == 0 || features_b.keypoints.size(0) == 0) {
+        return GraphMatchingTrainingMetrics{zero, zero, 0, 0, 0};
+    }
+
+    const auto query_count = std::min<int64_t>(features_a.keypoints.size(0), GRAPH_MATCHING_MAX_QUERIES);
+    auto query_indices = torch::arange(
+        query_count,
+        torch::TensorOptions().dtype(torch::kLong).device(features_a.keypoints.device()));
+    auto keypoints_a = features_a.keypoints.index_select(0, query_indices).to(warp.device());
+    auto descriptors_a = features_a.descriptors.index_select(0, query_indices).to(warp.device());
+    auto keypoints_b = features_b.keypoints.to(warp.device());
+    auto descriptors_b = features_b.descriptors.to(warp.device());
+
+    auto image_keypoints_a = scale_feature_keypoints_to_image(
+        keypoints_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height,
+        warp.size(2),
+        warp.size(1));
+    auto image_keypoints_b = scale_feature_keypoints_to_image(
+        keypoints_b,
+        features_b.feature_map_width,
+        features_b.feature_map_height,
+        warp.size(2),
+        warp.size(1));
+    auto target_full = assign_graph_matching_targets(
+        image_keypoints_a,
+        image_keypoints_b,
+        warp,
+        valid_mask,
+        GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS);
+    auto candidate_indices = make_graph_candidate_indices(
+        target_full,
+        keypoints_b.size(0),
+        std::min<int64_t>(GRAPH_MATCHING_MAX_CANDIDATES, keypoints_b.size(0) + 1));
+
+    auto candidate_keypoints = keypoints_b.index_select(0, candidate_indices.narrow(0, 0, candidate_indices.size(0) - 1));
+    auto candidate_descriptors = descriptors_b.index_select(0, candidate_indices.narrow(0, 0, candidate_indices.size(0) - 1));
+    auto remapped_targets = torch::full(
+        {target_full.size(0)},
+        candidate_indices.size(0) - 1,
+        torch::TensorOptions().dtype(torch::kLong).device(target_full.device()));
+    for (int64_t col = 0; col < candidate_indices.size(0) - 1; ++col) {
+        remapped_targets.index_put_({target_full == candidate_indices[col]}, col);
+    }
+
+    auto output = graph_matcher.forward(descriptors_a, keypoints_a, candidate_descriptors, candidate_keypoints);
+    auto loss = graph_matching_cross_entropy_loss(output.logits, remapped_targets);
+    auto predictions = output.logits.narrow(0, 0, remapped_targets.size(0)).argmax(1);
+    auto accuracy = predictions.eq(remapped_targets).to(torch::kFloat32).mean();
+    const auto dustbin_label = candidate_indices.size(0) - 1;
+    const auto dustbin_count = remapped_targets.eq(dustbin_label).sum().item<int64_t>();
+    return GraphMatchingTrainingMetrics{
+        loss,
+        accuracy,
+        remapped_targets.size(0),
+        remapped_targets.size(0) - dustbin_count,
+        dustbin_count};
+}
+
+torch::Tensor make_keypoint_graph_matching_loss(
+    PlanetaryGraphMatcherImpl& graph_matcher,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_keypoint_graph_matching_metrics(graph_matcher, features_a, features_b, warp, valid_mask).loss;
 }
 
 torch::Tensor make_sparse_descriptor_loss(
@@ -1002,6 +1109,17 @@ FeatureDecodeConfig make_training_decode_config(const TrainConfig& config) {
     return decode_config;
 }
 
+torch::Tensor resize_dense_confidence_for_sparse_decode(
+    const torch::Tensor& dense_confidence,
+    const torch::Tensor& sparse_heatmap
+) {
+    return torch::nn::functional::interpolate(
+        dense_confidence,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{sparse_heatmap.size(2), sparse_heatmap.size(3)})
+            .mode(torch::kNearest));
+}
+
 FeatureSet decode_training_features(
     const torch::Tensor& view,
     const SparseHeadOutput& sparse,
@@ -1193,7 +1311,44 @@ TrainingLossComponents training_loss_from_pairs(
 
     auto repeatability = repeatability_loss(sparse_a.heatmap, warp_heatmap_for_repeatability(sparse_b.heatmap, warp), sparse_mask);
     auto descriptor = make_sparse_descriptor_metrics(sparse_a.descriptors, sparse_b.descriptors, warp, valid_mask);
-    auto graph_matching = make_graph_matching_loss(*modules.graph_matcher, sparse_a.descriptors, sparse_b.descriptors, warp, valid_mask);
+    std::vector<torch::Tensor> graph_losses;
+    graph_losses.reserve(static_cast<size_t>(view_a.size(0)));
+    auto decode_config = TrainConfig{};
+    decode_config.max_keypoints = 1024;
+    decode_config.min_keypoints = 0;
+    decode_config.nms_radius = 4;
+    decode_config.min_keypoint_intensity = min_keypoint_intensity;
+    for (int64_t batch = 0; batch < view_a.size(0); ++batch) {
+        SparseHeadOutput sparse_a_item{
+            sparse_a.heatmap.index({batch}).unsqueeze(0),
+            sparse_a.descriptors.index({batch}).unsqueeze(0),
+            sparse_a.scale.index({batch}).unsqueeze(0),
+            sparse_a.orientation.index({batch}).unsqueeze(0),
+            sparse_a.affine.index({batch}).unsqueeze(0)};
+        SparseHeadOutput sparse_b_item{
+            sparse_b.heatmap.index({batch}).unsqueeze(0),
+            sparse_b.descriptors.index({batch}).unsqueeze(0),
+            sparse_b.scale.index({batch}).unsqueeze(0),
+            sparse_b.orientation.index({batch}).unsqueeze(0),
+            sparse_b.affine.index({batch}).unsqueeze(0)};
+        auto features_a = decode_training_features(
+            view_a.index({batch}),
+            sparse_a_item,
+            resize_dense_confidence_for_sparse_decode(dense.confidence.index({batch}).unsqueeze(0), sparse_a_item.heatmap),
+            decode_config);
+        auto features_b = decode_training_features(
+            view_b.index({batch}),
+            sparse_b_item,
+            resize_dense_confidence_for_sparse_decode(dense.confidence.index({batch}).unsqueeze(0), sparse_b_item.heatmap),
+            decode_config);
+        graph_losses.push_back(make_keypoint_graph_matching_loss(
+            *modules.graph_matcher,
+            features_a,
+            features_b,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0)));
+    }
+    auto graph_matching = graph_losses.empty() ? torch::zeros({}, sparse_a.descriptors.options()) : torch::stack(graph_losses).mean();
     auto offset = masked_smooth_l1_loss(dense.offsets, target_offsets, dense_mask);
     auto confidence = confidence_bce_loss(dense.confidence, dense_mask);
     auto offset_error = offset_pixel_error(dense.offsets, target_offsets, dense_mask);
@@ -1512,6 +1667,16 @@ torch::Tensor make_graph_candidate_indices_for_test(
     int64_t max_candidates
 ) {
     return make_graph_candidate_indices(target_indices, keypoint_count_b, max_candidates);
+}
+
+torch::Tensor make_keypoint_graph_matching_loss_for_test(
+    PlanetaryGraphMatcherImpl& graph_matcher,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_keypoint_graph_matching_loss(graph_matcher, features_a, features_b, warp, valid_mask);
 }
 
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors) {

@@ -47,6 +47,12 @@ torch::Tensor make_graph_candidate_indices_for_test(
     const torch::Tensor& target_indices,
     int64_t keypoint_count_b,
     int64_t max_candidates);
+torch::Tensor make_keypoint_graph_matching_loss_for_test(
+    PlanetaryGraphMatcherImpl& graph_matcher,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors);
 torch::Tensor make_descriptor_candidate_indices_for_test(const torch::Tensor& target_indices, int64_t spatial_count);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
@@ -475,6 +481,37 @@ static void trainer_graph_candidates_include_positives_once_and_dustbin_last() {
     PFM_REQUIRE((candidates == 0).sum().item<int64_t>() == 1);
     PFM_REQUIRE((candidates == 2).sum().item<int64_t>() == 1);
     PFM_REQUIRE((candidates == 5).sum().item<int64_t>() == 1);
+}
+
+static void trainer_keypoint_graph_matching_loss_trains_graph_matcher_parameters() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    pfm::FeatureSet features_a;
+    features_a.keypoints = torch::tensor({{1.0F, 1.0F}, {3.0F, 1.0F}}, torch::kFloat32);
+    features_a.scores = torch::tensor({1.0F, 0.9F}, torch::kFloat32);
+    features_a.descriptors = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    features_a.feature_map_width = 8;
+    features_a.feature_map_height = 8;
+    pfm::FeatureSet features_b;
+    features_b.keypoints = torch::tensor({{5.0F, 1.0F}, {7.0F, 1.0F}, {1.0F, 6.0F}}, torch::kFloat32);
+    features_b.scores = torch::tensor({1.0F, 0.9F, 0.1F}, torch::kFloat32);
+    features_b.descriptors = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {0.5F, 0.5F}}, torch::kFloat32);
+    features_b.feature_map_width = 8;
+    features_b.feature_map_height = 8;
+    auto warp = torch::zeros({1, 8, 8, 2}, torch::kFloat32);
+    warp.index_put_({0, 1, 1, 0}, 5.0F);
+    warp.index_put_({0, 1, 1, 1}, 1.0F);
+    warp.index_put_({0, 1, 3, 0}, 7.0F);
+    warp.index_put_({0, 1, 3, 1}, 1.0F);
+    auto valid_mask = torch::ones({1, 8, 8}, torch::kBool);
+
+    auto loss = pfm::testing::make_keypoint_graph_matching_loss_for_test(
+        *matcher, features_a, features_b, warp, valid_mask);
+    loss.backward();
+
+    PFM_REQUIRE(loss.defined());
+    PFM_REQUIRE(std::isfinite(loss.item<float>()));
+    PFM_REQUIRE(matcher->parameters().front().grad().defined());
+    PFM_REQUIRE(matcher->parameters().front().grad().abs().sum().item<float>() > 0.0F);
 }
 
 static void trainer_stacks_variable_spatial_training_tensors_with_padding() {
@@ -1049,6 +1086,9 @@ void register_trainer_tests() {
     register_test(
         "trainer graph candidates include positives once and dustbin last",
         trainer_graph_candidates_include_positives_once_and_dustbin_last);
+    register_test(
+        "trainer keypoint graph matching loss trains graph matcher parameters",
+        trainer_keypoint_graph_matching_loss_trains_graph_matcher_parameters);
     register_test("trainer_stacks_variable_spatial_training_tensors_with_padding",
                   trainer_stacks_variable_spatial_training_tensors_with_padding);
     register_test("trainer_training_valid_mask_requires_bright_source_and_target_pixels",
