@@ -25,4 +25,4 @@
 - Task 3：新增 deterministic graph candidate construction，确保 positives 只出现一次，dustbin 固定在最后。
 - Task 4：训练 graph loss 从固定 descriptor grid 改为 decoded sparse keypoints；candidate set 包含 positives/negatives/dustbin；target assignment 前将 feature-map keypoints 缩放到 image-space，matcher 仍使用 inference 同款 feature-map keypoints。
 - 验证：重新配置并构建 `build-pfm-cf`，`pfm_tests` 输出 `290 test(s) passed`，`ctest` 输出 `100% tests passed, 0 tests failed out of 1`。
-- CUDA 短训练复现已启动，命令包含 `--device cuda`；`nvidia-smi` 确认 `pfm_cli` 进程使用 GPU，显存约 2264 MiB。训练仍在运行；当前 727 条 CSV iteration 的 `graph_matching_loss`：first_mean≈4.6967，current last_mean≈0.3339，min≈0.00000227，max≈18.1822。
+- CUDA 短训练复现已完成，命令包含 `--device cuda`；`nvidia-smi` 曾确认 `pfm_cli` 进程使用 GPU，显存约 2264 MiB。完整 4140 条 CSV iteration 的 `graph_matching_loss`：first_mean≈4.6967，last_mean≈0.0335，min≈0.00000227，max≈18.1822，最后 10 条约 0.0010-0.0020。

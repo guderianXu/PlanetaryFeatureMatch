@@ -55,4 +55,4 @@
 - decoded `FeatureSet::keypoints` 是 sparse feature-map 坐标；`warp_a_to_b` 和 `valid_mask` 是 image-space。因此训练目标分配必须先把 keypoints 按 feature map 尺寸缩放到 image-space；graph matcher 本身仍应使用 inference 路径使用的 feature-map keypoints。
 - `valid_mask` 由原始有效区域、A/B 强度 mask 共同构成；graph target assignment 必须同时检查 source 像素和 warped target 像素，否则会把无效目标监督为正样本。
 - `decode_feature_maps()` 要求 dense confidence 与 sparse heatmap 空间尺寸一致；训练路径中 dense head confidence 需要 nearest resize 后才能作为 decode 输入。
-- 当前短训练已显示 graph loss 明显下降：在后台 CUDA run 尚未结束时，727 条 iteration 的 first_mean≈4.6967、current last_mean≈0.3339；这与之前 fixed-grid graph loss 首末均值约 3.92/3.94 不下降形成对比。
+- 完整 CUDA 短训练显示 graph loss 明显下降：4140 条 iteration 的 first_mean≈4.6967、last_mean≈0.0335，最后 10 条约 0.0010-0.0020；这与之前 fixed-grid graph loss 首末均值约 3.92/3.94 不下降形成对比。

@@ -20,7 +20,7 @@
 - 阶段 13：keypoint graph matching loss 优化（in_progress）
   - 已完成：Task 1 graph matcher 使用 keypoint projection；Task 2 warp+mask 目标分配；Task 3 deterministic candidate set；Task 4 decoded sparse keypoint graph loss 接入训练。
   - 已验证：`cmake` 配置、完整 build、`pfm_tests` 290 tests passed、`ctest` 100% passed。
-  - 进行中：Task 5 CUDA 短训练复现仍在运行；已产生的 727 条 CSV iteration 显示 `graph_matching_loss` first_mean≈4.6967、current last_mean≈0.3339，趋势明显下降。
+  - 已完成：Task 5 CUDA 短训练复现结束，完整 4140 条 CSV iteration 显示 `graph_matching_loss` first_mean≈4.6967、last_mean≈0.0335，趋势明显下降。
 
 ## 设计决策
 - B 侧描述子和关键点从 warp 后目标位置采样，target 改为恒等映射（A[i]→B[i]），图匹配器可同时利用空间和描述子信号
@@ -64,8 +64,8 @@
 - 核心改动：graph matcher 不再忽略 keypoints；训练 graph loss 改为 decoded sparse keypoints + warp positives + deterministic negatives + dustbin。
 
 ### 待继续
-- 等后台 CUDA 短训练完成后重新统计完整 `metrics_debug.csv`。
-- 若完整趋势仍下降，清理 debug 产物并合并/推送 main；若不下降，按 spec 下一步考虑 bidirectional/Sinkhorn-style objective。
+- CUDA 短训练已完成且 graph loss 明显下降。
+- 下一步：可清理 debug 产物并将 `feat/keypoint-graph-matching-loss` 合并到 main；如需继续提升匹配质量，再考虑更强的双向/Sinkhorn-style objective。
 
 ### 错误记录
 | 错误 | 尝试次数 | 解决方案 |
