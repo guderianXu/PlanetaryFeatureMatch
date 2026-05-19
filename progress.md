@@ -26,3 +26,5 @@
 - Task 4：训练 graph loss 从固定 descriptor grid 改为 decoded sparse keypoints；candidate set 包含 positives/negatives/dustbin；target assignment 前将 feature-map keypoints 缩放到 image-space，matcher 仍使用 inference 同款 feature-map keypoints。
 - 验证：重新配置并构建 `build-pfm-cf`，`pfm_tests` 输出 `290 test(s) passed`，`ctest` 输出 `100% tests passed, 0 tests failed out of 1`。
 - CUDA 短训练复现已完成，命令包含 `--device cuda`；`nvidia-smi` 曾确认 `pfm_cli` 进程使用 GPU，显存约 2264 MiB。完整 4140 条 CSV iteration 的 `graph_matching_loss`：first_mean≈4.6967，last_mean≈0.0335，min≈0.00000227，max≈18.1822，最后 10 条约 0.0010-0.0020。
+
+- 阶段 13 标记完成：graph matcher 使用 keypoint geometry，训练监督已切换到 decoded sparse keypoints；完整 CUDA 验证显示 graph loss 从 first_mean≈4.6967 降到 last_mean≈0.0335。下一步执行合并到 main 并推送 GitHub。

@@ -17,7 +17,7 @@
 - 阶段 11：修复 graph_matching_loss + 接入 ConsoleProgressLogger 进度条（complete）
 - 阶段 12：训练 loss 诊断修复 — B 侧关键点 warp 采样 + 进度条特征指标 + 相关性窗口扩容（complete）
 
-- 阶段 13：keypoint graph matching loss 优化（in_progress）
+- 阶段 13：keypoint graph matching loss 优化（complete）
   - 已完成：Task 1 graph matcher 使用 keypoint projection；Task 2 warp+mask 目标分配；Task 3 deterministic candidate set；Task 4 decoded sparse keypoint graph loss 接入训练。
   - 已验证：`cmake` 配置、完整 build、`pfm_tests` 290 tests passed、`ctest` 100% passed。
   - 已完成：Task 5 CUDA 短训练复现结束，完整 4140 条 CSV iteration 显示 `graph_matching_loss` first_mean≈4.6967、last_mean≈0.0335，趋势明显下降。
@@ -63,9 +63,9 @@
   - `0bd060b Train graph matcher on decoded keypoints`
 - 核心改动：graph matcher 不再忽略 keypoints；训练 graph loss 改为 decoded sparse keypoints + warp positives + deterministic negatives + dustbin。
 
-### 待继续
+### 完成状态
 - CUDA 短训练已完成且 graph loss 明显下降。
-- 下一步：可清理 debug 产物并将 `feat/keypoint-graph-matching-loss` 合并到 main；如需继续提升匹配质量，再考虑更强的双向/Sinkhorn-style objective。
+- 该阶段优化目标已达成；如后续需要继续提升匹配质量，再考虑更强的双向/Sinkhorn-style objective。
 
 ### 错误记录
 | 错误 | 尝试次数 | 解决方案 |
