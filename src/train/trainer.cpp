@@ -780,6 +780,36 @@ torch::Tensor assign_graph_matching_targets(
     return torch::tensor(labels, targets.options());
 }
 
+torch::Tensor make_graph_candidate_indices(
+    const torch::Tensor& target_indices,
+    int64_t keypoint_count_b,
+    int64_t max_candidates
+) {
+    const auto dustbin = keypoint_count_b;
+    std::vector<int64_t> candidates;
+    candidates.reserve(static_cast<size_t>(std::max<int64_t>(1, max_candidates)));
+
+    auto targets_cpu = target_indices.detach().to(torch::kCPU, torch::kLong).contiguous();
+    for (int64_t index = 0; index < targets_cpu.numel(); ++index) {
+        const auto label = targets_cpu[index].item<int64_t>();
+        if (label >= 0 && label < keypoint_count_b &&
+            std::find(candidates.begin(), candidates.end(), label) == candidates.end()) {
+            candidates.push_back(label);
+        }
+    }
+
+    for (int64_t candidate = 0;
+         candidate < keypoint_count_b && static_cast<int64_t>(candidates.size()) < max_candidates - 1;
+         ++candidate) {
+        if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
+            candidates.push_back(candidate);
+        }
+    }
+
+    candidates.push_back(dustbin);
+    return torch::tensor(candidates, torch::TensorOptions().dtype(torch::kLong).device(target_indices.device()));
+}
+
 torch::Tensor make_sparse_descriptor_loss(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
@@ -1474,6 +1504,14 @@ torch::Tensor assign_graph_matching_targets_for_test(
     double positive_radius_pixels
 ) {
     return assign_graph_matching_targets(keypoints_a, keypoints_b, warp, valid_mask, positive_radius_pixels);
+}
+
+torch::Tensor make_graph_candidate_indices_for_test(
+    const torch::Tensor& target_indices,
+    int64_t keypoint_count_b,
+    int64_t max_candidates
+) {
+    return make_graph_candidate_indices(target_indices, keypoint_count_b, max_candidates);
 }
 
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors) {

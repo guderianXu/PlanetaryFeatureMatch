@@ -43,6 +43,10 @@ torch::Tensor assign_graph_matching_targets_for_test(
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask,
     double positive_radius_pixels);
+torch::Tensor make_graph_candidate_indices_for_test(
+    const torch::Tensor& target_indices,
+    int64_t keypoint_count_b,
+    int64_t max_candidates);
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors);
 torch::Tensor make_descriptor_candidate_indices_for_test(const torch::Tensor& target_indices, int64_t spatial_count);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
@@ -459,6 +463,18 @@ static void trainer_keypoint_graph_targets_use_dustbin_for_invalid_target_pixels
         keypoints_a, keypoints_b, warp, valid_mask, 2.0);
 
     PFM_REQUIRE(targets[0].item<int64_t>() == 1);
+}
+
+static void trainer_graph_candidates_include_positives_once_and_dustbin_last() {
+    auto target_indices = torch::tensor({0, 2, 2, 5}, torch::kLong);
+
+    auto candidates = pfm::testing::make_graph_candidate_indices_for_test(target_indices, 5, 6);
+
+    PFM_REQUIRE(candidates.size(0) == 6);
+    PFM_REQUIRE(candidates[-1].item<int64_t>() == 5);
+    PFM_REQUIRE((candidates == 0).sum().item<int64_t>() == 1);
+    PFM_REQUIRE((candidates == 2).sum().item<int64_t>() == 1);
+    PFM_REQUIRE((candidates == 5).sum().item<int64_t>() == 1);
 }
 
 static void trainer_stacks_variable_spatial_training_tensors_with_padding() {
@@ -1030,6 +1046,9 @@ void register_trainer_tests() {
     register_test(
         "trainer keypoint graph targets use dustbin for invalid target pixels",
         trainer_keypoint_graph_targets_use_dustbin_for_invalid_target_pixels);
+    register_test(
+        "trainer graph candidates include positives once and dustbin last",
+        trainer_graph_candidates_include_positives_once_and_dustbin_last);
     register_test("trainer_stacks_variable_spatial_training_tensors_with_padding",
                   trainer_stacks_variable_spatial_training_tensors_with_padding);
     register_test("trainer_training_valid_mask_requires_bright_source_and_target_pixels",
