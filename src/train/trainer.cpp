@@ -720,6 +720,66 @@ DescriptorTrainingMetrics make_sparse_descriptor_metrics(
     return DescriptorTrainingMetrics{loss, accuracy, diversity};
 }
 
+
+torch::Tensor assign_graph_matching_targets(
+    const torch::Tensor& keypoints_a,
+    const torch::Tensor& keypoints_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask,
+    double positive_radius_pixels
+) {
+    const auto dustbin = keypoints_b.size(0);
+    auto targets = torch::full(
+        {keypoints_a.size(0)},
+        dustbin,
+        torch::TensorOptions().dtype(torch::kLong).device(keypoints_a.device()));
+    if (keypoints_a.size(0) == 0 || keypoints_b.size(0) == 0) {
+        return targets;
+    }
+
+    auto points_a_cpu = keypoints_a.detach().to(torch::kCPU, torch::kFloat32).contiguous();
+    auto points_b_cpu = keypoints_b.detach().to(torch::kCPU, torch::kFloat32).contiguous();
+    auto warp_cpu = warp.detach().to(torch::kCPU, torch::kFloat32).contiguous();
+    auto mask_cpu = valid_mask.detach().to(torch::kCPU, torch::kBool).contiguous();
+    std::vector<int64_t> labels(static_cast<size_t>(keypoints_a.size(0)), dustbin);
+    const auto radius_sq = positive_radius_pixels * positive_radius_pixels;
+
+    for (int64_t index = 0; index < points_a_cpu.size(0); ++index) {
+        const auto x = static_cast<int64_t>(std::llround(points_a_cpu.index({index, 0}).item<float>()));
+        const auto y = static_cast<int64_t>(std::llround(points_a_cpu.index({index, 1}).item<float>()));
+        if (y < 0 || y >= warp_cpu.size(1) || x < 0 || x >= warp_cpu.size(2)) {
+            continue;
+        }
+        if (!mask_cpu.index({0, y, x}).item<bool>()) {
+            continue;
+        }
+        const auto expected_x = warp_cpu.index({0, y, x, 0}).item<float>();
+        const auto expected_y = warp_cpu.index({0, y, x, 1}).item<float>();
+        const auto target_x = static_cast<int64_t>(std::llround(expected_x));
+        const auto target_y = static_cast<int64_t>(std::llround(expected_y));
+        if (target_y < 0 || target_y >= mask_cpu.size(1) || target_x < 0 || target_x >= mask_cpu.size(2)) {
+            continue;
+        }
+        if (!mask_cpu.index({0, target_y, target_x}).item<bool>()) {
+            continue;
+        }
+        int64_t best = dustbin;
+        double best_distance = radius_sq;
+        for (int64_t candidate = 0; candidate < points_b_cpu.size(0); ++candidate) {
+            const auto dx = static_cast<double>(points_b_cpu.index({candidate, 0}).item<float>()) - expected_x;
+            const auto dy = static_cast<double>(points_b_cpu.index({candidate, 1}).item<float>()) - expected_y;
+            const auto distance = dx * dx + dy * dy;
+            if (distance <= best_distance) {
+                best_distance = distance;
+                best = candidate;
+            }
+        }
+        labels[static_cast<size_t>(index)] = best;
+    }
+
+    return torch::tensor(labels, targets.options());
+}
+
 torch::Tensor make_sparse_descriptor_loss(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
@@ -1403,6 +1463,17 @@ torch::Tensor make_graph_matching_loss_for_test(
     const torch::Tensor& valid_mask
 ) {
     return make_graph_matching_loss(graph_matcher, descriptors_a, descriptors_b, warp, valid_mask);
+}
+
+
+torch::Tensor assign_graph_matching_targets_for_test(
+    const torch::Tensor& keypoints_a,
+    const torch::Tensor& keypoints_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask,
+    double positive_radius_pixels
+) {
+    return assign_graph_matching_targets(keypoints_a, keypoints_b, warp, valid_mask, positive_radius_pixels);
 }
 
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors) {

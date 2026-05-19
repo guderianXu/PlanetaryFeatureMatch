@@ -37,6 +37,12 @@ torch::Tensor make_graph_matching_loss_for_test(
     const torch::Tensor& descriptors_b,
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask);
+torch::Tensor assign_graph_matching_targets_for_test(
+    const torch::Tensor& keypoints_a,
+    const torch::Tensor& keypoints_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask,
+    double positive_radius_pixels);
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors);
 torch::Tensor make_descriptor_candidate_indices_for_test(const torch::Tensor& target_indices, int64_t spatial_count);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
@@ -402,6 +408,57 @@ static void trainer_graph_matching_loss_is_finite_with_many_descriptors() {
 
     PFM_REQUIRE(loss.defined());
     PFM_REQUIRE(std::isfinite(loss.item<float>()));
+}
+
+
+static void trainer_keypoint_graph_targets_use_warped_nearest_b_keypoint() {
+    auto keypoints_a = torch::tensor({{1.0F, 1.0F}, {3.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{5.0F, 1.0F}, {7.0F, 1.0F}, {1.0F, 6.0F}}, torch::kFloat32);
+    auto warp = torch::zeros({1, 8, 8, 2}, torch::kFloat32);
+    warp.index_put_({0, 1, 1, 0}, 5.0F);
+    warp.index_put_({0, 1, 1, 1}, 1.0F);
+    warp.index_put_({0, 1, 3, 0}, 7.0F);
+    warp.index_put_({0, 1, 3, 1}, 1.0F);
+    auto valid_mask = torch::ones({1, 8, 8}, torch::kBool);
+
+    auto targets = pfm::testing::assign_graph_matching_targets_for_test(
+        keypoints_a, keypoints_b, warp, valid_mask, 2.0);
+
+    PFM_REQUIRE(targets.sizes() == std::vector<int64_t>({2}));
+    PFM_REQUIRE(targets[0].item<int64_t>() == 0);
+    PFM_REQUIRE(targets[1].item<int64_t>() == 1);
+}
+
+static void trainer_keypoint_graph_targets_use_dustbin_for_unmatched_keypoints() {
+    auto keypoints_a = torch::tensor({{1.0F, 1.0F}, {3.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{6.0F, 6.0F}}, torch::kFloat32);
+    auto warp = torch::zeros({1, 8, 8, 2}, torch::kFloat32);
+    warp.index_put_({0, 1, 1, 0}, 5.0F);
+    warp.index_put_({0, 1, 1, 1}, 1.0F);
+    warp.index_put_({0, 1, 3, 0}, 7.0F);
+    warp.index_put_({0, 1, 3, 1}, 1.0F);
+    auto valid_mask = torch::ones({1, 8, 8}, torch::kBool);
+
+    auto targets = pfm::testing::assign_graph_matching_targets_for_test(
+        keypoints_a, keypoints_b, warp, valid_mask, 1.0);
+
+    PFM_REQUIRE(targets[0].item<int64_t>() == 1);
+    PFM_REQUIRE(targets[1].item<int64_t>() == 1);
+}
+
+static void trainer_keypoint_graph_targets_use_dustbin_for_invalid_target_pixels() {
+    auto keypoints_a = torch::tensor({{1.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{5.0F, 1.0F}}, torch::kFloat32);
+    auto warp = torch::zeros({1, 8, 8, 2}, torch::kFloat32);
+    warp.index_put_({0, 1, 1, 0}, 5.0F);
+    warp.index_put_({0, 1, 1, 1}, 1.0F);
+    auto valid_mask = torch::ones({1, 8, 8}, torch::kBool);
+    valid_mask.index_put_({0, 1, 5}, false);
+
+    auto targets = pfm::testing::assign_graph_matching_targets_for_test(
+        keypoints_a, keypoints_b, warp, valid_mask, 2.0);
+
+    PFM_REQUIRE(targets[0].item<int64_t>() == 1);
 }
 
 static void trainer_stacks_variable_spatial_training_tensors_with_padding() {
@@ -964,6 +1021,15 @@ void register_trainer_tests() {
                   trainer_graph_matching_loss_trains_graph_matcher_parameters);
     register_test("trainer_graph_matching_loss_is_finite_with_many_descriptors",
                   trainer_graph_matching_loss_is_finite_with_many_descriptors);
+    register_test(
+        "trainer keypoint graph targets use warped nearest b keypoint",
+        trainer_keypoint_graph_targets_use_warped_nearest_b_keypoint);
+    register_test(
+        "trainer keypoint graph targets use dustbin for unmatched keypoints",
+        trainer_keypoint_graph_targets_use_dustbin_for_unmatched_keypoints);
+    register_test(
+        "trainer keypoint graph targets use dustbin for invalid target pixels",
+        trainer_keypoint_graph_targets_use_dustbin_for_invalid_target_pixels);
     register_test("trainer_stacks_variable_spatial_training_tensors_with_padding",
                   trainer_stacks_variable_spatial_training_tensors_with_padding);
     register_test("trainer_training_valid_mask_requires_bright_source_and_target_pixels",
