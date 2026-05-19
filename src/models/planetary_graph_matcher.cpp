@@ -61,6 +61,15 @@ void validate_matcher_inputs(
     }
 }
 
+torch::Tensor normalize_keypoints_for_embedding(const torch::Tensor& keypoints) {
+    auto points = keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
+    if (points.numel() == 0) {
+        return points;
+    }
+    auto scale = points.abs().amax().clamp_min(1.0);
+    return points / scale;
+}
+
 }  // namespace
 
 PlanetaryGraphAttentionLayerImpl::PlanetaryGraphAttentionLayerImpl(int64_t hidden_dim) : _hidden_dim(hidden_dim) {
@@ -137,10 +146,10 @@ PlanetaryGraphMatcherOutput PlanetaryGraphMatcherImpl::forward(
     const auto options = descriptors_a.options().dtype(torch::kFloat32);
     const auto desc_a = descriptors_a.to(options);
     const auto desc_b = descriptors_b.to(options);
-    (void)keypoints_a;
-    (void)keypoints_b;
-    auto embed_a = torch::relu(_descriptor_projection(desc_a));
-    auto embed_b = torch::relu(_descriptor_projection(desc_b));
+    auto kp_a = normalize_keypoints_for_embedding(keypoints_a).to(desc_a.device());
+    auto kp_b = normalize_keypoints_for_embedding(keypoints_b).to(desc_b.device());
+    auto embed_a = torch::relu(_descriptor_projection(desc_a) + _keypoint_projection(kp_a));
+    auto embed_b = torch::relu(_descriptor_projection(desc_b) + _keypoint_projection(kp_b));
     for (const auto& layer : *_attention_layers) {
         auto refined = layer->as<PlanetaryGraphAttentionLayerImpl>()->forward(embed_a, embed_b);
         embed_a = refined.first;

@@ -57,11 +57,27 @@ static void planetary_graph_matcher_attention_layer_uses_norm_and_ffn() {
     PFM_REQUIRE(found_feed_forward);
 }
 
+static void graph_matcher_keypoints_affect_logits() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    matcher->eval();
+    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{-1.0F, -1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{-1.0F, -1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto shifted_keypoints_b = torch::tensor({{1.0F, 1.0F}, {-1.0F, -1.0F}}, torch::kFloat32);
+
+    const auto original = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b).logits;
+    const auto shifted = matcher->forward(descriptors_a, keypoints_a, descriptors_b, shifted_keypoints_b).logits;
+
+    PFM_REQUIRE(!torch::allclose(original, shifted));
+}
+
 void register_planetary_graph_matcher_tests() {
     register_test("planetary_graph_matcher_outputs_match_logits_with_dustbin",
                   planetary_graph_matcher_outputs_match_logits_with_dustbin);
     register_test("planetary_graph_matcher_rejects_descriptor_dimension_mismatch",
                   planetary_graph_matcher_rejects_descriptor_dimension_mismatch);
+    register_test("graph matcher keypoints affect logits", graph_matcher_keypoints_affect_logits);
     register_test("planetary_graph_matcher_uses_attention_layers",
                   planetary_graph_matcher_uses_attention_layers);
     register_test("planetary_graph_matcher_attention_layer_uses_norm_and_ffn",
