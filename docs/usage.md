@@ -34,10 +34,15 @@ cmake --build build -j$(nproc)
   --augmentation-profile mixed \
   --extreme-pair-ratio 0.2 \
   --synthetic-pair-cache-dir build/pair_cache \
+  --log-csv build/train_metrics.csv \
+  --visualization-dir build/train_vis \
+  --visualization-samples 4 \
   --min-keypoint-intensity 0.0
 ```
 
-指定 `--synthetic-pair-cache-dir` 后会先生成合成训练对缓存；后续缓存完整且配置匹配时直接复用。`--pairs-per-image` 可让每张真实图像生成多组不同变换的合成匹配对，用于增加训练样本。`--min-keypoint-intensity` 会把低于阈值的灰度区域从训练监督中排除，适合屏蔽行星边缘低灰度伪影。`--augmentation-profile mixed` 会混合 mild/medium/hard/extreme 强度；想检查极端现象时可用 `--augmentation-profile extreme`。缓存中 PNG 用于查看变换后的图，`.pt` 文件保存训练用的 `view_a`、`view_b`、`warp_a_to_b` 和 `valid_mask`。需要强制重建时添加 `--synthetic-pair-cache-rebuild`。
+指定 `--synthetic-pair-cache-dir` 后会先生成合成训练对缓存；后续缓存完整且配置匹配时直接复用。未指定缓存且设置 `--dataloader-workers` 大于 0 时，训练会用异步 DataLoader 在线生成 pair；`--prefetch-batches` 控制预取深度，`--pin-memory` 可配合 CUDA 数据搬运。默认训练使用更大的 deep matcher 模型，联合优化 feature extraction、graph matching 和 dense offset refinement，但不通过 CLI 暴露低层结构参数。`--pairs-per-image` 可让每张真实图像生成多组不同变换的合成匹配对，用于增加训练样本。`--min-keypoint-intensity` 会把低于阈值的灰度区域从训练监督中排除，适合屏蔽行星边缘低灰度伪影。`--log-csv` 会写出逐 iteration 指标，便于观察 matcher/dense loss 和 GPU 指标。`--augmentation-profile mixed` 会混合 mild/medium/hard/extreme 强度；想检查极端现象时可用 `--augmentation-profile extreme`。缓存中 PNG 用于查看变换后的图，`.pt` 文件保存训练用的 `view_a`、`view_b`、`warp_a_to_b` 和 `valid_mask`。需要强制重建时添加 `--synthetic-pair-cache-rebuild`。
+
+指定 `--visualization-dir` 后会写训练诊断图，默认前 4 个训练 pair；`--visualization-samples all` 写出全部 pair。每个 pair 输出原始合成视图、有效 mask、warp 监督采样、模型特征点和模型匹配结果，图像左上角标注特征点数、匹配数或有效像素数。
 
 ## 特征提取
 
@@ -118,7 +123,7 @@ images/a.tif images/b.tif
 
 `cuda` 等价于 `cuda:0`。CUDA 不可用、索引越界或格式错误时会明确失败，不会静默退回 CPU。当前 CUDA 覆盖训练 forward/backward/loss 和推理模型 forward；图像读取、特征解码、匹配后处理、评估汇总和 `.pt` 写出仍在 CPU。
 
-GPU 训练时可调大 `--resize`、`--batch-size` 或增加训练图像数量，以增加每轮计算量和显存占用，例如：
+GPU 训练时可调大 `--resize`、`--batch-size`、`--dataloader-workers` 或增加训练图像数量，以增加每轮计算量并减少 CPU 数据准备等待，例如：
 
 ```bash
 ./build/pfm_cli train \
@@ -131,7 +136,9 @@ GPU 训练时可调大 `--resize`、`--batch-size` 或增加训练图像数量�
   --pairs-per-image 4 \
   --augmentation-profile mixed \
   --extreme-pair-ratio 0.2 \
-  --synthetic-pair-cache-dir build/pair_cache
+  --dataloader-workers 4 \
+  --prefetch-batches 4 \
+  --log-csv build/train_metrics.csv
 ```
 
 ## 测试程序 `pfm_tests`

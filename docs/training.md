@@ -9,7 +9,7 @@ PlanetaryFeatureMatch 面向火星、月球和小行星影像，目标是训练�
 1. 从真实影像目录读取数据。
 2. 生成自监督图像对。
 3. 训练前可选择先生成合成训练对缓存。
-4. 训练最小 LibTorch 模型。
+4. 训练更强的默认 LibTorch deep matcher 模型。
 5. 保存可加载 checkpoint。
 6. 使用 checkpoint 提取特征。
 7. 导出匹配结果和评估报告。
@@ -51,17 +51,19 @@ PlanetaryFeatureMatch 面向火星、月球和小行星影像，目标是训练�
 
 ## 训练模块
 
-训练会联合运行以下模块：
+训练会联合运行以下模块，默认结构参数为 `base_channels=32`、`descriptor_dim=128`、`graph_hidden_dim=256`、`graph_attention_layers=4`，这些低层结构参数不通过 CLI 暴露，避免训练命令过于复杂：
 
-- `Backbone`：共享多尺度特征提取。
-- `SparseHead`：输出关键点 heatmap、描述子、尺度、方向和仿射形状。
-- `DenseHead`：输出半稠密置信度和局部偏移。
+- `Backbone`：共享多尺度特征提取，每个 stage 包含下采样卷积和 refinement 卷积。
+- `SparseHead`：通过共享 context tower 输出关键点 heatmap、描述子、尺度、方向和仿射形状。
+- `DenseHead`：融合两图特征、差分、坐标和小半径局部相关性，输出半稠密置信度和局部偏移。
+- `PlanetaryGraphMatcher`：多层 residual graph attention matcher，使用 self/cross attention、LayerNorm、FFN 和 dustbin 处理未匹配候选。
 
 当前基础损失包括：
 
 - `repeatability_loss`
 - `descriptor_cross_entropy_loss`
-- `masked_l1_loss`
+- `graph_matching_cross_entropy_loss`
+- `smooth_l1_offset_loss`
 - `confidence_bce_loss`
 
 为了让真实大幅面 TIFF 能在 CPU 本地 smoke 中稳定运行，第一阶段训练会限制输入图像尺寸，并对 descriptor loss 的空间位置做采样；默认每个 epoch 使用目录中的全部训练图像，样本总数为 `图像数 × pairs_per_image`。
@@ -94,6 +96,11 @@ cmake -S . -B build -DBUILD_TESTS=ON \
   --pairs-per-image 1 \
   --augmentation-profile mixed \
   --extreme-pair-ratio 0.2 \
+  --log-csv build/train_metrics.csv \
+  --dataloader-workers 0 \
+  --prefetch-batches 2 \
+  --visualization-dir build/train_vis \
+  --visualization-samples 4 \
   --min-keypoint-intensity 0.0
 ```
 
@@ -110,11 +117,19 @@ cmake -S . -B build -DBUILD_TESTS=ON \
 - `--extreme-pair-ratio`：`mixed` 中极端样本比例控制入口，默认 0.2，取值范围 `[0, 1]`。
 - `--synthetic-pair-cache-dir`：合成训练对缓存目录；未指定时保持在线生成。
 - `--synthetic-pair-cache-rebuild`：强制重建缓存，忽略已有文件。
+- `--log-csv`：逐 iteration 写 CSV 指标，便于长期观察 `graph_matching_loss`、`offset_error_px`、GPU 利用率和功耗。
+- `--dataloader-workers`：在线合成 pair 的异步 DataLoader worker 数，默认 0 表示同步生成；未指定缓存时可调大以减少 GPU 等待。
+- `--prefetch-batches`：异步 DataLoader 预取 batch 数，默认 2，必须为正数。
+- `--pin-memory`：尝试把 CPU batch 固定到 pinned memory，主要用于 CUDA 训练的数据搬运优化。
+- `--visualization-dir`：训练诊断 PNG 输出目录；未指定时不写诊断图。
+- `--visualization-samples`：诊断输出样本数，默认 4；传 `all` 时输出每个训练 pair。
 - `--min-keypoint-intensity`：关键点监督和输出的最低归一化灰度阈值，默认 0.0，取值范围 `[0, 1]`。
 
-训练时 `--min-keypoint-intensity` 会从归一化图像生成灰度掩码，并与合成 pair 的几何 `valid_mask` 相交；只有源视图和 warp 后目标视图都达到阈值的位置才参与 repeatability、descriptor、offset 和 confidence 监督。显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。CUDA 训练结束保存 checkpoint 前会把权重移回 CPU，因此同一个 checkpoint 可以被 CPU 或 GPU 推理加载。推理侧 `extract` 和 `match` 也支持 `--device cuda`，模型 forward 会在 GPU 上执行；特征解码、匹配后处理、PNG 可视化和 `.pt` 写出仍在 CPU。训练或推理功耗没有接近显卡 TDP 时，通常是 batch、输入分辨率、模型规模或 CPU 数据准备限制导致 GPU 等待，并不等同于没有使用 CUDA。
+训练时 `--min-keypoint-intensity` 会从归一化图像生成灰度掩码，并与合成 pair 的几何 `valid_mask` 相交；只有源视图和 warp 后目标视图都达到阈值的位置才参与 repeatability、descriptor、offset 和 confidence 监督。未指定 `--synthetic-pair-cache-dir` 且 `--dataloader-workers > 0` 时，在线合成 pair 会走 `SyntheticPairTensorDataset + AsyncDataLoader`，提前加载和增强后续 batch；指定缓存目录时优先复用缓存。显式请求 CUDA 时不会静默回退到 CPU；CUDA 不可用、索引越界或格式错误会直接失败。CUDA 训练结束保存 checkpoint 前会把权重移回 CPU，因此同一个 checkpoint 可以被 CPU 或 GPU 推理加载。推理侧 `extract` 和 `match` 也支持 `--device cuda`，模型 forward 会在 GPU 上执行；特征解码、匹配后处理、PNG 可视化和 `.pt` 写出仍在 CPU。训练或推理功耗没有接近显卡 TDP 时，通常是 batch、输入分辨率、模型规模或 CPU 数据准备限制导致 GPU 等待，并不等同于没有使用 CUDA。
 
 指定 `--synthetic-pair-cache-dir` 后，训练开始前会先生成 `manifest.pt`、`pair_000000.pt`、`source_000000_view_a.png`、`pair_000000_view_b.png` 等文件。同一源图的 A 视图只保存一个 `source_XXXXXX_view_a.png`，每个增强 pair 保存自己的 `pair_XXXXXX_view_b.png`。后续运行如果缓存完整且训练缩放参数、每图 pair 数、增强 profile、极端比例和合成变换参数一致，就直接读取 `.pt` 监督文件训练，不再重复生成。PNG 用于人工检查变换效果，训练实际使用 `.pt` 中的 `view_a`、`view_b`、`warp_a_to_b` 和 `valid_mask`。
+
+指定 `--visualization-dir` 后，训练会输出诊断 PNG：`view_a`、`view_b`、`valid_mask`、`warp_matches`、`features_a`、`features_b` 和 `model_matches`。默认只写前 4 个训练 pair；`--visualization-samples all` 写出每个 pair。每张图左上角会标注特征点数、匹配数或有效监督像素数。PNG 写入由后台线程异步完成，训练返回前会 flush 所有已排队文件。
 
 默认 `--resize 512` 会把训练图像最大边限制到 512，每轮使用目录中的全部训练图像。`--pairs-per-image` 可以让每张图生成多组不同平移、旋转、尺度和光照扰动的匹配对。`--augmentation-profile extreme` 会显著增大变换幅度，适合检查缓存图像是否出现极端现象；正式训练默认推荐 `mixed`。想提高 GPU 利用率或增强数据量时，可以调大 `--resize`、`--batch-size`、`--pairs-per-image` 或增加训练图像数量，例如：
 
@@ -129,20 +144,22 @@ cmake -S . -B build -DBUILD_TESTS=ON \
   --pairs-per-image 4 \
   --augmentation-profile mixed \
   --extreme-pair-ratio 0.2 \
-  --synthetic-pair-cache-dir build/pair_cache
+  --synthetic-pair-cache-dir build/pair_cache \
+  --log-csv build/train_metrics.csv \
+  --visualization-dir build/train_vis
 ```
 
-调大这些值会增加 GPU 计算量和显存占用，也会增加 CPU 图像读取与预处理压力。训练过程中会按 batch 输出进度，`batch-size` 只决定每个 batch 包含多少合成 pair，不限制每轮使用的样本总数。
+调大这些值会增加 GPU 计算量和显存占用，也会增加 CPU 图像读取与预处理压力。无缓存在线训练时可增加 `--dataloader-workers` 和 `--prefetch-batches` 让 CPU 预处理更早开始；使用缓存时则通过提前生成 `.pt` pair 降低重复增强开销。默认模型已经比早期 smoke 模型更大，训练时间和 checkpoint 体积会增加；但它仍不同于 YOLO 这类多类别检测器，不包含检测 neck、多尺度 detection heads 和类别输出层，所以 checkpoint 小于大型 YOLO 并不代表模型一定太弱。训练过程中会按 batch 输出进度，`batch-size` 只决定每个 batch 包含多少合成 pair，不限制每轮使用的样本总数。
 
 训练成功后会输出类似：
 
 ```text
-train progress: epoch=1/1 batch=1/4 images=16/64 loss=...
+train progress: epoch=1/1 batch=1/4 images=16/64 loss_total=... feature_loss=... matcher_loss=... dense_loss=... offset_error_px=...
 train epoch summary: epoch=1/1 epoch_time=...s
 training complete: epochs=1 final_loss=... total_time=...s avg_batch_time=...s
 ```
 
-训练命令每个 epoch 会输出 `epoch_time=<seconds>s`，训练结束输出 `total_time=<seconds>s` 和 `avg_batch_time=<seconds>s`，用于判断整体耗时和 batch 级吞吐。
+训练命令每个 epoch 会输出 `epoch_time=<seconds>s`，训练结束输出 `total_time=<seconds>s` 和 `avg_batch_time=<seconds>s`，用于判断整体耗时和 batch 级吞吐。`feature_loss` 是 repeatability 与 descriptor 损失之和；`matcher_loss` / `graph_matching_loss` 是图匹配候选分类损失，数值波动大通常表示 hard pair 上匹配器仍不稳定；`dense_loss` 汇总半稠密偏移和置信度监督，`offset_error_px` 越低表示 dense offset refinement 越准确。设置 `--log-csv` 后，相同指标会逐 iteration 写入 CSV；如果构建环境启用了 NVML 且能读取 GPU，CSV 还会包含 `gpu_utilization_percent` 和 `gpu_power_watts`。
 
 并生成 `model.pt`。
 
