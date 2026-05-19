@@ -62,8 +62,7 @@ void validate_matcher_inputs(
 }
 
 torch::Tensor normalize_keypoints_for_embedding(const torch::Tensor& keypoints) {
-    auto points = keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
-    return points.clamp(-1.0, 1.0);
+    return keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
 }
 
 }  // namespace

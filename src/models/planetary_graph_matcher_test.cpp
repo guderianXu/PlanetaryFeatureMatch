@@ -62,9 +62,9 @@ static void graph_matcher_keypoints_affect_logits() {
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
     auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
-    auto keypoints_a = torch::tensor({{-1.0F, -1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
-    auto keypoints_b = torch::tensor({{-1.0F, -1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
-    auto shifted_keypoints_b = torch::tensor({{1.0F, 1.0F}, {-1.0F, -1.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
+    auto shifted_keypoints_b = torch::tensor({{24.0F, 24.0F}, {8.0F, 8.0F}}, torch::kFloat32);
 
     const auto original = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b).logits;
     const auto shifted = matcher->forward(descriptors_a, keypoints_a, descriptors_b, shifted_keypoints_b).logits;
