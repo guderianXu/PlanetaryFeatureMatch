@@ -72,12 +72,50 @@ static void graph_matcher_keypoints_affect_logits() {
     PFM_REQUIRE(!torch::allclose(original, shifted));
 }
 
+static void graph_matcher_filters_dustbin_sparse_matches() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    matcher->eval();
+    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
+    for (auto& parameter : matcher->parameters()) {
+        parameter.detach().zero_();
+    }
+    matcher->named_parameters()["dustbin_bias"].detach().fill_(10.0F);
+
+    const auto output = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b);
+
+    PFM_REQUIRE(output.matches.sizes() == std::vector<int64_t>({0, 2}));
+    PFM_REQUIRE(output.scores.sizes() == std::vector<int64_t>({0}));
+}
+
+static void graph_matcher_keeps_only_mutual_sparse_matches() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    matcher->eval();
+    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{1.0F, 0.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {8.0F, 8.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{8.0F, 8.0F}}, torch::kFloat32);
+    for (auto& parameter : matcher->parameters()) {
+        parameter.detach().fill_(0.1F);
+    }
+    matcher->named_parameters()["dustbin_bias"].detach().fill_(-10.0F);
+
+    const auto output = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b);
+
+    PFM_REQUIRE(output.matches.size(0) == 1);
+    PFM_REQUIRE(output.matches.index({0, 1}).item<int64_t>() == 0);
+}
+
 void register_planetary_graph_matcher_tests() {
     register_test("planetary_graph_matcher_outputs_match_logits_with_dustbin",
                   planetary_graph_matcher_outputs_match_logits_with_dustbin);
     register_test("planetary_graph_matcher_rejects_descriptor_dimension_mismatch",
                   planetary_graph_matcher_rejects_descriptor_dimension_mismatch);
     register_test("graph matcher keypoints affect logits", graph_matcher_keypoints_affect_logits);
+    register_test("graph matcher filters dustbin sparse matches", graph_matcher_filters_dustbin_sparse_matches);
+    register_test("graph matcher keeps only mutual sparse matches", graph_matcher_keeps_only_mutual_sparse_matches);
     register_test("planetary_graph_matcher_uses_attention_layers",
                   planetary_graph_matcher_uses_attention_layers);
     register_test("planetary_graph_matcher_attention_layer_uses_norm_and_ffn",

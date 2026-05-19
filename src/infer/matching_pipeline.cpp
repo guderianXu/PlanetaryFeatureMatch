@@ -29,11 +29,16 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
         return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
     }
 
+    auto matcher_device = torch::Device(torch::kCPU);
+    const auto parameters = matcher.parameters();
+    if (!parameters.empty()) {
+        matcher_device = parameters.front().device();
+    }
     const auto output = matcher.forward(
-        features_a.descriptors.to(torch::kCPU, torch::kFloat32),
-        features_a.keypoints.to(torch::kCPU, torch::kFloat32),
-        features_b.descriptors.to(torch::kCPU, torch::kFloat32),
-        features_b.keypoints.to(torch::kCPU, torch::kFloat32));
+        features_a.descriptors.to(matcher_device, torch::kFloat32),
+        features_a.keypoints.to(matcher_device, torch::kFloat32),
+        features_b.descriptors.to(matcher_device, torch::kFloat32),
+        features_b.keypoints.to(matcher_device, torch::kFloat32));
     return {output.matches.to(torch::kCPU, torch::kInt64).contiguous(), output.scores.to(torch::kCPU, torch::kFloat32).contiguous()};
 }
 

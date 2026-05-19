@@ -35,3 +35,9 @@
 - 训练完成，exit code 0；CSV 有 13,800 条 iteration。
 - 指标趋势：graph_matching_loss first_mean≈2.17615、last_mean≈0.10262；feature_loss first_mean≈2.78217、last_mean≈0.333686；dense_loss first_mean≈0.754952、last_mean≈0.0857591；offset_error_px first_mean≈156.817、last_mean≈16.3463；descriptor_accuracy first_mean≈0.374187、last_mean≈0.95367。
 - 最后一条 iteration：graph_matching_loss≈0.000501843，feature_loss≈0.000998608，repeatability_loss≈0.000040554，dense_loss≈0.00360692，offset_error_px≈10.891，descriptor_accuracy=1。
+
+## 2026-05-20 checkpoint inference evaluation
+- 用 `train_full.pt` 跑真实图像 CUDA match 评估时发现推理路径问题：`pfm_cli match --device cuda` 最初因 graph matcher 在 CUDA、features 在 CPU 报 device mismatch。已修复 `matchSparseFeatures()`，按 matcher 参数所在设备搬运 sparse descriptors/keypoints，并新增 CUDA 回归测试。
+- 评估还发现 graph matcher 训练有 dustbin，但推理原来仍对每个 A keypoint 强制输出一个 B match，真实图像上导致 1024 条 sparse match 全部输出且误匹配风险高。已修复为：推理只保留非 dustbin 且 B→A 互为最近的 sparse matches，并新增 dustbin/mutual tests。
+- 修复后 `pfm_tests` 通过 `293 test(s) passed`。
+- 真实图像示例：100-101 / 100-110 / 100-118 在 CUDA match 下 sparse_matches 从原来的 1024 分别降到 44 / 67 / 43；dense matches 仍为 74332 / 63506 / 74486。输出目录：`eval_matches_full_mutual/`。

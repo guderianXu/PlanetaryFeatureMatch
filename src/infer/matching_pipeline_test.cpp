@@ -61,8 +61,9 @@ static void matchingPipelineUsesPlanetaryGraphMatcherOutput() {
 
     const auto matches = pfm::matchFeatureSets(features_a, features_b, *matcher);
 
-    PFM_REQUIRE(matches.sparse_matches.sizes() == torch::IntArrayRef({3, 2}));
-    PFM_REQUIRE(matches.sparse_scores.sizes() == torch::IntArrayRef({3}));
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
+    PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
     PFM_REQUIRE(matches.points_a.sizes() == torch::IntArrayRef({2, 2}));
     PFM_REQUIRE(matches.points_b.sizes() == torch::IntArrayRef({2, 2}));
     PFM_REQUIRE(matches.confidence.sizes() == torch::IntArrayRef({2}));
@@ -82,10 +83,10 @@ static void matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores
 
     const auto matches = pfm::matchFeatureSets(features_a, features_b);
 
-    PFM_REQUIRE(matches.sparse_matches.sizes() == torch::IntArrayRef({2, 2}));
-    PFM_REQUIRE(matches.sparse_matches.index({0, 0}).item<int64_t>() == 0);
-    PFM_REQUIRE(matches.sparse_matches.index({1, 0}).item<int64_t>() == 1);
-    PFM_REQUIRE(matches.sparse_scores.sizes() == torch::IntArrayRef({2}));
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
+    PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
+    PFM_REQUIRE(!matches.sparse_scores.isnan().any().item<bool>());
 }
 
 static void matching_pipeline_handles_empty_sparse_descriptors() {
@@ -145,8 +146,10 @@ static void matchingPipelineKeepsOneWayGeometricallyConsistentSparseCandidates()
 
     const auto matches = pfm::matchFeatureSets(features_a, features_b);
 
-    PFM_REQUIRE(matches.sparse_matches.sizes() == torch::IntArrayRef({3, 2}));
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
 }
+
 
 static void matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilter() {
     const auto descriptors = torch::tensor(
@@ -167,9 +170,38 @@ static void matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilt
 
     const auto matches = pfm::matchFeatureSets(features_a, features_b);
 
-    PFM_REQUIRE(matches.sparse_matches.sizes() == torch::IntArrayRef({3, 2}));
-    PFM_REQUIRE(matches.sparse_scores.sizes() == torch::IntArrayRef({3}));
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
+    PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
 }
+
+static void matchingPipelineAcceptsCudaGraphMatcherWithCpuFeatures() {
+    if (!torch::cuda::is_available()) {
+        return;
+    }
+    const auto features_a = makeFeatureSet(
+        torch::tensor({{1.0F, 1.0F}, {2.0F, 2.0F}}, torch::kFloat32),
+        torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32),
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+    const auto features_b = makeFeatureSet(
+        torch::tensor({{1.0F, 1.0F}, {2.0F, 2.0F}}, torch::kFloat32),
+        torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32),
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+    pfm::PlanetaryGraphMatcher matcher(2, 8);
+    matcher->to(torch::kCUDA);
+
+    const auto matches = pfm::matchFeatureSets(features_a, features_b, *matcher);
+
+    PFM_REQUIRE(matches.sparse_matches.device().is_cpu());
+    PFM_REQUIRE(matches.sparse_scores.device().is_cpu());
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matches.sparse_matches.size(1) == 2);
+}
+
 
 }  // namespace
 
@@ -186,4 +218,6 @@ void register_matching_pipeline_tests() {
                   matchingPipelineKeepsOneWayGeometricallyConsistentSparseCandidates);
     register_test("matching_pipeline_returns_learned_sparse_candidates_without_translation_filter",
                   matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilter);
+    register_test("matching_pipeline_accepts_cuda_graph_matcher_with_cpu_features",
+                  matchingPipelineAcceptsCudaGraphMatcherWithCpuFeatures);
 }

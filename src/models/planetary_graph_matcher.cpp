@@ -157,12 +157,21 @@ PlanetaryGraphMatcherOutput PlanetaryGraphMatcherImpl::forward(
     auto logits = torch::zeros({descriptors_a.size(0) + 1, descriptors_b.size(0) + 1}, pair_logits.options()) + _dustbin_bias;
     logits.index_put_({torch::indexing::Slice(0, descriptors_a.size(0)), torch::indexing::Slice(0, descriptors_b.size(0))}, pair_logits);
 
-    const auto best = torch::max(pair_logits, 1);
-    const auto best_indices = std::get<1>(best).to(torch::kCPU, torch::kInt64);
-    const auto best_scores = std::get<0>(best).to(torch::kCPU, torch::kFloat32);
+    auto row_logits = logits.index({torch::indexing::Slice(0, descriptors_a.size(0)), torch::indexing::Slice()});
+    const auto best = torch::max(row_logits, 1);
+    const auto best_indices = std::get<1>(best);
     auto source_indices = torch::arange(descriptors_a.size(0), best_indices.options());
-    auto matches = torch::stack({source_indices, best_indices}, 1).contiguous();
-    return PlanetaryGraphMatcherOutput{logits.contiguous(), matches, best_scores.contiguous()};
+    auto reverse_best = std::get<1>(pair_logits.max(0));
+    auto inlier_mask = best_indices.lt(descriptors_b.size(0));
+    if (descriptors_a.size(0) > 0 && descriptors_b.size(0) > 0) {
+        auto mutual_sources = reverse_best.index_select(0, best_indices.clamp(0, descriptors_b.size(0) - 1));
+        inlier_mask = inlier_mask.logical_and(mutual_sources.eq(source_indices));
+    }
+    source_indices = source_indices.index({inlier_mask});
+    auto target_indices = best_indices.index({inlier_mask});
+    auto probabilities = std::get<0>(torch::softmax(row_logits, 1).max(1)).index({inlier_mask});
+    auto matches = torch::stack({source_indices, target_indices}, 1).to(torch::kCPU, torch::kInt64).contiguous();
+    return PlanetaryGraphMatcherOutput{logits.contiguous(), matches, probabilities.to(torch::kCPU, torch::kFloat32).contiguous()};
 }
 
 int64_t PlanetaryGraphMatcherImpl::attentionLayerCount() const {

@@ -62,3 +62,8 @@
 - 特征分支同步改善：descriptor_accuracy 从首段均值≈0.374187 升到末段≈0.95367；feature_loss 从≈2.78217 降到≈0.333686。
 - dense 分支也稳定下降：dense_loss 从≈0.754952 降到≈0.0857591，offset_error_px 从≈156.817 降到≈16.3463。
 - checkpoint `train_full.pt` 和训练诊断 `metrics_full.csv`/`vis_full/` 是本地训练产物，不应默认提交到 git。
+
+## Inference filtering findings (2026-05-20)
+- 训练 loss 收敛不等于推理 sparse match 可直接使用；如果推理忽略 dustbin 并强制每个 A keypoint 输出 argmax B，会在真实图像上产生大量低质量 sparse matches。
+- Graph matcher 推理需要同时使用 dustbin 过滤和 mutual nearest 过滤：非 dustbin 说明模型认为该 A 有候选，mutual nearest 避免多个 A 单向挤到同一个 B。
+- CUDA 推理路径必须按 matcher 参数设备搬运 feature tensors；features 本身由 decode 保持 CPU 是合理的，但 matcher 在 CUDA 时 forward 输入也必须到 CUDA。
