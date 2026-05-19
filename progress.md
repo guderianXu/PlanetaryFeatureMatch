@@ -28,3 +28,10 @@
 - CUDA 短训练复现已完成，命令包含 `--device cuda`；`nvidia-smi` 曾确认 `pfm_cli` 进程使用 GPU，显存约 2264 MiB。完整 4140 条 CSV iteration 的 `graph_matching_loss`：first_mean≈4.6967，last_mean≈0.0335，min≈0.00000227，max≈18.1822，最后 10 条约 0.0010-0.0020。
 
 - 阶段 13 标记完成：graph matcher 使用 keypoint geometry，训练监督已切换到 decoded sparse keypoints；完整 CUDA 验证显示 graph loss 从 first_mean≈4.6967 降到 last_mean≈0.0335。下一步执行合并到 main 并推送 GitHub。
+
+## 2026-05-20 full CUDA training
+- 在 main 分支运行完整 10 epoch CUDA 训练，命令使用用户原始参数：image-dir=img、batch-size=2、resize=512、pairs-per-image=15、augmentation-profile=mixed、min-keypoint-intensity=0.05、min-keypoints=1024、device=cuda。
+- 输出文件：`train_full.pt`（25M checkpoint）、`metrics_full.csv`（2.2M CSV）、`vis_full/`。这些是训练产物，未纳入 git 跟踪。
+- 训练完成，exit code 0；CSV 有 13,800 条 iteration。
+- 指标趋势：graph_matching_loss first_mean≈2.17615、last_mean≈0.10262；feature_loss first_mean≈2.78217、last_mean≈0.333686；dense_loss first_mean≈0.754952、last_mean≈0.0857591；offset_error_px first_mean≈156.817、last_mean≈16.3463；descriptor_accuracy first_mean≈0.374187、last_mean≈0.95367。
+- 最后一条 iteration：graph_matching_loss≈0.000501843，feature_loss≈0.000998608，repeatability_loss≈0.000040554，dense_loss≈0.00360692，offset_error_px≈10.891，descriptor_accuracy=1。

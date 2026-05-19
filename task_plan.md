@@ -22,6 +22,11 @@
   - 已验证：`cmake` 配置、完整 build、`pfm_tests` 290 tests passed、`ctest` 100% passed。
   - 已完成：Task 5 CUDA 短训练复现结束，完整 4140 条 CSV iteration 显示 `graph_matching_loss` first_mean≈4.6967、last_mean≈0.0335，趋势明显下降。
 
+- 阶段 14：完整 CUDA 训练验证（complete）
+  - 已完成：main 分支 10 epoch CUDA 完整训练。
+  - 结果：13,800 条 iteration；graph_matching_loss first_mean≈2.17615、last_mean≈0.10262；descriptor_accuracy first_mean≈0.374187、last_mean≈0.95367。
+  - 产物：`train_full.pt`、`metrics_full.csv`、`vis_full/` 保留为本地训练输出，不默认提交。
+
 ## 设计决策
 - B 侧描述子和关键点从 warp 后目标位置采样，target 改为恒等映射（A[i]→B[i]），图匹配器可同时利用空间和描述子信号
 - 进度条补充 feature_loss、repeatability_loss、descriptor_accuracy 等特征提取器指标

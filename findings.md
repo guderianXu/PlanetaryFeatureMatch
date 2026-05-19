@@ -56,3 +56,9 @@
 - `valid_mask` 由原始有效区域、A/B 强度 mask 共同构成；graph target assignment 必须同时检查 source 像素和 warped target 像素，否则会把无效目标监督为正样本。
 - `decode_feature_maps()` 要求 dense confidence 与 sparse heatmap 空间尺寸一致；训练路径中 dense head confidence 需要 nearest resize 后才能作为 decode 输入。
 - 完整 CUDA 短训练显示 graph loss 明显下降：4140 条 iteration 的 first_mean≈4.6967、last_mean≈0.0335，最后 10 条约 0.0010-0.0020；这与之前 fixed-grid graph loss 首末均值约 3.92/3.94 不下降形成对比。
+
+## Full training results after keypoint graph supervision (2026-05-20)
+- 完整 10 epoch CUDA 训练验证了 keypoint graph supervision 不只在短跑有效：13,800 条 iteration 中 graph_matching_loss 从首段均值≈2.17615 降到末段≈0.10262。
+- 特征分支同步改善：descriptor_accuracy 从首段均值≈0.374187 升到末段≈0.95367；feature_loss 从≈2.78217 降到≈0.333686。
+- dense 分支也稳定下降：dense_loss 从≈0.754952 降到≈0.0857591，offset_error_px 从≈156.817 降到≈16.3463。
+- checkpoint `train_full.pt` 和训练诊断 `metrics_full.csv`/`vis_full/` 是本地训练产物，不应默认提交到 git。
