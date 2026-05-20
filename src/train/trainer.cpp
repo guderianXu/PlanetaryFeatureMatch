@@ -21,6 +21,7 @@
 #include "core/timer.h"
 #include "data/image_dataset.h"
 #include "dataloader/async_dataloader.h"
+#include "dataloader/sampler.h"
 #include "data/synthetic_pair_dataset.h"
 #include "data/intensity_mask.h"
 #include "data/synthetic_pair.h"
@@ -1386,6 +1387,29 @@ bool should_use_online_dataloader(const TrainConfig& config) {
     return config.dataloader_workers > 0 && config.synthetic_pair_cache_dir.empty();
 }
 
+DatasetSplit make_training_dataset_split(std::size_t total_images, const TrainConfig& config) {
+    const auto validation_ratio = config.val_ratio;
+    const auto train_ratio = config.train_ratio;
+    const auto test_ratio = 1.0 - train_ratio - validation_ratio;
+    auto split = make_train_validation_test_split(
+        total_images,
+        train_ratio,
+        validation_ratio,
+        test_ratio,
+        static_cast<uint64_t>(config.split_seed),
+        true);
+    if (split.train.empty() && total_images > 0) {
+        if (!split.validation.empty()) {
+            split.train.push_back(split.validation.front());
+            split.validation.erase(split.validation.begin());
+        } else if (!split.test.empty()) {
+            split.train.push_back(split.test.front());
+            split.test.erase(split.test.begin());
+        }
+    }
+    return split;
+}
+
 std::filesystem::path epoch_visualization_dir(const TrainConfig& config, int epoch) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "epoch_%06d", epoch);
@@ -1786,6 +1810,20 @@ bool should_use_online_dataloader_for_test(const TrainConfig& config) {
     return should_use_online_dataloader(config);
 }
 
+std::vector<std::size_t> make_training_image_indices_for_test(
+    std::size_t total_images,
+    const TrainConfig& config
+) {
+    return make_training_dataset_split(total_images, config).train;
+}
+
+std::vector<std::size_t> make_validation_image_indices_for_test(
+    std::size_t total_images,
+    const TrainConfig& config
+) {
+    return make_training_dataset_split(total_images, config).validation;
+}
+
 }  // namespace testing
 
 TrainResult train_model(const TrainConfig& config) {
@@ -1814,10 +1852,11 @@ TrainResult train_model(const TrainConfig& config) {
     bool has_loss = false;
 
     const auto total_images = dataset.size();
-    const auto train_images = std::max<std::size_t>(
-        1, static_cast<std::size_t>(static_cast<double>(total_images) * config.train_ratio));
-    const auto val_images = std::max<std::size_t>(
-        0, static_cast<std::size_t>(static_cast<double>(total_images) * config.val_ratio));
+    const auto dataset_split = make_training_dataset_split(total_images, config);
+    const auto& train_indices = dataset_split.train;
+    const auto& validation_indices = dataset_split.validation;
+    const auto train_images = train_indices.size();
+    const auto val_images = validation_indices.size();
     const auto train_epoch_size = train_images * static_cast<std::size_t>(config.pairs_per_image);
     const auto epoch_size = train_epoch_size;
     const auto lr_max = config.learning_rate;
@@ -1825,10 +1864,6 @@ TrainResult train_model(const TrainConfig& config) {
     const auto total_iterations = static_cast<double>(config.epochs) *
         static_cast<double>(train_epoch_size) / static_cast<double>(config.batch_size);
     int64_t global_step = 0;
-    std::vector<std::size_t> image_order(total_images);
-    for (std::size_t i = 0; i < total_images; ++i) image_order[i] = i;
-    std::mt19937 rng(config.split_seed > 0 ? static_cast<unsigned>(config.split_seed) : std::random_device{}());
-    std::shuffle(image_order.begin(), image_order.end(), rng);
     std::unique_ptr<AsyncVisualizationWriter> visualization_writer;
     const std::size_t visualization_limit = config.visualization_samples_all
         ? epoch_size
@@ -1861,7 +1896,7 @@ TrainResult train_model(const TrainConfig& config) {
         std::vector<torch::Tensor> images;
         images.reserve(train_images);
         for (std::size_t index = 0; index < train_images; ++index) {
-            images.push_back(limit_training_image_size(ensure_grayscale(dataset.load(image_order[index])), config.resize));
+            images.push_back(limit_training_image_size(ensure_grayscale(dataset.load(train_indices[index])), config.resize));
         }
         auto online_dataset = std::make_shared<SyntheticPairTensorDataset>(
             std::move(images), static_cast<size_t>(config.pairs_per_image), make_online_pair_config(config));
@@ -1898,7 +1933,7 @@ TrainResult train_model(const TrainConfig& config) {
                 source_indices.reserve(end - offset);
                 variant_indices.reserve(end - offset);
                 for (std::size_t index = offset; index < end; ++index) {
-                    const auto source_index = image_order[index % train_images];
+                    const auto source_index = train_indices[index % train_images];
                     images.push_back(limit_training_image_size(
                         ensure_grayscale(dataset.load(source_index)),
                         config.resize));
@@ -2040,7 +2075,7 @@ TrainResult train_model(const TrainConfig& config) {
                 val_src_indices.reserve(val_end - val_offset);
                 val_var_indices.reserve(val_end - val_offset);
                 for (std::size_t idx = val_offset; idx < val_end; ++idx) {
-                    const auto src = image_order[train_images + (idx % val_images)];
+                    const auto src = validation_indices[idx % val_images];
                     val_img_batch.push_back(limit_training_image_size(
                         ensure_grayscale(dataset.load(src)), config.resize));
                     val_src_indices.push_back(static_cast<int64_t>(src));

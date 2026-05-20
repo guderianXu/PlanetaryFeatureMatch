@@ -67,3 +67,7 @@
 - 训练 loss 收敛不等于推理 sparse match 可直接使用；如果推理忽略 dustbin 并强制每个 A keypoint 输出 argmax B，会在真实图像上产生大量低质量 sparse matches。
 - Graph matcher 推理需要同时使用 dustbin 过滤和 mutual nearest 过滤：非 dustbin 说明模型认为该 A 有候选，mutual nearest 避免多个 A 单向挤到同一个 B。
 - CUDA 推理路径必须按 matcher 参数设备搬运 feature tensors；features 本身由 decode 保持 CPU 是合理的，但 matcher 在 CUDA 时 forward 输入也必须到 CUDA。
+
+## Trainer split integration finding (2026-05-20)
+- 自动训练/验证划分的基础能力已存在于 `modules/dataloader/sampler`，但 trainer 曾重复实现 shuffle/slice；现在 trainer 复用 `make_train_validation_test_split()`，避免模块化 dataloader 能力闲置和两套划分逻辑漂移。
+- `train_ratio + val_ratio` 隐含剩余比例作为 test split；当前 trainer 只使用 train/validation，test 保留给后续评估扩展。

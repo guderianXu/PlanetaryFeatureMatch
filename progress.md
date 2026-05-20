@@ -41,3 +41,10 @@
 - 评估还发现 graph matcher 训练有 dustbin，但推理原来仍对每个 A keypoint 强制输出一个 B match，真实图像上导致 1024 条 sparse match 全部输出且误匹配风险高。已修复为：推理只保留非 dustbin 且 B→A 互为最近的 sparse matches，并新增 dustbin/mutual tests。
 - 修复后 `pfm_tests` 通过 `293 test(s) passed`。
 - 真实图像示例：100-101 / 100-110 / 100-118 在 CUDA match 下 sparse_matches 从原来的 1024 分别降到 44 / 67 / 43；dense matches 仍为 74332 / 63506 / 74486。输出目录：`eval_matches_full_mutual/`。
+
+## 2026-05-20 trainer dataset split module integration
+- 检查发现 `modules/dataloader/sampler.{h,cpp}` 已有 `make_train_validation_test_split()`，但 trainer 仍在本地手写 `image_order` shuffle 和 train/val 切片。
+- 已将 trainer 改为通过 `make_training_dataset_split()` 复用模块化 split 工具，训练和验证索引分别来自 `DatasetSplit::train` / `DatasetSplit::validation`；online dataloader、同步生成和 validation loop 共用同一 split 结果。
+- 保留小数据集保护：当 total_images>0 但 split.train 为空时，从 validation/test 移一个样本到 train，避免训练集为空。
+- 新增测试 `trainer_training_and_validation_indices_use_dataloader_split`，验证 trainer 的 train/validation indices 与 `make_train_validation_test_split()` 一致。
+- 验证：`pfm_tests` 294 tests passed，`ctest` 100% passed。

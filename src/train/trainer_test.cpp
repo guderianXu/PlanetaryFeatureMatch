@@ -17,6 +17,7 @@
 #include <torch/torch.h>
 
 #include "data/synthetic_pair_cache.h"
+#include "dataloader/sampler.h"
 #include "infer/feature_codec.h"
 #include "infer/match_codec.h"
 #include "models/planetary_graph_matcher.h"
@@ -99,6 +100,12 @@ std::string training_model_match_overlay_text_for_test(
     double correct_threshold_pixels);
 bool should_enqueue_training_visualization_for_test(std::size_t enqueued_count, std::size_t visualization_limit);
 bool should_use_online_dataloader_for_test(const pfm::TrainConfig& config);
+std::vector<std::size_t> make_training_image_indices_for_test(
+    std::size_t total_images,
+    const pfm::TrainConfig& config);
+std::vector<std::size_t> make_validation_image_indices_for_test(
+    std::size_t total_images,
+    const pfm::TrainConfig& config);
 
 }  // namespace pfm::testing
 
@@ -608,6 +615,20 @@ static void trainer_uses_configured_resize() {
     PFM_REQUIRE(resized.is_contiguous());
 }
 
+static void trainer_training_and_validation_indices_use_dataloader_split() {
+    pfm::TrainConfig config;
+    config.train_ratio = 0.6;
+    config.val_ratio = 0.2;
+    config.split_seed = 7;
+
+    const auto train = pfm::testing::make_training_image_indices_for_test(10, config);
+    const auto validation = pfm::testing::make_validation_image_indices_for_test(10, config);
+    const auto split = pfm::make_train_validation_test_split(10, 0.6, 0.2, 0.2, 7, true);
+
+    PFM_REQUIRE(train == split.train);
+    PFM_REQUIRE(validation == split.validation);
+}
+
 static void trainer_total_loss_downweights_dense_offset_pixels() {
     auto repeatability = torch::tensor(1.0F);
     auto descriptor = torch::tensor(2.0F);
@@ -1109,6 +1130,8 @@ void register_trainer_tests() {
     register_test("trainer_trains_with_online_dataloader_workers", trainer_trains_with_online_dataloader_workers);
     register_test("trainer_resizes_large_training_image", trainer_resizes_large_training_image);
     register_test("trainer_uses_configured_resize", trainer_uses_configured_resize);
+    register_test("trainer_training_and_validation_indices_use_dataloader_split",
+                  trainer_training_and_validation_indices_use_dataloader_split);
     register_test("trainer_trains_full_dataset", trainer_trains_full_dataset);
     register_test("trainer_with_synthetic_pair_cache_writes_cache_and_checkpoint",
                   trainer_with_synthetic_pair_cache_writes_cache_and_checkpoint);

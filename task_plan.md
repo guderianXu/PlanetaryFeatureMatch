@@ -31,6 +31,10 @@
   - 已完成：修复 CUDA match device mismatch；推理 sparse matches 增加 dustbin + mutual nearest 过滤。
   - 已验证：`pfm_tests` 293 tests passed；真实图像 100-101/100-110/100-118 sparse matches 降到 44/67/43。
 
+- 阶段 16：trainer 训练/验证划分模块接入（complete）
+  - 已完成：trainer 复用 `modules/dataloader/sampler` 的 `make_train_validation_test_split()` 生成 train/validation indices。
+  - 已验证：`pfm_tests` 294 tests passed，`ctest` 100% passed。
+
 ## 设计决策
 - B 侧描述子和关键点从 warp 后目标位置采样，target 改为恒等映射（A[i]→B[i]），图匹配器可同时利用空间和描述子信号
 - 进度条补充 feature_loss、repeatability_loss、descriptor_accuracy 等特征提取器指标
