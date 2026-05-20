@@ -71,3 +71,7 @@
 ## Trainer split integration finding (2026-05-20)
 - 自动训练/验证划分的基础能力已存在于 `modules/dataloader/sampler`，但 trainer 曾重复实现 shuffle/slice；现在 trainer 复用 `make_train_validation_test_split()`，避免模块化 dataloader 能力闲置和两套划分逻辑漂移。
 - `train_ratio + val_ratio` 隐含剩余比例作为 test split；当前 trainer 只使用 train/validation，test 保留给后续评估扩展。
+
+## Extreme rotation matching finding (2026-05-20)
+- 原 mixed/extreme augmentation 最大旋转约 ±55°，不足以训练 180° 旋转匹配；对 half-turn 图像对，模型倾向输出非交叉/同位置匹配是训练分布外行为。
+- Graph matcher 的 keypoint projection 若使用原始像素/feature-map 坐标，会引入绝对位置偏置；对 180° 场景，绝对坐标相近反而通常是错误匹配。归一化坐标可减少尺寸尺度支配，但仍需重新训练来学习 half-turn 对应关系。

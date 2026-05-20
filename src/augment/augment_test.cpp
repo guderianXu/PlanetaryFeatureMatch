@@ -21,6 +21,23 @@ static void transformSamplerIsDeterministic() {
     PFM_REQUIRE_CLOSE(first.brightness_delta, second.brightness_delta, 1.0e-6F);
 }
 
+static void transformSamplerMixedIncludesHalfTurnVariants() {
+    bool found_half_turn = false;
+    for (int64_t variant = 0; variant < 24; ++variant) {
+        pfm::ImagePairAugmentationConfig config;
+        config.profile = pfm::AugmentationProfile::Mixed;
+        config.source_index = 3;
+        config.variant_index = variant;
+        const auto params = pfm::sampleImagePairTransform(config);
+        if (std::abs(std::abs(params.rotation_degrees) - 180.0F) <= 5.0F) {
+            found_half_turn = true;
+            break;
+        }
+    }
+
+    PFM_REQUIRE(found_half_turn);
+}
+
 static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
@@ -42,5 +59,6 @@ static void imagePairAugmentorReturnsCurrentTrainingKeys() {
 
 void register_augment_tests() {
     register_test("transform sampler is deterministic", transformSamplerIsDeterministic);
+    register_test("transform sampler mixed includes half turn variants", transformSamplerMixedIncludesHalfTurnVariants);
     register_test("image pair augmentor returns current training keys", imagePairAugmentorReturnsCurrentTrainingKeys);
 }

@@ -35,6 +35,11 @@
   - 已完成：trainer 复用 `modules/dataloader/sampler` 的 `make_train_validation_test_split()` 生成 train/validation indices。
   - 已验证：`pfm_tests` 294 tests passed，`ctest` 100% passed。
 
+- 阶段 17：极端旋转泛化修复（in_progress）
+  - 已完成：mixed augmentation 增加 deterministic ±180° half-turn 样本；graph matcher keypoint projection 改为归一化坐标。
+  - 已验证：`pfm_tests` 296 tests passed，`ctest` 100% passed。
+  - 待继续：重新训练并评估 180° 图像对是否产生交叉匹配。
+
 ## 设计决策
 - B 侧描述子和关键点从 warp 后目标位置采样，target 改为恒等映射（A[i]→B[i]），图匹配器可同时利用空间和描述子信号
 - 进度条补充 feature_loss、repeatability_loss、descriptor_accuracy 等特征提取器指标

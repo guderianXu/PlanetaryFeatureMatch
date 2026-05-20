@@ -62,7 +62,14 @@ void validate_matcher_inputs(
 }
 
 torch::Tensor prepare_keypoints_for_embedding(const torch::Tensor& keypoints) {
-    return keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
+    auto prepared = keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
+    if (prepared.size(0) == 0) {
+        return prepared;
+    }
+    auto min_xy = std::get<0>(prepared.min(0, true));
+    auto max_xy = std::get<0>(prepared.max(0, true));
+    auto span = (max_xy - min_xy).clamp_min(1.0e-6);
+    return ((prepared - min_xy) / span) * 2.0 - 1.0;
 }
 
 }  // namespace

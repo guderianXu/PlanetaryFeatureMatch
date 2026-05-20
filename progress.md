@@ -48,3 +48,9 @@
 - 保留小数据集保护：当 total_images>0 但 split.train 为空时，从 validation/test 移一个样本到 train，避免训练集为空。
 - 新增测试 `trainer_training_and_validation_indices_use_dataloader_split`，验证 trainer 的 train/validation indices 与 `make_train_validation_test_split()` 一致。
 - 验证：`pfm_tests` 294 tests passed，`ctest` 100% passed。
+
+## 2026-05-20 extreme rotation generalization pass
+- 用户指出评估图像对存在 180° 极端旋转/视角差，正确匹配线应整体交叉；此前训练增强最大旋转约 ±55°，没有覆盖 half-turn。
+- 已将 mixed augmentation 每 8 个 variant 注入一个 deterministic ±180° half-turn case，并新增 `transform sampler mixed includes half turn variants` 测试。
+- 已将 graph matcher 内部 keypoint projection 输入归一化到每组 keypoints 的 [-1,1] 范围，避免像素绝对值/图像尺寸支配 descriptor matching；新增 keypoint logits scale-invariant 测试。
+- 验证：`pfm_tests` 296 tests passed，`ctest` 100% passed。下一步需要重新训练 checkpoint 并重新评估 180° 图像对。
