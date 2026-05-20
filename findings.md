@@ -75,3 +75,28 @@
 ## Extreme rotation matching finding (2026-05-20)
 - 原 mixed/extreme augmentation 最大旋转约 ±55°，不足以训练 180° 旋转匹配；对 half-turn 图像对，模型倾向输出非交叉/同位置匹配是训练分布外行为。
 - Graph matcher 的 keypoint projection 若使用原始像素/feature-map 坐标，会引入绝对位置偏置；对 180° 场景，绝对坐标相近反而通常是错误匹配。归一化坐标可减少尺寸尺度支配，但仍需重新训练来学习 half-turn 对应关系。
+- 现有 eval half-turn 指标曾基于 `MatchSet.points_a/points_b`，但这些字段来自 semi-dense points，不是 graph matcher 的 `sparse_matches`；验证 sparse 关键点匹配必须结合 `FeatureSet.keypoints` 和 `MatchSet.sparse_matches`。
+- 单图旋转 sweep 暴露更基础的问题：`train_full.pt` 在 `img/100.tif` 的 0° 自匹配上 sparse graph matcher 也不几何一致（60 条 sparse matches，3px 通过率 0，mean_error≈172.77 feature-map px）。因此当前问题不是只缺 180° 增强，而是 sparse matcher 推理/训练目标没有学到可靠的 identity/known-transform 对应。
+- 30° step sweep 结果：0/30/60/90/150/180/210/240/270/300/330 度 3px 通过率均为 0；120 度仅 1/98 条通过。下一步应先修复 identity/known-rotation sparse matching，再做长训练。
+- 训练 graph matcher 时裁剪 B 候选子集会改变 keypoint normalization 的上下文，和推理时完整 B set 不一致；改成 full B candidate 后，单图 0° 自匹配可达到 1024/1024 正确。
+- 仅修 full B candidate、加入 ±90° augmentation、让 graph loss 回传到 sparse descriptor map，仍不足以让单图 90/180/270° 输出 sparse matches。当前证据指向更深的旋转不变描述子/关键点一致性问题，而不是单个 half-turn augmentation 缺口。
+- descriptor 层诊断显示旋转后并非完全没有可重复关键点：`train_rotation100_graphgrad.pt` 在 90/180/270° 的 3px keypoint repeatability 约 54%-61%；但 raw descriptor mutual nearest 几何正确率只有约 0.8%-2.6%，且错误 mutual 的均值 cosine 约 0.976-0.978，高于真实几何重复点的均值约 0.86-0.88。这说明描述子在旋转后强混淆/近似塌缩。
+- 网格 descriptor 全局对比和 sparse keypoint hard-negative CE 能让训练指标收敛，但单图 40 epoch 后 rotation sweep 仍失败；`train_rotation100_cfgdecode40.pt` 的 90/180/270° sparse matches 均为 0，descriptor mutual 几何正确率仍只有约 0.7%-3.7%。
+- trainer 的 sparse decode 训练路径曾硬编码 `TrainConfig{max_keypoints=1024,min_keypoints=0,nms_radius=4}`，导致用户传入 `--min-keypoints 1024` 时 graph/sparse descriptor 训练看到的 keypoint 集合与推理不一致；已改为复用完整用户 `TrainConfig`。
+- 当前更可信的根因：普通 CNN descriptor head 加旋转增强没有形成稳定旋转不变描述子；orientation/affine 头虽然存在，但未被监督也未参与 descriptor canonicalization/matching。下一步应把 orientation/affine 变为实用路径，而不是继续堆 descriptor CE。
+- C4 descriptor pooling/statistics/harmonic bands 证明了“让真实重复点更相似”仍不够：`train_rotation100_harmonic.pt` 将 90/180/270° 真实重复点 descriptor cosine 提升到约 0.954-0.965，但错误 mutual nearest 的均值仍约 0.993，最终 sparse graph/fallback matching 仍全部拒配。
+- 因此当前优化方向应从“更多旋转不变汇聚”转为“压低错误互近邻”：例如对 rotation sweep 生成的真实对应点做跨图 batch-hard margin/InfoNCE，或让 matcher 在多旋转/方向候选上显式比较并用几何一致性训练；仅靠单图内 descriptor diversity 指标不足以约束跨图旋转混淆。
+- 扩大 sparse descriptor hard-negative 覆盖到 1024 queries 并把 margin weight 提到 5 后，`train_rotation100_margin5.pt` 仍无法匹配 90/180/270°：sparse matches 全为 0，descriptor mutual correct rate 约 0.6%-1.7%，错误 mutual score 仍约 0.990。这说明当前 invariant descriptor 空间里的 false nearest 问题不是简单加权可解。
+- 接下来更值得做的结构性改动：不要过早把四个 C4 方向压成单个不变向量；应保留方向相关 descriptor 分量，让 matcher/descriptor similarity 在 4 个 cyclic shifts 上取最大或受监督选择正确方向。这样可以避免 pooling/harmonic magnitude 把不同地点的旋转纹理压到几乎相同的向量。
+- 已验证上述 C4 cyclic slots + cyclic similarity 路线仍失败：训练收敛且 0° 自匹配正常，但 90/180/270° sparse matches 仍为 0，错误 mutual score 仍约 0.991。说明“方向槽位 + shift-invariant 比较”没有自动解决位置区分度，false nearest 仍是主瓶颈。
+- 后续更可信的优化点应进入监督构造本身：用已知旋转生成的几何真值直接构造 all-keypoint/all-spatial batch-hard negatives，并约束 true positive score 必须高于同图/跨图最难负样本；或者显式监督 orientation，让 descriptor 在 canonical frame 中提取，而不是让网络从 CE 间接学会旋转规范化。
+- keypoint-to-full-map descriptor 监督仍未解决极端旋转。重建 `pfm_cli` 后的可信结果是：`train_rotation100_keydense.pt` 的 90/180/270° sparse matches 分别为 92/108/87，但几何通过率只有约 1.1%/2.8%/2.3%，mean error 约 150-164 feature-map px。这说明“把 sparse keypoint descriptor 对齐到完整 B descriptor-map 真值位置”仍不足以压低跨旋转 false nearest。
+- `train_rotation100_keydense.pt` 还让 repeatability 从 dense-hard 版本的约 55%-59% 降到约 40%-47%，提示当前强 descriptor 约束可能在和关键点稳定性/热力图目标竞争。后续若继续这条线，应同时加强 keypoint repeatability 几何监督，而不是只加 descriptor loss。
+- rotation sweep 评估必须确保 `pfm_cli` 目标也被重建；仅构建 `pfm_tests` 和 `pfm_rotation_sweep_eval` 会留下旧 CLI 二进制，从而把已实现的 descriptor fallback/cyclic matching 误判为 0 sparse matches。
+- orientation-supervised canonical descriptor 不是银弹：`train_rotation100_orientcanon.pt` 的 90/180/270° 几何通过率只有约 5.3%/3.1%/5.3%。它改善了 repeatability（约 53%-64%）并略微降低 false mutual score（约 0.977-0.983），但训练 feature loss 停在约 4.74，说明 canonicalization/orientation 监督和现有 descriptor CE 尚未协调好。
+- 用户指出 180° 可视化仍接近平行是正确诊断：模型输出没有学到 half-turn 几何。训练数据的 warp 本身不是反的，但旧 mixed half-turn anchor 被 scale/translation 污染，且占比只有 1/8；这会让 descriptor mutual fallback 更容易保留近坐标/相似纹理匹配，而不是学中心对称 X 形对应。
+- 改进后的 mixed profile 对 `variant % 8 == 3/7` 使用干净 ±90°/±180° 几何 anchor，避免极端旋转监督同时混入平移、缩放和强 photometric 变化。后续需要基于这个数据修复重新训练，旧 `train_rotation100_orientcanon.pt` 不代表修复后的训练分布。
+- clean anchor 重新训练后仍失败，说明问题不只是 half-turn 样本被 scale/translation 污染：`train_rotation100_cleananchors.pt` 在 180° 上 pass rate≈2.42%，可视化仍是平行线。
+- 单图训练原先每个 epoch 重复同一组 `pairs_per_image` variants，等价于在一个图上反复看同 8 个变换；这会高估训练进展且限制旋转/纹理覆盖。现在 variant index 随 epoch 前进。
+- Graph matcher 使用 normalized x/y keypoint embedding 时，会给 180° 任务留下“同屏幕位置”捷径。改成 radius/radius^2 后能去掉明显绝对方向偏置，但 `train_rotation100_epochvariants_radialmatcher.pt` 的 180° pass rate 仍只有≈3.64%，说明主要瓶颈仍是 descriptor/局部纹理混淆。
+- 当前最可信判断：继续盲训现有 CNN descriptor/head 收益很低。下一步应先在更快机器上用 SIFT/ORB 建立 180° baseline；如果传统局部描述子能给出 X 形匹配，就应把 learned feature extractor 改成真正的 orientation-normalized local patch descriptor 或 rotation-sweep hard-negative 监督。

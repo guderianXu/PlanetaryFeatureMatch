@@ -39,6 +39,31 @@ void requirePointPairs(const torch::Tensor& points, const char* name) {
     }
 }
 
+void requirePositiveImageSize(int64_t image_width, int64_t image_height) {
+    if (image_width <= 0 || image_height <= 0) {
+        throw std::invalid_argument("image width and height must be positive");
+    }
+}
+
+void requireMatchingPointPairs(const torch::Tensor& points_a, const torch::Tensor& points_b) {
+    requireDefined(points_a, "points_a");
+    requireDefined(points_b, "points_b");
+    requirePointPairs(points_a, "points_a");
+    requirePointPairs(points_b, "points_b");
+    requireSameShape(points_a, points_b, "points_a", "points_b");
+    requireSameDevice(points_a, points_b, "points_a", "points_b");
+    requireFloating(points_a, "points_a");
+    requireFloating(points_b, "points_b");
+}
+
+torch::Tensor halfTurnExpectedB(const torch::Tensor& points_a, int64_t image_width, int64_t image_height) {
+    auto center = torch::tensor(
+        {static_cast<double>(image_width - 1), static_cast<double>(image_height - 1)},
+        points_a.options().dtype(torch::kFloat64));
+    center = center.to(points_a.scalar_type());
+    return center - points_a;
+}
+
 }  // namespace
 
 float matching_precision(
@@ -82,6 +107,38 @@ float semi_dense_coverage(const torch::Tensor& confidence, const torch::Tensor& 
 
     auto selected = confidence.ge(threshold).logical_and(valid);
     return selected.sum().item<float>() / denominator;
+}
+
+float half_turn_consistency(
+    const torch::Tensor& points_a,
+    const torch::Tensor& points_b,
+    int64_t image_width,
+    int64_t image_height,
+    float threshold_pixels) {
+    requirePositiveImageSize(image_width, image_height);
+    requireMatchingPointPairs(points_a, points_b);
+    if (points_a.size(0) == 0) {
+        return 0.0F;
+    }
+
+    auto expected_b = halfTurnExpectedB(points_a, image_width, image_height);
+    auto distances = (points_b - expected_b).pow(2).sum(1).sqrt();
+    return distances.le(threshold_pixels).to(torch::kFloat32).mean().item<float>();
+}
+
+float half_turn_mean_error(
+    const torch::Tensor& points_a,
+    const torch::Tensor& points_b,
+    int64_t image_width,
+    int64_t image_height) {
+    requirePositiveImageSize(image_width, image_height);
+    requireMatchingPointPairs(points_a, points_b);
+    if (points_a.size(0) == 0) {
+        return 0.0F;
+    }
+
+    auto expected_b = halfTurnExpectedB(points_a, image_width, image_height);
+    return (points_b - expected_b).pow(2).sum(1).sqrt().mean().item<float>();
 }
 
 }  // namespace pfm

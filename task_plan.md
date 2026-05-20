@@ -38,7 +38,26 @@
 - 阶段 17：极端旋转泛化修复（in_progress）
   - 已完成：mixed augmentation 增加 deterministic ±180° half-turn 样本；graph matcher keypoint projection 改为归一化坐标。
   - 已验证：`pfm_tests` 296 tests passed，`ctest` 100% passed。
-  - 待继续：重新训练并评估 180° 图像对是否产生交叉匹配。
+  - 已完成：新增单图旋转 sweep 工具并用 `img/100.tif` + `train_full.pt` 跑 0..330° 每 30° sparse 匹配评估。
+  - 关键结论：0° 自匹配 sparse 几何通过率也为 0，整圈旋转基本失败；先修 identity/known-transform sparse matching，再继续长训练。
+  - 已完成：rotation sweep 增加 raw descriptor mutual nearest 与 keypoint repeatability 诊断列。
+  - 已完成：descriptor loss 增加全局采样点对比、decoded sparse keypoint hard negatives，并修复训练 decode 配置复用用户 `max/min_keypoints`。
+  - 关键结论：单图 40 epoch 过拟合后 0° 已稳定 1024/1024 正确，但 90/180/270° 仍没有可靠 sparse match；下一步应改特征提取器的显式旋转等变/规范化机制，而不是继续只调普通 descriptor CE。
+  - 已完成：`SparseHead` descriptor 分支加入 C4 harmonic descriptor bands，并分别验证 C4 均值池化、统计投影、谐波幅值三种特征提取器改法。
+  - 最新结论：三种特征提取器改法均未让单图 90/180/270° 产生有效 sparse matches；谐波版本提高了真实重复点 descriptor score，但错误 mutual score 仍更高。下一步应实现跨图 hard-negative/margin descriptor loss 或 orientation-supervised canonical descriptor，而不是继续只改 pooling。
+  - 已完成：sparse keypoint descriptor hard-negative 覆盖扩到 1024 queries，并将 margin weight 提到 5 重新训练/评估。
+  - 最新结论更新：`train_rotation100_margin5.pt` 在 0° 自匹配正常，但 90/180/270° 仍为 0 sparse matches；当前路线应转向 rotation-aware descriptor matching 或显式 orientation/canonicalization，而不是继续提高 hard-negative 权重。
+  - 已完成：`SparseHead` 改为 C4 cyclic descriptor slots，descriptor loss 与 fallback matching 加入 4-way cyclic shift 相似度。
+  - 最新结论更新：`train_rotation100_cyclic.pt` 仍未通过 90/180/270°；当前阶段应转向直接 rotation-sweep hard-negative 监督或 orientation-supervised canonical descriptor。
+  - 已完成：keypoint-to-full-map descriptor hard-negative 监督与单图训练/评估。
+  - 最新结论更新：重建 `pfm_cli` 后 `train_rotation100_keydense.pt` 在 90/180/270° 有 fallback sparse matches，但几何通过率仍只有约 1%-3%。下一步转向 orientation-supervised canonical descriptor 或加强关键点 repeatability 几何监督。
+  - 已完成：orientation-supervised canonical descriptor 原型与单图训练/评估。
+  - 最新结论更新：`train_rotation100_orientcanon.pt` 在 90/180/270° 几何通过率约 5.3%/3.1%/5.3%，比 keydense 略好但仍不可用；训练 feature loss 约 4.74，不能视为低 loss 或有效收敛。
+  - 已完成：排查并修正 mixed 训练数据中的极端旋转 anchor。旧 half-turn 样本几何方向正确但叠加了 scale/translation，监督不够干净；现已改为纯 ±90°/±180° anchor 并用测试验证 half-turn warp 交叉。
+  - 已完成：用 clean rotation anchors 重新训练；180° 仍只有约 2.42% 通过率，线型仍接近平行。
+  - 已完成：训练 variant 随 epoch 推进，graph matcher keypoint embedding 改为 radius/radius^2，减少同屏幕位置捷径；验证 317 tests passed。
+  - 最新结论：60 epoch 单图训练后 180° 通过率仅约 3.64%，可视化仍不是 X 形；当前 learned descriptor/matcher 架构仍不合格。
+  - 下一步：在更快机器上先跑 SIFT/ORB 180° baseline，再决定是否改成 orientation-normalized local patch descriptor 或 rotation-sweep hard-negative 监督。
 
 ## 设计决策
 - B 侧描述子和关键点从 warp 后目标位置采样，target 改为恒等映射（A[i]→B[i]），图匹配器可同时利用空间和描述子信号

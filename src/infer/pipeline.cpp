@@ -533,11 +533,14 @@ int run_eval_command(const CliOptions& options) {
             feature_sets.push_back(std::make_pair(std::move(extracted_a.features), std::move(extracted_b.features)));
         }
 
-        saveEvalReport(options.output, aggregateEvalReport(feature_sets, match_sets));
+        const auto report = aggregateEvalReport(feature_sets, match_sets);
+        saveEvalReport(options.output, report);
         const auto elapsed = total_timer.elapsedSeconds();
         const auto avg_pair_time = pairs.empty() ? 0.0 : elapsed / static_cast<double>(pairs.size());
         std::cout << "evaluation complete: report=" << options.output
                   << " pairs=" << pairs.size()
+                  << " half_turn_consistency=" << report.half_turn_consistency
+                  << " half_turn_mean_error=" << report.half_turn_mean_error
                   << " elapsed=" << formatSeconds(elapsed) << "s"
                   << " avg_pair_time=" << formatSeconds(avg_pair_time) << "s\n";
         return 0;

@@ -8,6 +8,8 @@
 #include <torch/serialize.h>
 #include <torch/torch.h>
 
+#include "eval/metrics.h"
+
 namespace pfm {
 namespace {
 
@@ -74,14 +76,30 @@ EvalReport aggregateEvalReport(
     double total_sparse_score = 0.0;
     double total_dense_confidence = 0.0;
     double total_coverage = 0.0;
+    double total_half_turn_consistency = 0.0;
+    double total_half_turn_mean_error = 0.0;
     for (size_t index = 0; index < match_sets.size(); ++index) {
         const auto& features_a = feature_sets[index].first;
+        const auto& features_b = feature_sets[index].second;
         const auto& matches = match_sets[index];
         total_matches += static_cast<double>(matches.sparse_matches.size(0));
         total_sparse_score += static_cast<double>(tensorAverageOrZero(matches.sparse_scores));
         total_dense_confidence += static_cast<double>(tensorAverageOrZero(matches.confidence));
         const int64_t dense_base = std::max<int64_t>(features_a.dense_points.size(0), 1);
         total_coverage += static_cast<double>(matches.points_a.size(0)) / static_cast<double>(dense_base);
+        if (features_b.feature_map_width > 0 && features_b.feature_map_height > 0) {
+            total_half_turn_consistency += static_cast<double>(half_turn_consistency(
+                matches.points_a,
+                matches.points_b,
+                features_b.feature_map_width,
+                features_b.feature_map_height,
+                2.0F));
+            total_half_turn_mean_error += static_cast<double>(half_turn_mean_error(
+                matches.points_a,
+                matches.points_b,
+                features_b.feature_map_width,
+                features_b.feature_map_height));
+        }
     }
 
     const double pair_count = static_cast<double>(match_sets.size());
@@ -89,7 +107,9 @@ EvalReport aggregateEvalReport(
         total_matches / pair_count,
         total_sparse_score / pair_count,
         total_dense_confidence / pair_count,
-        total_coverage / pair_count};
+        total_coverage / pair_count,
+        total_half_turn_consistency / pair_count,
+        total_half_turn_mean_error / pair_count};
 }
 
 void saveEvalReport(const std::string& path, const EvalReport& report) {
@@ -99,6 +119,8 @@ void saveEvalReport(const std::string& path, const EvalReport& report) {
     archive.write("average_sparse_score", torch::tensor({static_cast<float>(report.average_sparse_score)}, options));
     archive.write("average_dense_confidence", torch::tensor({static_cast<float>(report.average_dense_confidence)}, options));
     archive.write("semi_dense_coverage", torch::tensor({static_cast<float>(report.semi_dense_coverage)}, options));
+    archive.write("half_turn_consistency", torch::tensor({static_cast<float>(report.half_turn_consistency)}, options));
+    archive.write("half_turn_mean_error", torch::tensor({static_cast<float>(report.half_turn_mean_error)}, options));
     archive.save_to(path);
 }
 

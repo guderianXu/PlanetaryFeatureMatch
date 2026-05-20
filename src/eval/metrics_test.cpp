@@ -89,6 +89,31 @@ static void semi_dense_coverage_rejects_integer_confidence_dtype() {
     PFM_REQUIRE_INVALID_ARG(pfm::semi_dense_coverage(confidence, valid, 0.75F));
 }
 
+static void half_turn_consistency_counts_cross_image_matches() {
+    auto points_a = torch::tensor({{10.0F, 20.0F}, {30.0F, 40.0F}, {50.0F, 60.0F}}, torch::kFloat32);
+    auto points_b = torch::tensor({{89.0F, 79.0F}, {69.5F, 59.5F}, {50.0F, 60.0F}}, torch::kFloat32);
+
+    const auto consistency = pfm::half_turn_consistency(points_a, points_b, 100, 100, 1.0F);
+
+    PFM_REQUIRE_CLOSE(consistency, 2.0F / 3.0F, 1.0e-6F);
+}
+
+static void half_turn_mean_error_measures_distance_from_rotated_target() {
+    auto points_a = torch::tensor({{10.0F, 20.0F}, {30.0F, 40.0F}}, torch::kFloat32);
+    auto points_b = torch::tensor({{89.0F, 79.0F}, {69.0F, 60.0F}}, torch::kFloat32);
+
+    const auto error = pfm::half_turn_mean_error(points_a, points_b, 100, 100);
+
+    PFM_REQUIRE_CLOSE(error, 0.5F, 1.0e-6F);
+}
+
+static void half_turn_consistency_rejects_non_positive_image_size() {
+    auto points_a = torch::empty({1, 2}, torch::kFloat32);
+    auto points_b = torch::empty({1, 2}, torch::kFloat32);
+
+    PFM_REQUIRE_INVALID_ARG(pfm::half_turn_consistency(points_a, points_b, 0, 100, 1.0F));
+}
+
 void register_metric_tests() {
     register_test(
         "matching_precision_counts_matches_within_threshold",
@@ -120,4 +145,13 @@ void register_metric_tests() {
     register_test(
         "semi_dense_coverage_rejects_integer_confidence_dtype",
         semi_dense_coverage_rejects_integer_confidence_dtype);
+    register_test(
+        "half_turn_consistency_counts_cross_image_matches",
+        half_turn_consistency_counts_cross_image_matches);
+    register_test(
+        "half_turn_mean_error_measures_distance_from_rotated_target",
+        half_turn_mean_error_measures_distance_from_rotated_target);
+    register_test(
+        "half_turn_consistency_rejects_non_positive_image_size",
+        half_turn_consistency_rejects_non_positive_image_size);
 }

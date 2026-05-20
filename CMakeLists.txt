@@ -153,6 +153,9 @@ target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(pfm_cli src/main.cpp)
 target_link_libraries(pfm_cli PRIVATE pfm)
 
+add_executable(pfm_rotation_sweep_eval tools/rotation_sweep_eval.cpp)
+target_link_libraries(pfm_rotation_sweep_eval PRIVATE pfm ${OpenCV_LIBS})
+
 add_executable(pfm_tests
     tests/test_main.cpp
     src/cli/commands_test.cpp

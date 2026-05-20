@@ -102,14 +102,25 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     const auto strength = profileStrength(profile);
     const auto source = config.source_index;
     const auto index = config.variant_index;
+    const bool mixed_quarter_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 3;
+    const bool mixed_half_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 7;
+
+    if (mixed_quarter_turn) {
+        params.rotation_degrees += deterministicWave(source, index, 0.23F, 0.61F) >= 0.0F ? 90.0F : -90.0F;
+        params.gamma = 1.0F;
+        params.shadow_strength = 0.0F;
+        return params;
+    }
+    if (mixed_half_turn) {
+        params.rotation_degrees += deterministicWave(source, index, 0.19F, 0.43F) >= 0.0F ? 180.0F : -180.0F;
+        params.gamma = 1.0F;
+        params.shadow_strength = 0.0F;
+        return params;
+    }
 
     params.translation_x += std::round(deterministicWave(source, index, 1.37F, 0.71F) * strength.translation);
     params.translation_y += std::round(deterministicWave(source, index, 1.91F, 1.13F) * strength.translation);
-    if (config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 7) {
-        params.rotation_degrees += deterministicWave(source, index, 0.19F, 0.43F) >= 0.0F ? 180.0F : -180.0F;
-    } else {
-        params.rotation_degrees += deterministicWave(source, index, 0.73F, 1.53F) * strength.rotation;
-    }
+    params.rotation_degrees += deterministicWave(source, index, 0.73F, 1.53F) * strength.rotation;
     params.scale *= 1.0F + deterministicWave(source, index, 0.41F, 0.37F) * strength.scale;
     params.brightness_delta += deterministicWave(source, index, 1.11F, 0.83F) * strength.brightness;
     params.contrast_scale *= 1.0F + deterministicWave(source, index, 0.97F, 1.31F) * strength.contrast;

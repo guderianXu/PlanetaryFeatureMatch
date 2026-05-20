@@ -30,4 +30,25 @@ float matching_precision(
 ///     invalid, or devices differ.
 float semi_dense_coverage(const torch::Tensor& confidence, const torch::Tensor& valid_mask, float threshold);
 
+/// Computes the fraction of matches consistent with a 180-degree rotation around the image center.
+///
+/// The expected target for source point (x, y) is (image_width - 1 - x, image_height - 1 - y).
+/// Returns zero for empty predictions.
+/// \throws std::invalid_argument if tensors are invalid or image size is non-positive.
+float half_turn_consistency(
+    const torch::Tensor& points_a,
+    const torch::Tensor& points_b,
+    int64_t image_width,
+    int64_t image_height,
+    float threshold_pixels);
+
+/// Computes mean Euclidean pixel error from the 180-degree rotated target, or zero for empty predictions.
+///
+/// \throws std::invalid_argument if tensors are invalid or image size is non-positive.
+float half_turn_mean_error(
+    const torch::Tensor& points_a,
+    const torch::Tensor& points_b,
+    int64_t image_width,
+    int64_t image_height);
+
 }  // namespace pfm

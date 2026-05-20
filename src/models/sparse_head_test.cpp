@@ -52,8 +52,38 @@ static void sparse_head_uses_shared_context_tower() {
     PFM_REQUIRE(found_second_context);
 }
 
+static void sparse_head_rotation_pooled_descriptors_stay_normalized() {
+    pfm::SparseHead head(4, 8);
+    auto feature = torch::rand({1, 4, 16, 16}, torch::kFloat32);
+
+    auto descriptors = head->forward(feature).descriptors;
+    auto norms = descriptors.norm(2, 1);
+
+    PFM_REQUIRE(torch::isfinite(descriptors).all().item<bool>());
+    PFM_REQUIRE(torch::allclose(norms, torch::ones_like(norms), 1.0e-5, 1.0e-5));
+}
+
+static void sparse_head_uses_cyclic_descriptor_slots() {
+    pfm::SparseHead head(4, 8);
+    bool found_descriptor_output = false;
+    for (const auto& parameter : head->named_parameters()) {
+        if (parameter.key() == "descriptors.2.weight") {
+            found_descriptor_output = true;
+            PFM_REQUIRE(parameter.value().size(0) == 8);
+            PFM_REQUIRE(parameter.value().size(1) == 4);
+            PFM_REQUIRE(parameter.value().size(2) == 1);
+            PFM_REQUIRE(parameter.value().size(3) == 1);
+        }
+    }
+
+    PFM_REQUIRE(found_descriptor_output);
+}
+
 void register_sparse_head_tests() {
     register_test("sparse head outputs expected maps", sparse_head_outputs_expected_maps);
     register_test("sparse head descriptors use local context", sparse_head_descriptors_use_local_context);
     register_test("sparse head uses shared context tower", sparse_head_uses_shared_context_tower);
+    register_test("sparse head rotation pooled descriptors stay normalized",
+                  sparse_head_rotation_pooled_descriptors_stay_normalized);
+    register_test("sparse head uses cyclic descriptor slots", sparse_head_uses_cyclic_descriptor_slots);
 }

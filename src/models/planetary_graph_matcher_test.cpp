@@ -62,16 +62,32 @@ static void planetary_graph_matcher_attention_layer_uses_norm_and_ffn() {
 static void graph_matcher_keypoints_affect_logits() {
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
-    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
-    auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
-    auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
-    auto keypoints_b = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
-    auto shifted_keypoints_b = torch::tensor({{24.0F, 24.0F}, {8.0F, 8.0F}}, torch::kFloat32);
+    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{0.0F, 0.0F}, {5.0F, 5.0F}, {10.0F, 10.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{0.0F, 0.0F}, {5.0F, 5.0F}, {10.0F, 10.0F}}, torch::kFloat32);
+    auto shifted_keypoints_b = torch::tensor({{0.0F, 0.0F}, {0.0F, 10.0F}, {10.0F, 10.0F}}, torch::kFloat32);
 
     const auto original = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b).logits;
     const auto shifted = matcher->forward(descriptors_a, keypoints_a, descriptors_b, shifted_keypoints_b).logits;
 
     PFM_REQUIRE(!torch::allclose(original, shifted));
+}
+
+static void graph_matcher_keypoint_logits_are_half_turn_invariant() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    matcher->eval();
+    auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+    auto keypoints_a = torch::tensor({{0.0F, 0.0F}, {5.0F, 5.0F}, {10.0F, 10.0F}}, torch::kFloat32);
+    auto keypoints_b = torch::tensor({{2.0F, 0.0F}, {5.0F, 5.0F}, {8.0F, 10.0F}}, torch::kFloat32);
+    auto rotated_a = torch::tensor({{10.0F, 10.0F}, {5.0F, 5.0F}, {0.0F, 0.0F}}, torch::kFloat32);
+    auto rotated_b = torch::tensor({{8.0F, 10.0F}, {5.0F, 5.0F}, {2.0F, 0.0F}}, torch::kFloat32);
+
+    const auto original = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b).logits;
+    const auto rotated = matcher->forward(descriptors_a, rotated_a, descriptors_b, rotated_b).logits;
+
+    PFM_REQUIRE(torch::allclose(original, rotated, 1.0e-4, 1.0e-4));
 }
 
 static void graph_matcher_keypoint_logits_are_scale_invariant() {
@@ -130,6 +146,8 @@ void register_planetary_graph_matcher_tests() {
     register_test("planetary_graph_matcher_rejects_descriptor_dimension_mismatch",
                   planetary_graph_matcher_rejects_descriptor_dimension_mismatch);
     register_test("graph matcher keypoints affect logits", graph_matcher_keypoints_affect_logits);
+    register_test("graph matcher keypoint logits are half turn invariant",
+                  graph_matcher_keypoint_logits_are_half_turn_invariant);
     register_test("graph matcher keypoint logits are scale invariant", graph_matcher_keypoint_logits_are_scale_invariant);
     register_test("graph matcher filters dustbin sparse matches", graph_matcher_filters_dustbin_sparse_matches);
     register_test("graph matcher keeps only mutual sparse matches", graph_matcher_keeps_only_mutual_sparse_matches);

@@ -54,3 +54,48 @@
 - 已将 mixed augmentation 每 8 个 variant 注入一个 deterministic ±180° half-turn case，并新增 `transform sampler mixed includes half turn variants` 测试。
 - 已将 graph matcher 内部 keypoint projection 输入归一化到每组 keypoints 的 [-1,1] 范围，避免像素绝对值/图像尺寸支配 descriptor matching；新增 keypoint logits scale-invariant 测试。
 - 验证：`pfm_tests` 296 tests passed，`ctest` 100% passed。下一步需要重新训练 checkpoint 并重新评估 180° 图像对。
+- 继续前先按用户要求做单图 0-360° 旋转测试；中止了正在跑的 3 epoch rot180 训练，避免在没有可靠评估判据时继续耗时。
+- 新增 `tools/rotation_sweep_eval.cpp` 和 `pfm_rotation_sweep_eval` CMake target：生成同一图像的旋转版本，调用 CLI extract/match，读取 `FeatureSet.keypoints + MatchSet.sparse_matches` 计算 sparse 匹配到理论旋转位置的误差。
+- 验证：`cmake -S . -B build-pfm-cf && cmake --build build-pfm-cf -j$(nproc) --target pfm_rotation_sweep_eval` 通过。
+- 对 `img/100.tif` + `train_full.pt` 跑 30° step CUDA sweep：`rotation_sweep_100_step30/summary.csv`。结果显示 0° 自匹配也失败：60 条 sparse matches，3px 通过率 0，mean_error≈172.77 feature-map px；整圈除 120° 有 1/98 条通过外，其余角度通过率均为 0。
+- 修复 graph loss 训练/推理分布差：keypoint graph loss 不再裁剪 B 候选子集，而是对完整 B keypoint set + dustbin 做 CE；新增测试确认第 69 个全局负候选也收到梯度。
+- mixed augmentation 增加 deterministic ±90° quarter-turn 样本；新增测试确认 mixed 覆盖 quarter-turn。
+- graph loss 选中的 sparse descriptors 改为从原始 descriptor map gather，保留到 sparse descriptor head 的梯度；验证 `pfm_tests` 302 tests passed。
+- 单图 `img/100.tif` 过拟合实验：full B candidate 修复后 `0°` 自匹配从完全失败变为 1024/1024 正确；但 90/180/270° 仍输出 0 sparse matches。加入 ±90° 与 descriptor graph 梯度后，`rotation_sweep_100_graphgrad_step90/summary.csv` 仍显示 0°=1024/1024，90/180/270=0 matches。
+- 尝试 graph 输出为空时 fallback 到 descriptor mutual nearest；`rotation_sweep_100_graphgrad_fallback_step90/summary.csv` 仍显示 90/180/270=0 sparse matches，说明当前 sparse descriptors 对大旋转仍不可匹配或存在全局拒配问题。
+- 扩展 `pfm_rotation_sweep_eval`，新增 descriptor mutual nearest、descriptor finite rows、keypoint repeatability、repeatable descriptor score 等诊断列。
+- 诊断 `train_rotation100_graphgrad.pt`：90/180/270° 的 repeatability 约 0.54-0.61，几何重复点 descriptor cosine 均值约 0.86-0.88；但 descriptor mutual nearest 几何正确率仅约 0.8%-2.6%，错误 mutual 的均值相似度约 0.976-0.978，说明 sparse descriptor 区分度不足而不是完全无重复点。
+- 从特征提取器训练入手：descriptor loss 增加全局采样点对比 CE；decoded sparse keypoint descriptor 增加完整 B keypoint hard-negative CE；训练 decode 配置不再硬编码 `min_keypoints=0`，改为复用用户 `TrainConfig`。
+- 验证：`cmake --build build-pfm-cf -j$(nproc) --target pfm_tests pfm_rotation_sweep_eval && ./build-pfm-cf/pfm_tests` 曾通过 304 tests passed；修复训练 decode 配置后 `pfm_tests` 仍为 304 tests passed。
+- 单图 `img/100.tif` 训练/评估记录：
+  - `train_rotation100_globaldesc.pt` + `rotation_sweep_100_globaldesc_step90/summary.csv`：0° 正确，90/180/270° 仍 0 sparse matches。
+  - `train_rotation100_sparsekeydesc.pt` + `rotation_sweep_100_sparsekeydesc_step90/summary.csv`：0° 正确，180° 仅 1 条且错误，90/270° 仍 0。
+  - `train_rotation100_cfgdecode40.pt` + `rotation_sweep_100_cfgdecode40_step90/summary.csv`：0° 1024/1024 正确；90/180/270° 仍 0 sparse matches，descriptor mutual 几何正确率约 0.7%-3.7%。
+- 当前阶段结论：仅靠增强、全局 descriptor CE、sparse keypoint descriptor hard negatives 和训练/推理 keypoint 数量对齐，仍不能获得 0-360° 稳定匹配；下一步需要显式旋转等变/规范化的特征提取器设计（例如 orientation-supervised canonical descriptor 或旋转分组 descriptor pooling）。
+- 特征提取器继续优化：`SparseHead` descriptor 分支改为 C4 旋转视图描述子，先尝试四方向均值池化，再尝试均值+方差统计投影，最后改为固定 C4 harmonic descriptor bands（DC、half-turn、quarter-turn magnitude），输出维度保持 `descriptor_dim`。
+- 验证：`cmake --build build-pfm-cf -j$(nproc) --target pfm_tests pfm_rotation_sweep_eval && ./build-pfm-cf/pfm_tests` 通过，输出 `306 test(s) passed`。
+- 单图 `img/100.tif` 训练/评估新增记录：
+  - `train_rotation100_c4desc.pt` + `rotation_sweep_100_c4desc_step90/summary.csv`：0° 1024/1024 正确；90/180/270° sparse matches 仍为 0，repeatable descriptor score 约 0.92-0.94，错误 mutual score 约 0.989-0.993。
+  - `train_rotation100_rotstats.pt` + `rotation_sweep_100_rotstats_step90/summary.csv`：0° 正确；90/180/270° sparse matches 仍为 0，descriptor mutual 几何正确率约 0%-1.4%。
+  - `train_rotation100_harmonic.pt` + `rotation_sweep_100_harmonic_step90/summary.csv`：0° 正确；90/180/270° sparse matches 仍为 0；真实重复点 descriptor score 提升到约 0.954-0.965，但错误 mutual score 仍约 0.993。
+- 当前结论：只在 `SparseHead` 内做 C4 pooling/statistics/harmonic invariant 还不足以解决 90/180/270° sparse matching；瓶颈已变为“错误互近邻相似度仍高于真实重复点”，下一步应引入更强的跨图 hard-negative/margin 约束，或显式 orientation-supervised canonical descriptor / rotation-aware matching。
+- 继续增强 sparse keypoint descriptor hard-negative：descriptor loss query 覆盖从 graph matcher 的 256 扩到 1024，并加入 hardest-negative margin；margin weight=1 后错误 mutual score 有下降但 90/180/270° 仍失败，weight=5 后 `rotation_sweep_100_margin5_step90/summary.csv` 仍显示 90/180/270° sparse matches 均为 0。
+- 最新 margin=5 诊断：0° 为 1024/1024 正确；90/180/270° descriptor mutual 几何正确率仅约 0.6%-1.7%，错误 mutual score 仍约 0.990，高于真实 repeatable descriptor score 约 0.946-0.957。
+- 当前结论更新：继续加大当前 invariant descriptor 的 hard-negative 权重不能解决 0-360° 匹配；下一步应转向结构性方案，如保留方向分量并做 rotation-aware descriptor matching，或对 orientation/canonicalization 做显式监督。
+- 实现并验证 rotation-aware cyclic descriptor 路线：`SparseHead` 改为保留 4 个 C4 方向槽位，descriptor CE / candidate CE / sparse keypoint margin / descriptor fallback matching 都允许 4-way cyclic shift 最大相似度；新增 cyclic descriptor loss 测试，`pfm_tests` 通过 309 tests passed。
+- 单图 `img/100.tif` 训练/评估：`train_rotation100_cyclic.pt` + `rotation_sweep_100_cyclic_step90/summary.csv`。结果仍为 0° 1024/1024 正确，90/180/270° sparse matches 均为 0；descriptor mutual 几何正确率约 1.3%-2.1%，真实 repeatable descriptor score 约 0.919-0.936，错误 mutual score 仍约 0.991。
+- 当前结论更新：C4 invariant、C4 cyclic slots、hard-negative margin 都未能让单图 90/180/270° 匹配成立；下一步需要更强的监督信号，例如直接以 rotation sweep 真实对应点做 dense/keypoint batch-hard loss，或者启用 orientation head 做显式 canonical patch/descriptor，而不是只改 descriptor aggregation。
+- 继续实现 keypoint-to-full-map descriptor 监督：将 decoded A keypoint descriptor 直接拉向 warp 后的 B descriptor-map 真实位置，并对整张 B descriptor map 的最难错误位置做 margin；新增 dense/full-map 相关单测，`pfm_tests` 通过 311 tests passed。
+- 单图 `img/100.tif` 训练/评估：`train_rotation100_keydense.pt`。最初 `rotation_sweep_100_keydense_step90/summary.csv` 显示 90/180° sparse matches 为 0，排查发现 `pfm_cli` 未随最近 fallback/cyclic matching 改动重建。
+- 重建 `pfm_cli` 后重跑：`rotation_sweep_100_keydense_rebuilt_step90/summary.csv`。0° 为 1024/1024 正确；90/180/270° 分别输出 92/108/87 条 sparse matches，但几何通过率仅约 1.1%/2.8%/2.3%，mean error 约 150-164 feature-map px。
+- 当前结论更新：0 matches 主要是旧 CLI 二进制导致的评估假象；真实瓶颈仍是 descriptor/keypoint 旋转鲁棒性差。keypoint-to-full-map batch-hard 监督没有实质提升 90/180/270° 匹配，且 keypoint repeatability 下降到约 40%-47%；下一步转向 orientation-supervised canonical descriptor 或直接改关键点 repeatability 监督。
+- 实现 orientation-supervised canonical descriptor：`SparseHead` 用 orientation head 对 C4 cyclic descriptor slots 做 soft canonicalization；trainer 新增从 warp 估计旋转方向的 orientation loss，并把 `orientation_loss` 写入 CSV。验证 `pfm_tests` 312 tests passed。
+- 单图 `img/100.tif` 训练/评估：`train_rotation100_orientcanon.pt` + `rotation_sweep_100_orientcanon_step90/summary.csv`。训练最终 feature loss 仍约 4.74，不低；0° 为 1024/1024 正确，90/180/270° 分别输出 113/129/95 条 sparse matches，几何通过率约 5.3%/3.1%/5.3%，mean error 约 166/138/128 feature-map px。
+- 当前结论更新：orientation-canonical 版本相比 keydense 有小幅改善（90/270 通过率从约 1%-2% 提到约 5%），repeatability 也回升到约 53%-64%；但整体匹配效果仍明显不可用，不能称为收敛模型。
+- 排查用户指出的 180° 匹配线仍接近平行问题：实际旧 mixed half-turn 样本几何方向是交叉的，但 `variant=7` 同时叠加了 scale≈0.912、tx=-9、ty=-8，并且每 8 个 pair 只有 1 个 half-turn；训练分布对纯 180° X 形匹配监督过弱。
+- 已将 mixed 中 deterministic ±90°/±180° 样本改为干净旋转 anchor，不再叠加随机平移、缩放、gamma、shadow；新增单测验证 mixed half-turn/quarter-turn anchor 和 half-turn warp 交叉映射。验证 `pfm_tests` 315 tests passed。
+- 新增训练数据检查输出：`runs/debug_halfturn_training_data_clean/pure_180_ground_truth_x.png` 展示纯 180° ground-truth X 形匹配；`runs/debug_halfturn_training_data_clean/vis/static/pair_000007_warp_matches.png` 是改后训练 variant 7 的静态 warp 可视化。
+- 用 clean anchors 重新训练 `train_rotation100_cleananchors.pt` 后，0° 仍为 1024/1024 正确，但 180° 只有 124 matches、3px pass rate≈2.42%、mean_error≈142.63；可视化仍基本是平行线。
+- 进一步修正训练 variant 调度：单图非 cache 训练现在随 epoch 推进 variant，避免 60 epoch 重复同 8 个 pair；graph matcher keypoint embedding 改为旋转不敏感的 radius/radius^2，减少绝对 x/y 坐标捷径。验证 `pfm_tests` 317 tests passed。
+- 新训练 `train_rotation100_epochvariants_radialmatcher.pt`（60 epoch）最终 loss≈4.367，不低；90/180/270° sweep 分别为 114/165/137 matches，3px pass rate≈1.75%/3.64%/1.46%，180° mean_error≈133.32。180° 可视化仍主要是平行线，不是 X 形。
+- 已新增交接文档 `docs/rotation_matching_handoff.md`，记录当前代码状态、实验结果、关键路径和换机器后的建议下一步。

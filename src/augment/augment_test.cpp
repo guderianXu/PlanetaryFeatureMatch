@@ -38,6 +38,55 @@ static void transformSamplerMixedIncludesHalfTurnVariants() {
     PFM_REQUIRE(found_half_turn);
 }
 
+static void transformSamplerMixedHalfTurnIsCleanRotationAnchor() {
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::Mixed;
+    config.source_index = 0;
+    config.variant_index = 7;
+
+    const auto params = pfm::sampleImagePairTransform(config);
+
+    PFM_REQUIRE_CLOSE(std::abs(params.rotation_degrees), 180.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_x, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_y, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.scale, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.gamma, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
+}
+
+static void transformSamplerMixedIncludesQuarterTurnVariants() {
+    bool found_quarter_turn = false;
+    for (int64_t variant = 0; variant < 24; ++variant) {
+        pfm::ImagePairAugmentationConfig config;
+        config.profile = pfm::AugmentationProfile::Mixed;
+        config.source_index = 3;
+        config.variant_index = variant;
+        const auto params = pfm::sampleImagePairTransform(config);
+        if (std::abs(std::abs(params.rotation_degrees) - 90.0F) <= 5.0F) {
+            found_quarter_turn = true;
+            break;
+        }
+    }
+
+    PFM_REQUIRE(found_quarter_turn);
+}
+
+static void transformSamplerMixedQuarterTurnIsCleanRotationAnchor() {
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::Mixed;
+    config.source_index = 0;
+    config.variant_index = 3;
+
+    const auto params = pfm::sampleImagePairTransform(config);
+
+    PFM_REQUIRE_CLOSE(std::abs(params.rotation_degrees), 90.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_x, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_y, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.scale, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.gamma, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
+}
+
 static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
@@ -55,10 +104,33 @@ static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     PFM_REQUIRE(sample.view_a.dtype() == torch::kFloat32);
 }
 
+static void imagePairAugmentorMixedHalfTurnWarpCrossesImage() {
+    const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::Mixed;
+    config.source_index = 0;
+    config.variant_index = 7;
+
+    pfm::ImagePairAugmentor augmentor(config);
+    const auto sample = augmentor.augment(image);
+
+    PFM_REQUIRE_CLOSE(sample.warp_a_to_b.index({0, 0, 0}).item<float>(), 7.0F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(sample.warp_a_to_b.index({0, 0, 1}).item<float>(), 7.0F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(sample.warp_a_to_b.index({7, 7, 0}).item<float>(), 0.0F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(sample.warp_a_to_b.index({7, 7, 1}).item<float>(), 0.0F, 1.0e-5F);
+}
+
 }  // namespace
 
 void register_augment_tests() {
     register_test("transform sampler is deterministic", transformSamplerIsDeterministic);
     register_test("transform sampler mixed includes half turn variants", transformSamplerMixedIncludesHalfTurnVariants);
+    register_test("transform sampler mixed half turn is clean rotation anchor",
+                  transformSamplerMixedHalfTurnIsCleanRotationAnchor);
+    register_test("transform sampler mixed includes quarter turn variants", transformSamplerMixedIncludesQuarterTurnVariants);
+    register_test("transform sampler mixed quarter turn is clean rotation anchor",
+                  transformSamplerMixedQuarterTurnIsCleanRotationAnchor);
     register_test("image pair augmentor returns current training keys", imagePairAugmentorReturnsCurrentTrainingKeys);
+    register_test("image pair augmentor mixed half turn warp crosses image",
+                  imagePairAugmentorMixedHalfTurnWarpCrossesImage);
 }

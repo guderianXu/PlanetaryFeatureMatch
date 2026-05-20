@@ -14,6 +14,8 @@ struct EvalReport {
     double average_sparse_score = 0.0;
     double average_dense_confidence = 0.0;
     double semi_dense_coverage = 0.0;
+    double half_turn_consistency = 0.0;
+    double half_turn_mean_error = 0.0;
 };
 
 /// Loads whitespace-separated image pairs from a text file.

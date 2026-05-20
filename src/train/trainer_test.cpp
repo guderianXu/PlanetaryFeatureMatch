@@ -21,6 +21,7 @@
 #include "infer/feature_codec.h"
 #include "infer/match_codec.h"
 #include "models/planetary_graph_matcher.h"
+#include "models/sparse_head.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"
 
@@ -28,6 +29,11 @@ namespace pfm::testing {
 
 torch::Tensor resize_offsets_for_dense_head_for_test(const torch::Tensor& warp, const torch::Tensor& offsets);
 torch::Tensor make_sparse_descriptor_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
+torch::Tensor make_dense_descriptor_hard_negative_loss_for_test(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
     const torch::Tensor& warp,
@@ -54,8 +60,30 @@ torch::Tensor make_keypoint_graph_matching_loss_for_test(
     const FeatureSet& features_b,
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask);
+torch::Tensor make_keypoint_descriptor_loss_for_test(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
+torch::Tensor make_keypoint_dense_descriptor_loss_for_test(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
+torch::Tensor make_orientation_supervision_loss_for_test(
+    const SparseHeadOutput& sparse_a,
+    const SparseHeadOutput& sparse_b,
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    double min_keypoint_intensity);
 torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descriptors);
 torch::Tensor make_descriptor_candidate_indices_for_test(const torch::Tensor& target_indices, int64_t spatial_count);
+int64_t training_variant_index_for_pair_for_test(
+    std::size_t pair_index,
+    std::size_t train_image_count,
+    int epoch,
+    int pairs_per_image);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
 torch::Tensor stack_chw_batch_for_test(const std::vector<torch::Tensor>& tensors);
 torch::Tensor stack_hw_batch_for_test(const std::vector<torch::Tensor>& tensors);
@@ -399,6 +427,211 @@ static void trainer_descriptor_loss_ignores_invalid_warp_targets() {
     PFM_REQUIRE(loss.item<float>() < 0.4F);
 }
 
+static void trainer_descriptor_loss_penalizes_globally_collapsed_descriptors() {
+    auto descriptors_a = torch::eye(16, torch::kFloat32).narrow(0, 0, 4).transpose(0, 1).reshape({1, 16, 1, 4});
+    auto descriptors_b = descriptors_a.clone();
+    auto collapsed_a = torch::ones({1, 16, 1, 4}, torch::kFloat32);
+    auto collapsed_b = torch::ones({1, 16, 1, 4}, torch::kFloat32);
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(4, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto distinctive_loss = pfm::testing::make_sparse_descriptor_loss_for_test(descriptors_a, descriptors_b, warp, valid_mask);
+    auto collapsed_loss = pfm::testing::make_sparse_descriptor_loss_for_test(collapsed_a, collapsed_b, warp, valid_mask);
+
+    PFM_REQUIRE(collapsed_loss.item<float>() > distinctive_loss.item<float>() + 1.0F);
+}
+
+static void trainer_dense_descriptor_hard_negative_loss_scans_full_map() {
+    auto descriptors = torch::eye(81, torch::kFloat32).narrow(0, 0, 80);
+    auto clean_a = descriptors.transpose(0, 1).reshape({1, 81, 1, 80});
+    auto clean_b = clean_a.clone();
+    auto hard_rows = descriptors.clone();
+    hard_rows.index_put_({torch::indexing::Slice(40, 80)}, descriptors.index({torch::indexing::Slice(0, 40)}));
+    auto hard_b = hard_rows.transpose(0, 1).reshape({1, 81, 1, 80});
+    auto warp = torch::zeros({1, 1, 80, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(80, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 80}, torch::kBool);
+
+    auto clean_loss = pfm::testing::make_dense_descriptor_hard_negative_loss_for_test(
+        clean_a,
+        clean_b,
+        warp,
+        valid_mask);
+    auto hard_loss = pfm::testing::make_dense_descriptor_hard_negative_loss_for_test(
+        clean_a,
+        hard_b,
+        warp,
+        valid_mask);
+
+    PFM_REQUIRE(clean_loss.item<float>() < 1.0e-4F);
+    PFM_REQUIRE(hard_loss.item<float>() > clean_loss.item<float>() + 0.1F);
+}
+
+static pfm::FeatureSet make_keypoint_descriptor_feature_set(
+    const torch::Tensor& keypoints,
+    const torch::Tensor& descriptors
+) {
+    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
+    return pfm::FeatureSet{
+        keypoints.clone().to(torch::kFloat32),
+        torch::ones({keypoints.size(0)}, float_options),
+        descriptors.clone().to(torch::kFloat32),
+        torch::ones({keypoints.size(0)}, float_options),
+        torch::zeros({keypoints.size(0), 2}, float_options),
+        torch::zeros({keypoints.size(0), 2, 2}, float_options),
+        torch::empty({0, 2}, float_options),
+        torch::empty({0}, float_options),
+        4,
+        1};
+}
+
+static void trainer_keypoint_descriptor_loss_uses_sparse_keypoint_hard_negatives() {
+    auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, torch::kFloat32);
+    auto descriptors = torch::eye(16, torch::kFloat32).narrow(0, 0, 4);
+    auto collapsed = torch::ones({4, 16}, torch::kFloat32);
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(4, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto distinctive_loss = pfm::testing::make_keypoint_descriptor_loss_for_test(
+        make_keypoint_descriptor_feature_set(keypoints, descriptors),
+        make_keypoint_descriptor_feature_set(keypoints, descriptors),
+        warp,
+        valid_mask);
+    auto collapsed_loss = pfm::testing::make_keypoint_descriptor_loss_for_test(
+        make_keypoint_descriptor_feature_set(keypoints, collapsed),
+        make_keypoint_descriptor_feature_set(keypoints, collapsed),
+        warp,
+        valid_mask);
+
+    PFM_REQUIRE(collapsed_loss.item<float>() > distinctive_loss.item<float>() + 1.0F);
+}
+
+static void trainer_keypoint_descriptor_loss_penalizes_hardest_negative_margin() {
+    auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}}, torch::kFloat32);
+    auto query_descriptors = torch::tensor(
+        {{1.0F, 0.0F}, {0.0F, 1.0F}, {-1.0F, 0.0F}},
+        torch::kFloat32);
+    auto easy_b = torch::tensor(
+        {{1.0F, 0.0F}, {0.0F, 1.0F}, {-1.0F, 0.0F}},
+        torch::kFloat32);
+    auto hard_b = torch::tensor(
+        {{1.0F, 0.0F}, {0.99F, 0.01F}, {-1.0F, 0.0F}},
+        torch::kFloat32);
+    auto warp = torch::zeros({1, 1, 3, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(3, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 3}, torch::kBool);
+
+    auto easy_loss = pfm::testing::make_keypoint_descriptor_loss_for_test(
+        make_keypoint_descriptor_feature_set(keypoints, query_descriptors),
+        make_keypoint_descriptor_feature_set(keypoints, easy_b),
+        warp,
+        valid_mask);
+    auto hard_loss = pfm::testing::make_keypoint_descriptor_loss_for_test(
+        make_keypoint_descriptor_feature_set(keypoints, query_descriptors),
+        make_keypoint_descriptor_feature_set(keypoints, hard_b),
+        warp,
+        valid_mask);
+
+    PFM_REQUIRE(hard_loss.item<float>() > easy_loss.item<float>() + 0.1F);
+}
+
+static void trainer_keypoint_dense_descriptor_loss_uses_warp_target_in_full_map() {
+    auto features_a = make_keypoint_descriptor_feature_set(
+        torch::tensor({{0.0F, 0.0F}}, torch::kFloat32),
+        torch::tensor({{1.0F, 0.0F}}, torch::kFloat32));
+    features_a.feature_map_width = 4;
+    features_a.feature_map_height = 1;
+    auto clean_b = torch::zeros({1, 2, 1, 4}, torch::kFloat32);
+    clean_b.index_put_({0, 0, 0, 0}, 1.0F);
+    clean_b.index_put_({0, 1, 0, torch::indexing::Slice(1, 4)}, 1.0F);
+    auto hard_b = clean_b.clone();
+    hard_b.index_put_({0, 0, 0, 3}, 1.0F);
+    hard_b.index_put_({0, 1, 0, 3}, 0.0F);
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(4, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto clean_loss = pfm::testing::make_keypoint_dense_descriptor_loss_for_test(features_a, clean_b, warp, valid_mask);
+    auto hard_loss = pfm::testing::make_keypoint_dense_descriptor_loss_for_test(features_a, hard_b, warp, valid_mask);
+
+    PFM_REQUIRE(clean_loss.item<float>() < 0.1F);
+    PFM_REQUIRE(hard_loss.item<float>() > clean_loss.item<float>() + 0.5F);
+}
+
+static pfm::SparseHeadOutput make_sparse_orientation_output(const torch::Tensor& orientation) {
+    return pfm::SparseHeadOutput{
+        torch::empty({0}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32),
+        orientation.clone().to(torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)};
+}
+
+static void trainer_orientation_supervision_uses_warp_rotation() {
+    auto orientation_a = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    orientation_a.index_put_({0, 0, torch::indexing::Slice(), torch::indexing::Slice()}, 1.0F);
+    auto correct_b = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    correct_b.index_put_({0, 1, torch::indexing::Slice(), torch::indexing::Slice()}, 1.0F);
+    auto wrong_b = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    wrong_b.index_put_({0, 0, torch::indexing::Slice(), torch::indexing::Slice()}, -1.0F);
+
+    auto view = torch::ones({1, 1, 4, 4}, torch::kFloat32);
+    auto warp = torch::zeros({1, 4, 4, 2}, torch::kFloat32);
+    for (int64_t x = 0; x < 4; ++x) {
+        warp.index_put_({0, torch::indexing::Slice(), x, 1}, static_cast<float>(x));
+    }
+
+    auto correct_loss = pfm::testing::make_orientation_supervision_loss_for_test(
+        make_sparse_orientation_output(orientation_a),
+        make_sparse_orientation_output(correct_b),
+        view,
+        view,
+        warp,
+        0.05);
+    auto wrong_loss = pfm::testing::make_orientation_supervision_loss_for_test(
+        make_sparse_orientation_output(orientation_a),
+        make_sparse_orientation_output(wrong_b),
+        view,
+        view,
+        warp,
+        0.05);
+
+    PFM_REQUIRE(correct_loss.item<float>() < 1.0e-4F);
+    PFM_REQUIRE(wrong_loss.item<float>() > correct_loss.item<float>() + 0.25F);
+}
+
+static void trainer_keypoint_descriptor_loss_covers_more_than_graph_query_limit() {
+    const int64_t count = 300;
+    auto keypoints = torch::stack(
+        {torch::arange(count, torch::kFloat32), torch::zeros({count}, torch::kFloat32)},
+        1);
+    auto descriptors_a = torch::zeros({count, 2}, torch::kFloat32);
+    auto descriptors_b = torch::zeros({count, 2}, torch::kFloat32);
+    descriptors_a.index_put_({torch::indexing::Slice(), 0}, 1.0F);
+    descriptors_b.index_put_({torch::indexing::Slice(), 0}, 1.0F);
+    descriptors_a.index_put_({count - 1, 0}, 0.0F);
+    descriptors_a.index_put_({count - 1, 1}, 1.0F);
+    descriptors_b.index_put_({count - 1, 0}, 0.0F);
+    descriptors_b.index_put_({count - 1, 1}, 1.0F);
+
+    auto features_a = make_keypoint_descriptor_feature_set(keypoints, descriptors_a);
+    auto features_b = make_keypoint_descriptor_feature_set(keypoints, descriptors_b);
+    features_a.feature_map_width = count;
+    features_b.feature_map_width = count;
+    features_b.descriptors.set_requires_grad(true);
+    auto warp = torch::zeros({1, 1, count, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(count, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, count}, torch::kBool);
+
+    auto loss = pfm::testing::make_keypoint_descriptor_loss_for_test(features_a, features_b, warp, valid_mask);
+    loss.backward();
+
+    PFM_REQUIRE(features_b.descriptors.grad().defined());
+    PFM_REQUIRE(features_b.descriptors.grad().index({count - 1}).abs().sum().item<float>() > 0.0F);
+}
+
 static void trainer_graph_matching_loss_trains_graph_matcher_parameters() {
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     auto descriptors_a = torch::tensor({{{{1.0F, 0.0F}}, {{0.0F, 1.0F}}}}, torch::kFloat32);
@@ -521,6 +754,47 @@ static void trainer_keypoint_graph_matching_loss_trains_graph_matcher_parameters
     PFM_REQUIRE(matcher->parameters().front().grad().abs().sum().item<float>() > 0.0F);
 }
 
+static void trainer_keypoint_graph_matching_loss_uses_full_b_candidate_set() {
+    pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
+    pfm::FeatureSet features_a;
+    features_a.keypoints = torch::tensor({{1.0F, 1.0F}}, torch::kFloat32);
+    features_a.scores = torch::tensor({1.0F}, torch::kFloat32);
+    features_a.descriptors = torch::tensor({{1.0F, 0.0F}}, torch::kFloat32);
+    features_a.feature_map_width = 80;
+    features_a.feature_map_height = 8;
+
+    std::vector<float> keypoint_values;
+    std::vector<float> descriptor_values;
+    keypoint_values.reserve(70 * 2);
+    descriptor_values.reserve(70 * 2);
+    for (int index = 0; index < 70; ++index) {
+        keypoint_values.push_back(static_cast<float>(index + 5));
+        keypoint_values.push_back(1.0F);
+        descriptor_values.push_back(index == 0 ? 1.0F : 0.0F);
+        descriptor_values.push_back(index == 0 ? 0.0F : 1.0F);
+    }
+
+    pfm::FeatureSet features_b;
+    features_b.keypoints = torch::from_blob(keypoint_values.data(), {70, 2}, torch::kFloat32).clone();
+    features_b.scores = torch::ones({70}, torch::kFloat32);
+    features_b.descriptors = torch::from_blob(descriptor_values.data(), {70, 2}, torch::kFloat32).clone();
+    features_b.descriptors.set_requires_grad(true);
+    features_b.feature_map_width = 80;
+    features_b.feature_map_height = 8;
+
+    auto warp = torch::zeros({1, 8, 80, 2}, torch::kFloat32);
+    warp.index_put_({0, 1, 1, 0}, 5.0F);
+    warp.index_put_({0, 1, 1, 1}, 1.0F);
+    auto valid_mask = torch::ones({1, 8, 80}, torch::kBool);
+
+    auto loss = pfm::testing::make_keypoint_graph_matching_loss_for_test(
+        *matcher, features_a, features_b, warp, valid_mask);
+    loss.backward();
+
+    PFM_REQUIRE(features_b.descriptors.grad().defined());
+    PFM_REQUIRE(features_b.descriptors.grad().index({69}).abs().sum().item<float>() > 0.0F);
+}
+
 static void trainer_stacks_variable_spatial_training_tensors_with_padding() {
     auto chw = pfm::testing::stack_chw_batch_for_test(
         {torch::ones({1, 2, 3}, torch::kFloat32), torch::ones({1, 3, 2}, torch::kFloat32) * 2.0F});
@@ -627,6 +901,15 @@ static void trainer_training_and_validation_indices_use_dataloader_split() {
 
     PFM_REQUIRE(train == split.train);
     PFM_REQUIRE(validation == split.validation);
+}
+
+static void trainer_variant_indices_advance_across_epochs() {
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(0, 1, 0, 8) == 0);
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(7, 1, 0, 8) == 7);
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(0, 1, 1, 8) == 8);
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(7, 1, 1, 8) == 15);
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(0, 2, 1, 8) == 8);
+    PFM_REQUIRE(pfm::testing::training_variant_index_for_pair_for_test(2, 2, 1, 8) == 9);
 }
 
 static void trainer_total_loss_downweights_dense_offset_pixels() {
@@ -1091,6 +1374,20 @@ void register_trainer_tests() {
                   trainer_descriptor_loss_uses_warped_correspondence);
     register_test("trainer_descriptor_loss_ignores_invalid_warp_targets",
                   trainer_descriptor_loss_ignores_invalid_warp_targets);
+    register_test("trainer_descriptor_loss_penalizes_globally_collapsed_descriptors",
+                  trainer_descriptor_loss_penalizes_globally_collapsed_descriptors);
+    register_test("trainer_dense_descriptor_hard_negative_loss_scans_full_map",
+                  trainer_dense_descriptor_hard_negative_loss_scans_full_map);
+    register_test("trainer_keypoint_descriptor_loss_uses_sparse_keypoint_hard_negatives",
+                  trainer_keypoint_descriptor_loss_uses_sparse_keypoint_hard_negatives);
+    register_test("trainer_keypoint_descriptor_loss_penalizes_hardest_negative_margin",
+                  trainer_keypoint_descriptor_loss_penalizes_hardest_negative_margin);
+    register_test("trainer_keypoint_dense_descriptor_loss_uses_warp_target_in_full_map",
+                  trainer_keypoint_dense_descriptor_loss_uses_warp_target_in_full_map);
+    register_test("trainer_orientation_supervision_uses_warp_rotation",
+                  trainer_orientation_supervision_uses_warp_rotation);
+    register_test("trainer_keypoint_descriptor_loss_covers_more_than_graph_query_limit",
+                  trainer_keypoint_descriptor_loss_covers_more_than_graph_query_limit);
     register_test("trainer_graph_matching_loss_trains_graph_matcher_parameters",
                   trainer_graph_matching_loss_trains_graph_matcher_parameters);
     register_test("trainer_graph_matching_loss_is_finite_with_many_descriptors",
@@ -1110,6 +1407,9 @@ void register_trainer_tests() {
     register_test(
         "trainer keypoint graph matching loss trains graph matcher parameters",
         trainer_keypoint_graph_matching_loss_trains_graph_matcher_parameters);
+    register_test(
+        "trainer keypoint graph matching loss uses full b candidate set",
+        trainer_keypoint_graph_matching_loss_uses_full_b_candidate_set);
     register_test("trainer_stacks_variable_spatial_training_tensors_with_padding",
                   trainer_stacks_variable_spatial_training_tensors_with_padding);
     register_test("trainer_training_valid_mask_requires_bright_source_and_target_pixels",
@@ -1132,6 +1432,8 @@ void register_trainer_tests() {
     register_test("trainer_uses_configured_resize", trainer_uses_configured_resize);
     register_test("trainer_training_and_validation_indices_use_dataloader_split",
                   trainer_training_and_validation_indices_use_dataloader_split);
+    register_test("trainer_variant_indices_advance_across_epochs",
+                  trainer_variant_indices_advance_across_epochs);
     register_test("trainer_trains_full_dataset", trainer_trains_full_dataset);
     register_test("trainer_with_synthetic_pair_cache_writes_cache_and_checkpoint",
                   trainer_with_synthetic_pair_cache_writes_cache_and_checkpoint);
