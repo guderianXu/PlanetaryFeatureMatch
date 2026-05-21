@@ -38,6 +38,25 @@ torch::Tensor make_dense_descriptor_hard_negative_loss_for_test(
     const torch::Tensor& descriptors_b,
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask);
+torch::Tensor make_warp_descriptor_contrastive_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
+torch::Tensor make_direct_full_map_descriptor_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask);
+torch::Tensor make_descriptor_map_regularization_loss_for_test(const torch::Tensor& descriptors);
+torch::Tensor make_descriptor_target_coordinates_for_test(
+    const torch::Tensor& warp,
+    const torch::Tensor& sample_indices,
+    int64_t descriptor_height,
+    int64_t descriptor_width);
+torch::Tensor sample_warped_descriptors_for_test(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& target_coordinates);
 torch::Tensor make_graph_matching_loss_for_test(
     PlanetaryGraphMatcherImpl& graph_matcher,
     const torch::Tensor& descriptors_a,
@@ -468,6 +487,157 @@ static void trainer_dense_descriptor_hard_negative_loss_scans_full_map() {
     PFM_REQUIRE(hard_loss.item<float>() > clean_loss.item<float>() + 0.1F);
 }
 
+static torch::Tensor make_cyclic_safe_descriptor_row(int64_t width, int64_t group_shift = 0) {
+    auto descriptors = torch::zeros({1, 16, 1, width}, torch::kFloat32);
+    const auto group = ((group_shift % 4) + 4) % 4;
+    for (int64_t x = 0; x < width; ++x) {
+        descriptors.index_put_({0, group * 4 + x, 0, x}, 1.0F);
+    }
+    return descriptors;
+}
+
+static torch::Tensor make_cyclic_safe_flipped_descriptor_row(int64_t width, int64_t group_shift = 0) {
+    auto descriptors = torch::zeros({1, 16, 1, width}, torch::kFloat32);
+    const auto group = ((group_shift % 4) + 4) % 4;
+    for (int64_t x = 0; x < width; ++x) {
+        descriptors.index_put_({0, group * 4 + x, 0, width - 1 - x}, 1.0F);
+    }
+    return descriptors;
+}
+
+static torch::Tensor make_cyclic_safe_descriptor_grid(
+    int64_t height,
+    int64_t width,
+    int64_t group_shift = 0,
+    bool half_turn_spatial = false
+) {
+    auto descriptors = torch::zeros({1, 16, height, width}, torch::kFloat32);
+    const auto group = ((group_shift % 4) + 4) % 4;
+    for (int64_t y = 0; y < height; ++y) {
+        for (int64_t x = 0; x < width; ++x) {
+            const auto identity = y * width + x;
+            const auto target_y = half_turn_spatial ? height - 1 - y : y;
+            const auto target_x = half_turn_spatial ? width - 1 - x : x;
+            descriptors.index_put_({0, group * 4 + identity, target_y, target_x}, 1.0F);
+        }
+    }
+    return descriptors;
+}
+
+static void trainer_warp_descriptor_contrastive_loss_uses_half_turn_correspondence() {
+    auto descriptors_a = make_cyclic_safe_descriptor_grid(2, 2);
+    auto correct_b = make_cyclic_safe_descriptor_grid(2, 2, 0, true);
+    auto same_position_b = make_cyclic_safe_descriptor_grid(2, 2, 0, false);
+    auto warp = torch::zeros({1, 2, 2, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, 0, 0}, 1.0F);
+    warp.index_put_({0, 0, 0, 1}, 1.0F);
+    warp.index_put_({0, 0, 1, 0}, 0.0F);
+    warp.index_put_({0, 0, 1, 1}, 1.0F);
+    warp.index_put_({0, 1, 0, 0}, 1.0F);
+    warp.index_put_({0, 1, 0, 1}, 0.0F);
+    warp.index_put_({0, 1, 1, 0}, 0.0F);
+    warp.index_put_({0, 1, 1, 1}, 0.0F);
+    auto valid_mask = torch::ones({1, 2, 2}, torch::kBool);
+
+    auto correct_loss = pfm::testing::make_warp_descriptor_contrastive_loss_for_test(
+        descriptors_a, correct_b, warp, valid_mask);
+    auto same_position_loss = pfm::testing::make_warp_descriptor_contrastive_loss_for_test(
+        descriptors_a, same_position_b, warp, valid_mask);
+
+    PFM_REQUIRE(same_position_loss.item<float>() > correct_loss.item<float>() + 5.0F);
+}
+
+static void trainer_warp_descriptor_contrastive_loss_accepts_cyclic_descriptor_shift() {
+    auto descriptors_a = make_cyclic_safe_descriptor_row(4);
+    auto descriptors_b = make_cyclic_safe_descriptor_row(4, 1);
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(4, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto loss = pfm::testing::make_warp_descriptor_contrastive_loss_for_test(
+        descriptors_a, descriptors_b, warp, valid_mask);
+
+    PFM_REQUIRE(loss.item<float>() > 1.0F);
+}
+
+static void trainer_direct_full_map_descriptor_loss_penalizes_global_distractor() {
+    auto descriptors_a = make_cyclic_safe_descriptor_row(4);
+    auto clean_b = make_cyclic_safe_flipped_descriptor_row(4, 0);
+    auto hard_b = clean_b.clone();
+    hard_b.index_put_(
+        {0, torch::indexing::Slice(), 0, 0},
+        clean_b.index({0, torch::indexing::Slice(), 0, 3}));
+
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, 0, 0}, 3.0F);
+    warp.index_put_({0, 0, 1, 0}, 2.0F);
+    warp.index_put_({0, 0, 2, 0}, 1.0F);
+    warp.index_put_({0, 0, 3, 0}, 0.0F);
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto clean_loss = pfm::testing::make_direct_full_map_descriptor_loss_for_test(
+        descriptors_a, clean_b, warp, valid_mask);
+    auto hard_loss = pfm::testing::make_direct_full_map_descriptor_loss_for_test(
+        descriptors_a, hard_b, warp, valid_mask);
+
+    PFM_REQUIRE(clean_loss.item<float>() < 0.1F);
+    PFM_REQUIRE(hard_loss.item<float>() > clean_loss.item<float>() + 0.1F);
+}
+
+static void trainer_direct_full_map_descriptor_loss_accepts_cyclic_descriptor_shift() {
+    auto descriptors_a = make_cyclic_safe_descriptor_row(4);
+    auto descriptors_b = make_cyclic_safe_descriptor_row(4, 1);
+    auto warp = torch::zeros({1, 1, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, 0, torch::indexing::Slice(), 0}, torch::arange(4, torch::kFloat32));
+    auto valid_mask = torch::ones({1, 1, 4}, torch::kBool);
+
+    auto loss = pfm::testing::make_direct_full_map_descriptor_loss_for_test(
+        descriptors_a, descriptors_b, warp, valid_mask);
+
+    PFM_REQUIRE(loss.item<float>() > 1.0F);
+}
+
+static void trainer_descriptor_targets_use_cell_centers_for_warp_coordinates() {
+    auto warp = torch::zeros({1, 4, 4, 2}, torch::kFloat32);
+    warp.index_put_({0, torch::indexing::Slice(), torch::indexing::Slice(), 0},
+                    torch::arange(4, torch::kFloat32).reshape({1, 4}).expand({4, 4}));
+    warp.index_put_({0, torch::indexing::Slice(), torch::indexing::Slice(), 1},
+                    torch::arange(4, torch::kFloat32).reshape({4, 1}).expand({4, 4}));
+    auto sample_indices = torch::tensor({0, 3}, torch::kLong);
+
+    auto coordinates = pfm::testing::make_descriptor_target_coordinates_for_test(warp, sample_indices, 1, 4);
+
+    PFM_REQUIRE_CLOSE(coordinates.index({0, 0, 0}).item<float>(), 0.0F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(coordinates.index({0, 1, 0}).item<float>(), 3.0F, 1.0e-5F);
+}
+
+static void trainer_warped_descriptor_sampling_preserves_subpixel_correspondence() {
+    auto descriptors = torch::zeros({1, 2, 1, 4}, torch::kFloat32);
+    descriptors.index_put_({0, 0, 0, 1}, 1.0F);
+    descriptors.index_put_({0, 1, 0, 2}, 1.0F);
+    auto target_coordinates = torch::tensor({{{1.5F, 0.0F}}}, torch::kFloat32);
+
+    auto sampled = pfm::testing::sample_warped_descriptors_for_test(descriptors, target_coordinates);
+
+    PFM_REQUIRE_CLOSE(sampled.index({0, 0, 0}).item<float>(), 0.5F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(sampled.index({0, 0, 1}).item<float>(), 0.5F, 1.0e-5F);
+}
+
+static void trainer_descriptor_map_regularization_penalizes_spatial_collapse() {
+    auto collapsed = torch::ones({1, 8, 4, 4}, torch::kFloat32);
+    auto diverse = torch::zeros({1, 8, 4, 4}, torch::kFloat32);
+    for (int64_t y = 0; y < 4; ++y) {
+        for (int64_t x = 0; x < 4; ++x) {
+            diverse.index_put_({0, (y * 4 + x) % 8, y, x}, 1.0F);
+        }
+    }
+
+    auto collapsed_loss = pfm::testing::make_descriptor_map_regularization_loss_for_test(collapsed);
+    auto diverse_loss = pfm::testing::make_descriptor_map_regularization_loss_for_test(diverse);
+
+    PFM_REQUIRE(collapsed_loss.item<float>() > diverse_loss.item<float>() + 0.2F);
+}
+
 static pfm::FeatureSet make_keypoint_descriptor_feature_set(
     const torch::Tensor& keypoints,
     const torch::Tensor& descriptors
@@ -863,9 +1033,11 @@ static void trainer_bounds_descriptor_loss_spatial_samples() {
     auto sample_indices = pfm::testing::make_descriptor_sample_indices_for_test(descriptors_a);
     auto loss = pfm::testing::make_sparse_descriptor_loss_for_test(descriptors_a, descriptors_b, warp, valid_mask);
 
-    PFM_REQUIRE(sample_indices.size(0) == 256);
-    PFM_REQUIRE(sample_indices[0].item<int64_t>() == 0);
-    PFM_REQUIRE(sample_indices[-1].item<int64_t>() == height * width - 1);
+    PFM_REQUIRE(sample_indices.size(0) == 1024);
+    PFM_REQUIRE(sample_indices.min().item<int64_t>() >= 0);
+    PFM_REQUIRE(sample_indices.max().item<int64_t>() < height * width);
+    auto sorted_indices = std::get<0>(sample_indices.sort());
+    PFM_REQUIRE(sorted_indices.slice(0, 1).ne(sorted_indices.slice(0, 0, -1)).all().item<bool>());
     PFM_REQUIRE(loss.defined());
     PFM_REQUIRE(loss.dim() == 0);
     PFM_REQUIRE(std::isfinite(loss.item<float>()));
@@ -920,10 +1092,10 @@ static void trainer_total_loss_downweights_dense_offset_pixels() {
 
     auto loss = pfm::testing::weighted_total_training_loss_for_test(repeatability, descriptor, offset, confidence);
 
-    PFM_REQUIRE_CLOSE(loss.item<float>(), 13.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(loss.item<float>(), 2.0F, 1.0e-6F);
 }
 
-static void trainer_total_loss_reports_descriptor_spatial_collapse_without_weighting_it() {
+static void trainer_total_loss_penalizes_descriptor_spatial_collapse() {
     auto repeatability = torch::tensor(1.0F);
     auto descriptor = torch::tensor(2.0F);
     auto offset = torch::tensor(3.0F);
@@ -937,7 +1109,7 @@ static void trainer_total_loss_reports_descriptor_spatial_collapse_without_weigh
         confidence,
         descriptor_diversity);
 
-    PFM_REQUIRE_CLOSE(loss.item<float>(), 7.7F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(loss.item<float>(), 102.0F, 1.0e-6F);
 }
 
 static void trainer_progress_reports_loss_components() {
@@ -1059,8 +1231,8 @@ static void trainer_with_synthetic_pair_cache_writes_cache_and_checkpoint() {
     PFM_REQUIRE(std::filesystem::exists(config.checkpoint));
     PFM_REQUIRE(pfm::checkpoint_can_load(config.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "manifest.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "pair_000000.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000000_view_a.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000.pt"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000000_image_a" / "source_000000_view_a.png"));
 }
 
 static void trainer_pairs_per_image_expands_cached_training_pairs() {
@@ -1077,8 +1249,8 @@ static void trainer_pairs_per_image_expands_cached_training_pairs() {
 
     PFM_REQUIRE(result.epochs_completed == 1);
     PFM_REQUIRE(result.final_loss > 0.0);
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "pair_000003.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000001_view_a.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000001_image_b" / "pair_000003.pt"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000001_image_b" / "source_000001_view_a.png"));
 }
 
 static void trainer_reuses_existing_synthetic_pair_cache() {
@@ -1090,7 +1262,7 @@ static void trainer_reuses_existing_synthetic_pair_cache() {
     config.resize = 32;
     temp_dir.file("checkpoint.pt");
     (void)pfm::train_model(config);
-    const auto pair_path = std::filesystem::path(config.synthetic_pair_cache_dir) / "pair_000000.pt";
+    const auto pair_path = std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000.pt";
     const auto first_write_time = std::filesystem::last_write_time(pair_path);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1111,7 +1283,7 @@ static void trainer_rebuilds_synthetic_pair_cache_when_requested() {
     config.resize = 32;
     temp_dir.file("checkpoint.pt");
     (void)pfm::train_model(config);
-    const auto pair_path = std::filesystem::path(config.synthetic_pair_cache_dir) / "pair_000000.pt";
+    const auto pair_path = std::filesystem::path(config.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000.pt";
     const auto first_write_time = std::filesystem::last_write_time(pair_path);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1378,6 +1550,27 @@ void register_trainer_tests() {
                   trainer_descriptor_loss_penalizes_globally_collapsed_descriptors);
     register_test("trainer_dense_descriptor_hard_negative_loss_scans_full_map",
                   trainer_dense_descriptor_hard_negative_loss_scans_full_map);
+    register_test(
+        "trainer_warp_descriptor_contrastive_loss_uses_half_turn_correspondence",
+        trainer_warp_descriptor_contrastive_loss_uses_half_turn_correspondence);
+    register_test(
+        "trainer_warp_descriptor_contrastive_loss_rejects_cyclic_descriptor_shift",
+        trainer_warp_descriptor_contrastive_loss_accepts_cyclic_descriptor_shift);
+    register_test(
+        "trainer_direct_full_map_descriptor_loss_penalizes_global_distractor",
+        trainer_direct_full_map_descriptor_loss_penalizes_global_distractor);
+    register_test(
+        "trainer_direct_full_map_descriptor_loss_rejects_cyclic_descriptor_shift",
+        trainer_direct_full_map_descriptor_loss_accepts_cyclic_descriptor_shift);
+    register_test(
+        "trainer_descriptor_targets_use_cell_centers_for_warp_coordinates",
+        trainer_descriptor_targets_use_cell_centers_for_warp_coordinates);
+    register_test(
+        "trainer_warped_descriptor_sampling_preserves_subpixel_correspondence",
+        trainer_warped_descriptor_sampling_preserves_subpixel_correspondence);
+    register_test(
+        "trainer_descriptor_map_regularization_penalizes_spatial_collapse",
+        trainer_descriptor_map_regularization_penalizes_spatial_collapse);
     register_test("trainer_keypoint_descriptor_loss_uses_sparse_keypoint_hard_negatives",
                   trainer_keypoint_descriptor_loss_uses_sparse_keypoint_hard_negatives);
     register_test("trainer_keypoint_descriptor_loss_penalizes_hardest_negative_margin",
@@ -1420,8 +1613,8 @@ void register_trainer_tests() {
                   trainer_bounds_descriptor_loss_spatial_samples);
     register_test("trainer_total_loss_downweights_dense_offset_pixels",
                   trainer_total_loss_downweights_dense_offset_pixels);
-    register_test("trainer_total_loss_reports_descriptor_spatial_collapse_without_weighting_it",
-                  trainer_total_loss_reports_descriptor_spatial_collapse_without_weighting_it);
+    register_test("trainer_total_loss_penalizes_descriptor_spatial_collapse",
+                  trainer_total_loss_penalizes_descriptor_spatial_collapse);
     register_test("trainer_progress_reports_loss_components", trainer_progress_reports_loss_components);
     register_test("trainer_reports_epoch_and_batch_timing", trainer_reports_epoch_and_batch_timing);
     register_test("trainer_writes_csv_metric_log", trainer_writes_csv_metric_log);

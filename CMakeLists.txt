@@ -58,6 +58,17 @@ if(NVML_LIBRARY AND NVML_INCLUDE_DIR)
 endif()
 target_compile_options(pfm_logging PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(pfm_optim STATIC
+    modules/optim/amp.cpp
+    modules/optim/descriptor_similarity.cpp
+)
+target_include_directories(pfm_optim PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_link_libraries(pfm_optim PUBLIC ${TORCH_LIBRARIES})
+target_compile_options(pfm_optim PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(pfm_core STATIC
     src/core/device.cpp
     src/core/tensor_utils.cpp
@@ -147,7 +158,7 @@ target_include_directories(pfm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/modules
 )
 
-target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_dataloader pfm_logging ${TORCH_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_dataloader pfm_logging pfm_optim ${TORCH_LIBRARIES} ${OpenCV_LIBS})
 target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(pfm_cli src/main.cpp)
@@ -165,6 +176,7 @@ add_executable(pfm_tests
     modules/runtime/runtime_test.cpp
     modules/dataloader/dataloader_test.cpp
     modules/logging/logging_test.cpp
+    modules/optim/optim_test.cpp
     src/infer/eval_pipeline_test.cpp
     src/infer/feature_codec_test.cpp
     src/infer/feature_extractor_test.cpp
@@ -193,5 +205,5 @@ add_executable(pfm_tests
 target_include_directories(pfm_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging)
+target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging pfm_optim)
 add_test(NAME pfm_tests COMMAND pfm_tests)

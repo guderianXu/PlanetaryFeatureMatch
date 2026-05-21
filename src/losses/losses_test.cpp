@@ -60,14 +60,14 @@ static void descriptor_loss_separates_many_matching_candidates() {
     PFM_REQUIRE(loss.item<float>() < 0.1F);
 }
 
-static void descriptor_loss_accepts_cyclic_orientation_shift() {
+static void descriptor_loss_rejects_cyclic_orientation_shift() {
     auto query = torch::tensor({{{1.0F, 0.0F, 0.0F, 0.0F}}}, torch::kFloat32);
     auto shifted_positive = torch::tensor({{{0.0F, 1.0F, 0.0F, 0.0F}, {0.5F, 0.5F, 0.5F, 0.5F}}}, torch::kFloat32);
     auto labels = torch::zeros({1, 1}, torch::kLong);
 
     auto loss = pfm::descriptor_cross_entropy_loss(query, shifted_positive, labels);
 
-    PFM_REQUIRE(loss.item<float>() < 0.1F);
+    PFM_REQUIRE(loss.item<float>() > 5.0F);
 }
 
 static void descriptor_candidate_loss_uses_per_query_candidates() {
@@ -283,7 +283,7 @@ void register_loss_tests() {
     register_test("repeatability loss rejects negative mask values", repeatability_loss_rejects_negative_mask_values);
     register_test("descriptor loss lower for matching pairs", descriptor_loss_lower_for_matching_pairs);
     register_test("descriptor loss separates many matching candidates", descriptor_loss_separates_many_matching_candidates);
-    register_test("descriptor loss accepts cyclic orientation shift", descriptor_loss_accepts_cyclic_orientation_shift);
+    register_test("descriptor loss rejects cyclic orientation shift", descriptor_loss_rejects_cyclic_orientation_shift);
     register_test("descriptor candidate loss uses per query candidates", descriptor_candidate_loss_uses_per_query_candidates);
     register_test("descriptor diversity loss penalizes collapsed descriptors",
                   descriptor_diversity_loss_penalizes_collapsed_descriptors);

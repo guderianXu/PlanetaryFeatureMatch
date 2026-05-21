@@ -26,6 +26,7 @@ void register_timer_tests();
 void register_runtime_tests();
 void register_dataloader_tests();
 void register_logging_tests();
+void register_optim_tests();
 void register_image_dataset_tests();
 void register_image_io_tests();
 void register_intensity_mask_tests();
@@ -62,6 +63,7 @@ int main() {
     register_runtime_tests();
     register_dataloader_tests();
     register_logging_tests();
+    register_optim_tests();
     register_image_dataset_tests();
     register_image_io_tests();
     register_intensity_mask_tests();
@@ -105,4 +107,3 @@ int main() {
     std::cout << registry().size() << " test(s) passed\n";
     return 0;
 }
-

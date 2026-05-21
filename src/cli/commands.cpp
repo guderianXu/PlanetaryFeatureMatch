@@ -43,7 +43,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     app->footer(
         "\nCommon command options:\n"
         "  train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu] "
-        "[--resize 512] [--pairs-per-image 1] [--augmentation-profile mixed] "
+        "[--resize 512] [--pairs-per-image 1] [--augmentation-profile mixed] [--rotation-step-degrees 15] "
         "[--extreme-pair-ratio 0.2] [--synthetic-pair-cache-dir build/pair_cache] [--log-csv metrics.csv] "
         "[--dataloader-workers 0] [--prefetch-batches 2] [--pin-memory] "
         "[--synthetic-pair-cache-rebuild] [--visualization-dir vis] [--visualization-samples 4] "
@@ -88,7 +88,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     train->add_option("--pairs-per-image", options.pairs_per_image, "Synthetic training pairs generated per source image");
     train->add_option("--augmentation-profile",
                       options.augmentation_profile,
-                      "Synthetic augmentation profile: mixed, mild, medium, hard, or extreme");
+                      "Synthetic augmentation profile: mixed, rotation-only, mild, medium, hard, or extreme");
+    train->add_option("--rotation-step-degrees",
+                      options.rotation_step_degrees,
+                      "Angle step for rotation-only synthetic training pairs");
     train->add_option("--extreme-pair-ratio",
                       options.extreme_pair_ratio,
                       "Extreme pair ratio used by mixed augmentation profile");

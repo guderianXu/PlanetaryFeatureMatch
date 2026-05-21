@@ -32,6 +32,7 @@ private:
     torch::nn::Sequential _context{nullptr};
     torch::nn::Conv2d _heatmap{nullptr};
     torch::nn::Sequential _descriptors{nullptr};
+    torch::nn::Conv2d _descriptor_skip{nullptr};
     torch::nn::Conv2d _scale{nullptr};
     torch::nn::Conv2d _orientation{nullptr};
     torch::nn::Conv2d _affine{nullptr};

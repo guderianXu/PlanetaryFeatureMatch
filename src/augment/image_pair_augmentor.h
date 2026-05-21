@@ -16,6 +16,7 @@ struct ImagePairAugmentationConfig {
     float brightness_delta = 0.0F;
     float contrast_scale = 1.0F;
     float noise_sigma = 0.0F;
+    float rotation_step_degrees = 15.0F;
     int64_t variant_index = 0;
     int64_t source_index = 0;
     uint64_t seed = 0;

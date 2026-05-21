@@ -243,7 +243,7 @@ static void pipeline_train_writes_synthetic_pair_cache() {
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
     PFM_REQUIRE(std::filesystem::exists(options.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "pair_000000_view_b.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000_view_b.png"));
 }
 
 static void pipeline_train_prints_total_and_average_batch_time() {
@@ -316,8 +316,8 @@ static void pipeline_train_forwards_pairs_per_image_to_cache_generation() {
     options.resize = 32;
 
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "pair_000003.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "pair_000003_view_b.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000001_image_b" / "pair_000003.pt"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000001_image_b" / "pair_000003_view_b.png"));
 }
 
 static void pipeline_extract_writes_loadable_feature_file() {

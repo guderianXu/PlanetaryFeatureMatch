@@ -175,6 +175,65 @@ static void matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilt
     PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
 }
 
+static torch::Tensor makeC4DescriptorRows(const std::vector<int64_t>& slot_indices) {
+    auto descriptors = torch::zeros({static_cast<int64_t>(slot_indices.size()), 16}, torch::kFloat32);
+    for (int64_t row = 0; row < static_cast<int64_t>(slot_indices.size()); ++row) {
+        descriptors.index_put_({row, row + slot_indices[static_cast<size_t>(row)] * 4}, 1.0F);
+    }
+    return descriptors;
+}
+
+static void matchingPipelineUsesOneGlobalCyclicDescriptorShift() {
+    const auto keypoints_a = torch::tensor(
+        {{0.0F, 0.0F}, {10.0F, 0.0F}, {20.0F, 0.0F}, {30.0F, 0.0F}},
+        torch::kFloat32);
+    const auto keypoints_b = torch::tensor(
+        {{30.0F, 0.0F}, {20.0F, 0.0F}, {10.0F, 0.0F}, {0.0F, 0.0F}, {100.0F, 100.0F}},
+        torch::kFloat32);
+    const auto features_a = makeFeatureSet(
+        keypoints_a,
+        makeC4DescriptorRows({0, 0, 0, 0}),
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+    auto descriptors_b = torch::zeros({5, 16}, torch::kFloat32);
+    descriptors_b.index_put_({0, 2 * 4 + 3}, 1.0F);
+    descriptors_b.index_put_({1, 2 * 4 + 2}, 1.0F);
+    descriptors_b.index_put_({2, 2 * 4 + 1}, 1.0F);
+    descriptors_b.index_put_({3, 2 * 4 + 0}, 1.0F);
+    descriptors_b.index_put_({4, 0}, 1.0F);
+    const auto features_b = makeFeatureSet(
+        keypoints_b,
+        descriptors_b,
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+
+    const auto matches = pfm::matchFeatureSets(features_a, features_b);
+    const auto expected = torch::tensor({{0, 3}, {1, 2}, {2, 1}, {3, 0}}, torch::kInt64);
+
+    PFM_REQUIRE(torch::equal(matches.sparse_matches, expected));
+}
+
+static void matchingPipelineRecoversHalfTurnWithCyclicDescriptors() {
+    const auto features_a = makeFeatureSet(
+        torch::tensor({{2.0F, 2.0F}, {8.0F, 2.0F}, {2.0F, 8.0F}, {8.0F, 8.0F}}, torch::kFloat32),
+        makeC4DescriptorRows({0, 0, 0, 0}),
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+    auto features_b = makeFeatureSet(
+        torch::tensor({{7.0F, 7.0F}, {1.0F, 7.0F}, {7.0F, 1.0F}, {1.0F, 1.0F}, {2.0F, 2.0F}}, torch::kFloat32),
+        torch::cat({makeC4DescriptorRows({2, 2, 2, 2}), torch::nn::functional::one_hot(torch::tensor({0}), 16).to(torch::kFloat32)}, 0),
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32)
+    );
+    const auto matches = pfm::matchFeatureSets(features_a, features_b);
+    const auto expected = torch::tensor({{0, 0}, {1, 1}, {2, 2}, {3, 3}}, torch::kInt64);
+
+    PFM_REQUIRE(torch::equal(matches.sparse_matches, expected));
+}
+
 static void matchingPipelineAcceptsCudaGraphMatcherWithCpuFeatures() {
     if (!torch::cuda::is_available()) {
         return;

@@ -142,7 +142,9 @@ static void parse_train_command() {
         "--pairs-per-image",
         "3",
         "--augmentation-profile",
-        "hard",
+        "rotation-only",
+        "--rotation-step-degrees",
+        "30",
         "--extreme-pair-ratio",
         "0.35",
         "--synthetic-pair-cache-dir",
@@ -183,7 +185,8 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.device == "cuda:0");
     PFM_REQUIRE(parsed.resize == 512);
     PFM_REQUIRE(parsed.pairs_per_image == 3);
-    PFM_REQUIRE(parsed.augmentation_profile == "hard");
+    PFM_REQUIRE(parsed.augmentation_profile == "rotation-only");
+    PFM_REQUIRE_CLOSE(parsed.rotation_step_degrees, 30.0, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.extreme_pair_ratio, 0.35, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");

@@ -19,6 +19,7 @@ struct TrainConfig {
     int pairs_per_image = 1;
     std::string augmentation_profile = "mixed";
     double extreme_pair_ratio = 0.2;
+    double rotation_step_degrees = 15.0;
     std::string synthetic_pair_cache_dir;
     std::string log_csv;
     bool synthetic_pair_cache_rebuild = false;

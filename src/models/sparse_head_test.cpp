@@ -52,7 +52,7 @@ static void sparse_head_uses_shared_context_tower() {
     PFM_REQUIRE(found_second_context);
 }
 
-static void sparse_head_rotation_pooled_descriptors_stay_normalized() {
+static void sparse_head_descriptors_stay_normalized() {
     pfm::SparseHead head(4, 8);
     auto feature = torch::rand({1, 4, 16, 16}, torch::kFloat32);
 
@@ -63,7 +63,7 @@ static void sparse_head_rotation_pooled_descriptors_stay_normalized() {
     PFM_REQUIRE(torch::allclose(norms, torch::ones_like(norms), 1.0e-5, 1.0e-5));
 }
 
-static void sparse_head_uses_cyclic_descriptor_slots() {
+static void sparse_head_descriptor_projection_has_requested_channels() {
     pfm::SparseHead head(4, 8);
     bool found_descriptor_output = false;
     for (const auto& parameter : head->named_parameters()) {
@@ -79,11 +79,29 @@ static void sparse_head_uses_cyclic_descriptor_slots() {
     PFM_REQUIRE(found_descriptor_output);
 }
 
+static void sparse_head_heatmap_is_finite_for_rotated_inputs() {
+    pfm::SparseHead head(4, 8);
+    head->eval();
+    auto feature = torch::rand({1, 4, 17, 17}, torch::kFloat32);
+
+    const auto original = head->forward(feature).heatmap;
+    const auto rotated = head->forward(torch::rot90(feature, 1, {2, 3})).heatmap;
+
+    PFM_REQUIRE(torch::isfinite(original).all().item<bool>());
+    PFM_REQUIRE(torch::isfinite(rotated).all().item<bool>());
+    PFM_REQUIRE(original.min().item<float>() >= 0.0F);
+    PFM_REQUIRE(original.max().item<float>() <= 1.0F);
+    PFM_REQUIRE(rotated.min().item<float>() >= 0.0F);
+    PFM_REQUIRE(rotated.max().item<float>() <= 1.0F);
+}
+
 void register_sparse_head_tests() {
     register_test("sparse head outputs expected maps", sparse_head_outputs_expected_maps);
     register_test("sparse head descriptors use local context", sparse_head_descriptors_use_local_context);
     register_test("sparse head uses shared context tower", sparse_head_uses_shared_context_tower);
-    register_test("sparse head rotation pooled descriptors stay normalized",
-                  sparse_head_rotation_pooled_descriptors_stay_normalized);
-    register_test("sparse head uses cyclic descriptor slots", sparse_head_uses_cyclic_descriptor_slots);
+    register_test("sparse head descriptors stay normalized", sparse_head_descriptors_stay_normalized);
+    register_test("sparse head descriptor projection has requested channels",
+                  sparse_head_descriptor_projection_has_requested_channels);
+    register_test("sparse head heatmap is finite for rotated inputs",
+                  sparse_head_heatmap_is_finite_for_rotated_inputs);
 }

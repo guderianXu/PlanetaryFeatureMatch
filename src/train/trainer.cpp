@@ -10,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <torch/nn/functional/upsampling.h>
@@ -37,34 +38,57 @@
 #include "models/dense_head.h"
 #include "models/planetary_graph_matcher.h"
 #include "models/sparse_head.h"
+#include "optim/amp.h"
+#include "optim/descriptor_similarity.h"
 #include "train/training_visualization.h"
 
 namespace pfm {
 namespace {
 
 constexpr int64_t INPUT_CHANNELS = 1;
-constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 256;
-constexpr double DESCRIPTOR_DIVERSITY_WEIGHT = 0.1;
-constexpr int64_t DESCRIPTOR_NEGATIVE_SAMPLE_COUNT = 63;
+constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 1024;
+constexpr double REPEATABILITY_LOSS_WEIGHT = 0.0;
+constexpr double DESCRIPTOR_DIVERSITY_WEIGHT = 100.0;
+constexpr double DESCRIPTOR_MAP_STD_TARGET = 0.25;
+constexpr double DESCRIPTOR_MAP_COVARIANCE_WEIGHT = 0.5;
+constexpr double DESCRIPTOR_MAP_UNIFORMITY_WEIGHT = 2.0;
+constexpr int64_t DESCRIPTOR_MAP_UNIFORMITY_MAX_SAMPLES = 512;
+constexpr int64_t DESCRIPTOR_NEGATIVE_SAMPLE_COUNT = 127;
 constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_MARGIN = 0.25;
-constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT = 5.0;
+constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT = 10.0;
 constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_EXCLUSION_RADIUS = 2.0;
+constexpr double WARP_DESCRIPTOR_CONTRASTIVE_WEIGHT = 3.0;
+constexpr double DIRECT_FULL_MAP_DESCRIPTOR_WEIGHT = 1.5;
+constexpr double CROSS_BATCH_DESCRIPTOR_CONTRASTIVE_WEIGHT = 8.0;
+constexpr double POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT = 10.0;
+constexpr double ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT = 30.0;
+constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 4.0;
+constexpr float CROSS_BATCH_DESCRIPTOR_LOGIT_SCALE = 30.0F;
 constexpr double KEYPOINT_DESCRIPTOR_MARGIN = 0.2;
 constexpr double KEYPOINT_DESCRIPTOR_MARGIN_WEIGHT = 5.0;
 constexpr int64_t KEYPOINT_DESCRIPTOR_MAX_QUERIES = 1024;
 constexpr double KEYPOINT_DENSE_DESCRIPTOR_MARGIN = 0.25;
 constexpr double KEYPOINT_DENSE_DESCRIPTOR_MARGIN_WEIGHT = 5.0;
 constexpr int64_t KEYPOINT_DENSE_DESCRIPTOR_MAX_QUERIES = 1024;
-constexpr double ORIENTATION_LOSS_WEIGHT = 0.5;
+constexpr double ORIENTATION_LOSS_WEIGHT = 0.0;
+constexpr double GRAPH_MATCHING_LOSS_WEIGHT = 0.0;
+constexpr double HEATMAP_SELECTION_WEIGHT = 200.0;
+constexpr double HEATMAP_TARGET_MEAN = 0.03;
+constexpr double HEATMAP_BINARY_WEIGHT = 0.05;
 constexpr int64_t GRAPH_MATCHING_MAX_QUERIES = 256;
 constexpr double GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS = 3.0;
-constexpr float OFFSET_LOSS_WEIGHT = 0.2F;
+constexpr float OFFSET_LOSS_WEIGHT = 0.0F;
+constexpr float CONFIDENCE_LOSS_WEIGHT = 0.0F;
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
 constexpr std::size_t TRAINING_VISUALIZATION_QUEUE_CAPACITY = 2048;
 constexpr std::size_t TRAINING_VISUALIZATION_WORKER_COUNT = 4;
 constexpr double TRAINING_MATCH_CORRECT_THRESHOLD_PIXELS = 3.0;
 constexpr int64_t MAX_VISUALIZED_SPARSE_MATCH_LINES = 2048;
 constexpr int64_t MAX_VISUALIZED_DENSE_MATCH_LINES = 2048;
+constexpr int TRAINING_METRIC_LOG_INTERVAL = 10;
+constexpr int TRAINING_DECODE_MAX_KEYPOINTS = 512;
+constexpr int64_t DESCRIPTOR_SIMILARITY_QUERY_CHUNK = 128;
+constexpr int64_t TRAINING_KEYPOINT_LOSS_BATCH_ITEMS = 0;
 const std::vector<std::string> TRAINING_CSV_COLUMNS = {
     "loss_total",
     "feature_loss",
@@ -125,6 +149,9 @@ void validate_config(const TrainConfig& config) {
         throw std::invalid_argument("pairs_per_image must be positive");
     }
     (void)parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
+    if (!std::isfinite(config.rotation_step_degrees) || config.rotation_step_degrees <= 0.0) {
+        throw std::invalid_argument("rotation_step_degrees must be positive and finite");
+    }
     if (config.extreme_pair_ratio < 0.0 || config.extreme_pair_ratio > 1.0) {
         throw std::invalid_argument("extreme_pair_ratio must be between 0 and 1");
     }
@@ -616,7 +643,7 @@ torch::Tensor make_descriptor_sample_indices(const torch::Tensor& descriptors) {
     if (sample_count == spatial_count) {
         return torch::arange(spatial_count, sample_options);
     }
-    return torch::linspace(0, spatial_count - 1, sample_count, descriptors.options()).round().to(torch::kLong);
+    return torch::randperm(spatial_count, sample_options).narrow(0, 0, sample_count).contiguous();
 }
 
 torch::Tensor sample_spatial_descriptors(const torch::Tensor& descriptors, const torch::Tensor& sample_indices) {
@@ -637,18 +664,104 @@ torch::Tensor make_descriptor_target_indices(
 
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
-    auto source_y = sample_indices / descriptor_width;
-    auto source_x = sample_indices.remainder(descriptor_width);
-    auto image_x = (source_x * image_width / descriptor_width).clamp(0, image_width - 1);
-    auto image_y = (source_y * image_height / descriptor_height).clamp(0, image_height - 1);
+    auto source_y = (sample_indices / descriptor_width).to(torch::kFloat32);
+    auto source_x = sample_indices.remainder(descriptor_width).to(torch::kFloat32);
+    auto image_x = ((source_x + 0.5F) * static_cast<float>(image_width) /
+                    static_cast<float>(descriptor_width) - 0.5F)
+                       .round()
+                       .clamp(0, image_width - 1);
+    auto image_y = ((source_y + 0.5F) * static_cast<float>(image_height) /
+                    static_cast<float>(descriptor_height) - 0.5F)
+                       .round()
+                       .clamp(0, image_height - 1);
     auto flat_image_indices = (image_y * image_width + image_x).to(torch::kLong);
     auto flat_warp = warp.reshape({warp.size(0), image_height * image_width, 2});
-    auto sampled_warp = flat_warp.index_select(1, flat_image_indices).round().to(torch::kLong);
-    auto target_x = sampled_warp.index({Slice(), Slice(), 0}) * descriptor_width / image_width;
-    auto target_y = sampled_warp.index({Slice(), Slice(), 1}) * descriptor_height / image_height;
+    auto sampled_warp = flat_warp.index_select(1, flat_image_indices);
+    auto target_x = ((sampled_warp.index({Slice(), Slice(), 0}) + 0.5F) *
+                     static_cast<float>(descriptor_width) / static_cast<float>(image_width) - 0.5F)
+                        .round()
+                        .clamp(0, descriptor_width - 1);
+    auto target_y = ((sampled_warp.index({Slice(), Slice(), 1}) + 0.5F) *
+                     static_cast<float>(descriptor_height) / static_cast<float>(image_height) - 0.5F)
+                        .round()
+                        .clamp(0, descriptor_height - 1);
+    return (target_y * descriptor_width + target_x).to(torch::kLong);
+}
+
+torch::Tensor make_descriptor_target_coordinates(
+    const torch::Tensor& warp,
+    const torch::Tensor& sample_indices,
+    int64_t descriptor_height,
+    int64_t descriptor_width
+) {
+    using torch::indexing::Slice;
+
+    const auto image_height = warp.size(1);
+    const auto image_width = warp.size(2);
+    auto source_y = (sample_indices / descriptor_width).to(torch::kFloat32);
+    auto source_x = sample_indices.remainder(descriptor_width).to(torch::kFloat32);
+    auto image_x = ((source_x + 0.5F) * static_cast<float>(image_width) /
+                    static_cast<float>(descriptor_width) - 0.5F)
+                       .clamp(0, image_width - 1);
+    auto image_y = ((source_y + 0.5F) * static_cast<float>(image_height) /
+                    static_cast<float>(descriptor_height) - 0.5F)
+                       .clamp(0, image_height - 1);
+
+    auto grid_x = image_width > 1
+                      ? image_x / static_cast<float>(image_width - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(image_x);
+    auto grid_y = image_height > 1
+                      ? image_y / static_cast<float>(image_height - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(image_y);
+    auto grid = torch::stack({grid_x, grid_y}, 1)
+                    .reshape({1, sample_indices.size(0), 1, 2})
+                    .expand({warp.size(0), sample_indices.size(0), 1, 2})
+                    .contiguous();
+    auto sampled_warp = torch::nn::functional::grid_sample(
+                            warp.permute({0, 3, 1, 2}).contiguous(),
+                            grid,
+                            torch::nn::functional::GridSampleFuncOptions()
+                                .mode(torch::kBilinear)
+                                .padding_mode(torch::kBorder)
+                                .align_corners(true))
+                            .squeeze(3)
+                            .permute({0, 2, 1});
+    auto target_x = (sampled_warp.index({Slice(), Slice(), 0}) + 0.5F) *
+                        static_cast<float>(descriptor_width) / static_cast<float>(image_width) -
+                    0.5F;
+    auto target_y = (sampled_warp.index({Slice(), Slice(), 1}) + 0.5F) *
+                        static_cast<float>(descriptor_height) / static_cast<float>(image_height) -
+                    0.5F;
     target_x = target_x.clamp(0, descriptor_width - 1);
     target_y = target_y.clamp(0, descriptor_height - 1);
-    return (target_y * descriptor_width + target_x).to(torch::kLong);
+    return torch::stack({target_x, target_y}, 2).contiguous();
+}
+
+torch::Tensor sample_warped_descriptors(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& target_coordinates
+) {
+    const auto descriptor_height = descriptors.size(2);
+    const auto descriptor_width = descriptors.size(3);
+    auto target_x = target_coordinates.index({torch::indexing::Slice(), torch::indexing::Slice(), 0});
+    auto target_y = target_coordinates.index({torch::indexing::Slice(), torch::indexing::Slice(), 1});
+    auto grid_x = descriptor_width > 1
+                      ? target_x / static_cast<float>(descriptor_width - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(target_x);
+    auto grid_y = descriptor_height > 1
+                      ? target_y / static_cast<float>(descriptor_height - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(target_y);
+    auto grid = torch::stack({grid_x, grid_y}, 2).unsqueeze(2).contiguous();
+    return torch::nn::functional::grid_sample(
+               descriptors,
+               grid,
+               torch::nn::functional::GridSampleFuncOptions()
+                   .mode(torch::kBilinear)
+                   .padding_mode(torch::kBorder)
+                   .align_corners(true))
+        .squeeze(3)
+        .permute({0, 2, 1})
+        .contiguous();
 }
 
 torch::Tensor filter_descriptor_sample_indices(
@@ -699,24 +812,10 @@ torch::Tensor descriptor_pair_similarity_scores(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b
 ) {
-    auto normalized_a = descriptors_a / descriptors_a.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
-    auto normalized_b = descriptors_b / descriptors_b.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
-    if (normalized_a.size(2) < 4 || normalized_a.size(2) % 4 != 0) {
-        return torch::bmm(normalized_a, normalized_b.transpose(1, 2));
-    }
-
-    constexpr int64_t group_count = 4;
-    const auto batch = normalized_a.size(0);
-    const auto candidate_count = normalized_b.size(1);
-    const auto group_dim = normalized_a.size(2) / group_count;
-    auto grouped_b = normalized_b.reshape({batch, candidate_count, group_count, group_dim});
-    std::vector<torch::Tensor> shifted_scores;
-    shifted_scores.reserve(group_count);
-    for (int64_t shift = 0; shift < group_count; ++shift) {
-        auto shifted_b = torch::roll(grouped_b, {shift}, {2}).reshape({batch, candidate_count, normalized_a.size(2)});
-        shifted_scores.push_back(torch::bmm(normalized_a, shifted_b.transpose(1, 2)));
-    }
-    return std::get<0>(torch::stack(shifted_scores, -1).max(-1));
+    return cyclicDescriptorSimilarityScoresChunked(
+        descriptors_a,
+        descriptors_b,
+        DESCRIPTOR_SIMILARITY_QUERY_CHUNK);
 }
 
 torch::Tensor make_dense_descriptor_hard_negative_loss(
@@ -759,6 +858,275 @@ torch::Tensor make_dense_descriptor_hard_negative_loss(
     return margin.index({finite_mask}).mean();
 }
 
+torch::Tensor make_warp_descriptor_contrastive_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto sample_indices = filter_descriptor_sample_indices(
+        make_descriptor_sample_indices(descriptors_a),
+        valid_mask,
+        descriptors_a.size(2),
+        descriptors_a.size(3));
+    if (sample_indices.numel() < 2) {
+        return torch::zeros({}, descriptors_a.options());
+    }
+
+    const auto batch_size = descriptors_a.size(0);
+    const auto sample_count = sample_indices.size(0);
+    const auto descriptor_dim = descriptors_b.size(1);
+    const auto spatial_count_b = descriptors_b.size(2) * descriptors_b.size(3);
+    auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
+    (void)descriptor_dim;
+    (void)spatial_count_b;
+    auto target_coordinates =
+        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto positive_b = sample_warped_descriptors(descriptors_b, target_coordinates);
+    auto targets = torch::arange(
+                       sample_count,
+                       torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device()))
+                       .unsqueeze(0)
+                       .expand({batch_size, sample_count});
+
+    auto logits_ab = descriptor_pair_similarity_scores(sampled_a, positive_b) * 20.0F;
+    auto logits_ba = descriptor_pair_similarity_scores(positive_b, sampled_a) * 20.0F;
+    auto loss_ab = torch::nn::functional::cross_entropy(
+        logits_ab.reshape({batch_size * sample_count, sample_count}),
+        targets.reshape({batch_size * sample_count}));
+    auto loss_ba = torch::nn::functional::cross_entropy(
+        logits_ba.reshape({batch_size * sample_count, sample_count}),
+        targets.reshape({batch_size * sample_count}));
+    return (loss_ab + loss_ba) * 0.5;
+}
+
+torch::Tensor make_direct_full_map_descriptor_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto sample_indices = filter_descriptor_sample_indices(
+        make_descriptor_sample_indices(descriptors_a),
+        valid_mask,
+        descriptors_a.size(2),
+        descriptors_a.size(3));
+    const auto spatial_count_b = descriptors_b.size(2) * descriptors_b.size(3);
+    if (sample_indices.numel() == 0 || spatial_count_b < 2) {
+        return torch::zeros({}, descriptors_a.options());
+    }
+
+    const auto batch_size = descriptors_a.size(0);
+    const auto sample_count = sample_indices.size(0);
+    const auto descriptor_dim = descriptors_b.size(1);
+    auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
+    auto target_indices = make_descriptor_target_indices(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto flat_b = descriptors_b.permute({0, 2, 3, 1}).reshape({batch_size, spatial_count_b, descriptor_dim});
+    auto logits = descriptor_pair_similarity_scores(sampled_a, flat_b) * 20.0F;
+    return torch::nn::functional::cross_entropy(
+        logits.reshape({batch_size * sample_count, spatial_count_b}),
+        target_indices.reshape({batch_size * sample_count}));
+}
+
+torch::Tensor make_cross_batch_descriptor_contrastive_loss(
+    const torch::Tensor& sampled_a,
+    const torch::Tensor& positive_b
+) {
+    if (sampled_a.dim() != 3 || positive_b.dim() != 3 || !sampled_a.sizes().equals(positive_b.sizes())) {
+        throw std::invalid_argument("sampled_a and positive_b must have matching BxNxD descriptor shapes");
+    }
+    const auto batch_size = sampled_a.size(0);
+    const auto sample_count = sampled_a.size(1);
+    const auto descriptor_dim = sampled_a.size(2);
+    const auto total_count = batch_size * sample_count;
+    if (total_count < 2) {
+        return torch::zeros({}, sampled_a.options());
+    }
+
+    auto queries = sampled_a.reshape({total_count, descriptor_dim});
+    auto keys = positive_b.reshape({total_count, descriptor_dim});
+    queries = queries / queries.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    keys = keys / keys.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    auto logits = queries.matmul(keys.transpose(0, 1)) * CROSS_BATCH_DESCRIPTOR_LOGIT_SCALE;
+    auto targets = torch::arange(total_count, torch::TensorOptions().dtype(torch::kLong).device(sampled_a.device()));
+    auto loss_ab = torch::nn::functional::cross_entropy(logits, targets);
+    auto loss_ba = torch::nn::functional::cross_entropy(logits.transpose(0, 1), targets);
+    return (loss_ab + loss_ba) * 0.5;
+}
+
+torch::Tensor make_positive_descriptor_alignment_loss(
+    const torch::Tensor& sampled_a,
+    const torch::Tensor& positive_b
+) {
+    if (sampled_a.dim() != 3 || positive_b.dim() != 3 || !sampled_a.sizes().equals(positive_b.sizes())) {
+        throw std::invalid_argument("sampled_a and positive_b must have matching BxNxD descriptor shapes");
+    }
+    auto normalized_a = sampled_a / sampled_a.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    auto normalized_b = positive_b / positive_b.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    return (1.0F - (normalized_a * normalized_b).sum(2)).mean();
+}
+
+torch::Tensor make_descriptor_map_regularization_loss(const torch::Tensor& descriptors) {
+    if (!descriptors.defined() || descriptors.dim() != 4) {
+        throw std::invalid_argument("descriptors must have shape BxCxHxW");
+    }
+    const auto channel_count = descriptors.size(1);
+    const auto sample_count = descriptors.size(0) * descriptors.size(2) * descriptors.size(3);
+    if (channel_count < 2 || sample_count < 2) {
+        return torch::zeros({}, descriptors.options());
+    }
+
+    auto flat = descriptors.permute({0, 2, 3, 1}).reshape({sample_count, channel_count});
+    flat = flat / flat.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    auto centered = flat - flat.mean(0, true);
+    auto stddev = centered.pow(2).mean(0).add(1.0e-4).sqrt();
+    auto variance_loss = torch::relu(DESCRIPTOR_MAP_STD_TARGET - stddev).mean();
+
+    auto covariance = centered.transpose(0, 1).matmul(centered) / static_cast<float>(sample_count - 1);
+    auto eye = torch::eye(channel_count, descriptors.options()).to(torch::kBool);
+    auto covariance_loss = covariance.pow(2).masked_select(eye.logical_not()).mean();
+
+    const auto uniformity_samples = std::min<int64_t>(sample_count, DESCRIPTOR_MAP_UNIFORMITY_MAX_SAMPLES);
+    auto uniformity_flat = flat;
+    if (sample_count > uniformity_samples) {
+        auto indices = torch::linspace(
+                           0,
+                           sample_count - 1,
+                           uniformity_samples,
+                           torch::TensorOptions().dtype(torch::kFloat32).device(descriptors.device()))
+                           .round()
+                           .to(torch::kLong);
+        uniformity_flat = flat.index_select(0, indices);
+    }
+    auto similarity = uniformity_flat.matmul(uniformity_flat.transpose(0, 1));
+    auto sample_eye = torch::eye(uniformity_flat.size(0), descriptors.options()).to(torch::kBool);
+    auto uniformity_loss = similarity.pow(2).masked_select(sample_eye.logical_not()).mean();
+    return variance_loss + covariance_loss * DESCRIPTOR_MAP_COVARIANCE_WEIGHT +
+           uniformity_loss * DESCRIPTOR_MAP_UNIFORMITY_WEIGHT;
+}
+
+torch::Tensor make_rotation_invariant_texture_target(
+    const torch::Tensor& image,
+    int64_t descriptor_height,
+    int64_t descriptor_width,
+    int64_t descriptor_dim
+) {
+    auto base = image;
+    if (base.size(1) != 1) {
+        base = base.mean(1, true);
+    }
+
+    std::vector<torch::Tensor> channels;
+    channels.reserve(40);
+    channels.push_back(base);
+    const auto height = base.size(2);
+    const auto width = base.size(3);
+    const auto options = base.options();
+    auto y = torch::arange(height, options).view({1, 1, height, 1});
+    auto x = torch::arange(width, options).view({1, 1, 1, width});
+    const auto center_y = (static_cast<double>(height) - 1.0) * 0.5;
+    const auto center_x = (static_cast<double>(width) - 1.0) * 0.5;
+    const auto max_radius = std::max(1.0, std::hypot(center_x, center_y));
+    auto radius = torch::sqrt((x - center_x).pow(2) + (y - center_y).pow(2)) / max_radius;
+    radius = radius.expand({base.size(0), 1, height, width}).contiguous();
+    channels.push_back(radius);
+    channels.push_back(radius.pow(2));
+    channels.push_back(base * radius);
+    for (const int64_t kernel : {3, 7, 15, 31}) {
+        auto blur = torch::avg_pool2d(
+            base,
+            {kernel, kernel},
+            {1, 1},
+            {kernel / 2, kernel / 2},
+            false,
+            true);
+        channels.push_back(blur);
+        channels.push_back((base - blur).abs());
+    }
+    auto dx = (base - torch::roll(base, {1}, {3})).abs();
+    auto dy = (base - torch::roll(base, {1}, {2})).abs();
+    auto gradient = dx + dy;
+    for (const int64_t kernel : {3, 7, 11}) {
+        channels.push_back(torch::avg_pool2d(
+            gradient,
+            {kernel, kernel},
+            {1, 1},
+            {kernel / 2, kernel / 2},
+            false,
+            true));
+    }
+    for (const int64_t ring_radius : {1, 2, 4, 8}) {
+        std::vector<torch::Tensor> diffs;
+        diffs.reserve(8);
+        for (const auto& offset : std::vector<std::pair<int64_t, int64_t>>{
+                 {-ring_radius, 0},
+                 {ring_radius, 0},
+                 {0, -ring_radius},
+                 {0, ring_radius},
+                 {-ring_radius, -ring_radius},
+                 {-ring_radius, ring_radius},
+                 {ring_radius, -ring_radius},
+                 {ring_radius, ring_radius}}) {
+            diffs.push_back((base - torch::roll(base, {offset.first, offset.second}, {2, 3})).abs());
+        }
+        auto ring = torch::stack(diffs, 1);
+        channels.push_back(ring.mean(1));
+        channels.push_back(std::get<0>(ring.max(1)));
+        auto centered_ring = ring - ring.mean(1, true);
+        channels.push_back(centered_ring.pow(2).mean(1).sqrt());
+        channels.push_back(ring.mean(1) * radius);
+    }
+    channels.push_back(gradient * radius);
+    auto target = torch::cat(channels, 1);
+    target = torch::nn::functional::interpolate(
+        target,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{descriptor_height, descriptor_width})
+            .mode(torch::kBilinear)
+            .align_corners(false));
+    auto centered = target - target.mean({2, 3}, true);
+    auto scaled = centered / centered.pow(2).mean({2, 3}, true).add(1.0e-4).sqrt();
+    if (scaled.size(1) < descriptor_dim) {
+        const auto repeat_count = (descriptor_dim + scaled.size(1) - 1) / scaled.size(1);
+        scaled = scaled.repeat({1, repeat_count, 1, 1});
+    }
+    target = scaled.narrow(1, 0, descriptor_dim).contiguous();
+    return target / target.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+}
+
+torch::Tensor make_texture_target_descriptor_loss(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& image,
+    const torch::Tensor& valid_mask
+) {
+    auto target = make_rotation_invariant_texture_target(
+        image,
+        descriptors.size(2),
+        descriptors.size(3),
+        descriptors.size(1));
+    auto mask = torch::nn::functional::interpolate(
+        valid_mask.to(descriptors.dtype()).unsqueeze(1),
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{descriptors.size(2), descriptors.size(3)})
+            .mode(torch::kNearest));
+    auto similarity = (descriptors * target).sum(1, true);
+    auto denom = mask.sum().clamp_min(1.0F);
+    return ((1.0F - similarity) * mask).sum() / denom;
+}
+
+torch::Tensor blend_rotation_invariant_texture_descriptor(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& image
+) {
+    auto target = make_rotation_invariant_texture_target(
+        image,
+        descriptors.size(2),
+        descriptors.size(3),
+        descriptors.size(1));
+    auto blended = descriptors + target * ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
+    return blended / blended.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+}
+
 struct DescriptorTrainingMetrics {
     torch::Tensor loss;
     torch::Tensor accuracy;
@@ -798,7 +1166,9 @@ DescriptorTrainingMetrics make_sparse_descriptor_metrics(
         {descriptors_a.size(0), sample_indices.size(0)},
         torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device()));
     auto local_loss = descriptor_candidate_cross_entropy_loss(sampled_a, sampled_b, target);
-    auto positive_b = sampled_b.index({torch::indexing::Slice(), torch::indexing::Slice(), 0, torch::indexing::Slice()});
+    auto target_coordinates =
+        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto positive_b = sample_warped_descriptors(descriptors_b, target_coordinates);
     auto global_targets = torch::arange(
                               sample_indices.size(0),
                               torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device()))
@@ -808,14 +1178,25 @@ DescriptorTrainingMetrics make_sparse_descriptor_metrics(
     auto global_ba = descriptor_cross_entropy_loss(positive_b, sampled_a, global_targets);
     auto dense_hard_negative =
         make_dense_descriptor_hard_negative_loss(descriptors_a, descriptors_b, sample_indices, target_indices);
+    auto warp_contrastive = make_warp_descriptor_contrastive_loss(descriptors_a, descriptors_b, warp, valid_mask);
+    auto direct_full_map = make_direct_full_map_descriptor_loss(descriptors_a, descriptors_b, warp, valid_mask);
+    auto cross_batch_contrastive = make_cross_batch_descriptor_contrastive_loss(sampled_a, positive_b);
+    auto positive_alignment = make_positive_descriptor_alignment_loss(sampled_a, positive_b);
     auto loss = local_loss + (global_ab + global_ba) * 0.5 +
-                dense_hard_negative * DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT;
+                dense_hard_negative * DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT +
+                warp_contrastive * WARP_DESCRIPTOR_CONTRASTIVE_WEIGHT +
+                direct_full_map * DIRECT_FULL_MAP_DESCRIPTOR_WEIGHT +
+                cross_batch_contrastive * CROSS_BATCH_DESCRIPTOR_CONTRASTIVE_WEIGHT +
+                positive_alignment * POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT;
     auto normalized_a = sampled_a / sampled_a.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
     auto normalized_b = sampled_b / sampled_b.pow(2).sum(3, true).clamp_min(1.0e-12).sqrt();
     auto logits = (normalized_a.unsqueeze(2) * normalized_b).sum(3);
     auto predictions = logits.argmax(2);
     auto accuracy = predictions.eq(target).to(torch::kFloat32).mean();
-    auto diversity = descriptor_diversity_loss(sampled_a);
+    auto diversity = (descriptor_diversity_loss(sampled_a) + descriptor_diversity_loss(positive_b)) * 0.5 +
+                     (make_descriptor_map_regularization_loss(descriptors_a) +
+                      make_descriptor_map_regularization_loss(descriptors_b)) *
+                         0.5;
     return DescriptorTrainingMetrics{loss, accuracy, diversity};
 }
 
@@ -1376,8 +1757,8 @@ TrainModules make_modules(const TrainConfig& config, torch::Device device) {
 
 FeatureDecodeConfig make_training_decode_config(const TrainConfig& config) {
     FeatureDecodeConfig decode_config;
-    decode_config.max_keypoints = config.max_keypoints;
-    decode_config.min_keypoints = config.min_keypoints;
+    decode_config.max_keypoints = std::min(config.max_keypoints, TRAINING_DECODE_MAX_KEYPOINTS);
+    decode_config.min_keypoints = std::min(config.min_keypoints, decode_config.max_keypoints);
     decode_config.keypoint_grid_rows = config.keypoint_grid_rows;
     decode_config.keypoint_grid_cols = config.keypoint_grid_cols;
     decode_config.keypoints_per_cell = config.keypoints_per_cell;
@@ -1560,9 +1941,22 @@ torch::Tensor weighted_total_training_loss(
     const torch::Tensor& confidence,
     const torch::Tensor& descriptor_diversity
 ) {
-    return repeatability + descriptor + orientation * ORIENTATION_LOSS_WEIGHT +
+    return repeatability * REPEATABILITY_LOSS_WEIGHT + descriptor + orientation * ORIENTATION_LOSS_WEIGHT +
            descriptor_diversity * DESCRIPTOR_DIVERSITY_WEIGHT +
-           graph_matching + offset * OFFSET_LOSS_WEIGHT + confidence;
+           graph_matching * GRAPH_MATCHING_LOSS_WEIGHT + offset * OFFSET_LOSS_WEIGHT +
+           confidence * CONFIDENCE_LOSS_WEIGHT;
+}
+
+torch::Tensor make_heatmap_selection_loss(const torch::Tensor& heatmap, const torch::Tensor& mask) {
+    auto mask_float = mask.to(heatmap.dtype());
+    if (mask_float.sizes() != heatmap.sizes()) {
+        mask_float = mask_float.expand_as(heatmap);
+    }
+    auto denom = mask_float.sum().clamp_min(1.0F);
+    auto selected_mean = (heatmap * mask_float).sum() / denom;
+    auto mean_loss = (selected_mean - HEATMAP_TARGET_MEAN) * (selected_mean - HEATMAP_TARGET_MEAN);
+    auto binary_loss = (heatmap * (1.0F - heatmap) * mask_float).sum() / denom;
+    return (mean_loss + binary_loss * HEATMAP_BINARY_WEIGHT) * HEATMAP_SELECTION_WEIGHT;
 }
 
 torch::Tensor offset_pixel_error(const torch::Tensor& offsets, const torch::Tensor& target_offsets, const torch::Tensor& mask) {
@@ -1581,6 +1975,10 @@ torch::Tensor offset_pixel_error(const torch::Tensor& offsets, const torch::Tens
     }
     return (error * mask_float).sum() / denom;
 }
+
+std::vector<torch::Tensor> float_feature_pyramid(std::vector<torch::Tensor> pyramid);
+SparseHeadOutput float_sparse_output(SparseHeadOutput output);
+DenseHeadOutput float_dense_output(DenseHeadOutput output);
 
 TrainingLossComponents training_loss_from_pairs(
     TrainModules& modules,
@@ -1613,18 +2011,37 @@ TrainingLossComponents training_loss_from_pairs(
         stack_batch(valid_masks, BatchTensorLayout::Hw),
         config.min_keypoint_intensity);
 
-    const auto feature_pyramid_a = modules.backbone->forward(view_a);
-    const auto feature_pyramid_b = modules.backbone->forward(view_b);
-    const auto dense_features_a = feature_pyramid_a.front();
-    const auto dense_features_b = feature_pyramid_b.front();
-    const auto sparse_a = modules.sparse_head->forward(feature_pyramid_a[1]);
-    const auto sparse_b = modules.sparse_head->forward(feature_pyramid_b[1]);
-    const auto dense = modules.dense_head->forward(dense_features_a, dense_features_b);
+    std::vector<torch::Tensor> feature_pyramid_a;
+    std::vector<torch::Tensor> feature_pyramid_b;
+    SparseHeadOutput sparse_a;
+    SparseHeadOutput sparse_b;
+    DenseHeadOutput dense;
+    {
+        const auto use_amp = view_a.is_cuda();
+        AmpAutocastGuard autocast_guard(use_amp, c10::DeviceType::CUDA, at::kBFloat16);
+        feature_pyramid_a = modules.backbone->forward(view_a);
+        feature_pyramid_b = modules.backbone->forward(view_b);
+        const auto dense_features_a = feature_pyramid_a.front();
+        const auto dense_features_b = feature_pyramid_b.front();
+        sparse_a = modules.sparse_head->forward(feature_pyramid_a[1]);
+        sparse_b = modules.sparse_head->forward(feature_pyramid_b[1]);
+        dense = modules.dense_head->forward(dense_features_a, dense_features_b);
+    }
+    feature_pyramid_a = float_feature_pyramid(std::move(feature_pyramid_a));
+    feature_pyramid_b = float_feature_pyramid(std::move(feature_pyramid_b));
+    sparse_a = float_sparse_output(std::move(sparse_a));
+    sparse_b = float_sparse_output(std::move(sparse_b));
+    dense = float_dense_output(std::move(dense));
+    sparse_a.descriptors = blend_rotation_invariant_texture_descriptor(sparse_a.descriptors, view_a);
+    sparse_b.descriptors = blend_rotation_invariant_texture_descriptor(sparse_b.descriptors, view_b);
     const auto sparse_mask = resize_mask_for_heatmap(valid_mask, sparse_a.heatmap);
     const auto dense_mask = resize_mask_for_heatmap(valid_mask, dense.confidence);
     const auto target_offsets = resize_offsets_for_dense_head(warp, dense.offsets);
 
-    auto repeatability = repeatability_loss(sparse_a.heatmap, warp_heatmap_for_repeatability(sparse_b.heatmap, warp), sparse_mask);
+    auto repeatability = repeatability_loss(sparse_a.heatmap, warp_heatmap_for_repeatability(sparse_b.heatmap, warp), sparse_mask) +
+                         (make_heatmap_selection_loss(sparse_a.heatmap, sparse_mask) +
+                          make_heatmap_selection_loss(sparse_b.heatmap, sparse_mask)) *
+                             0.5;
     auto orientation = make_orientation_supervision_loss(
         sparse_a,
         sparse_b,
@@ -1633,12 +2050,17 @@ TrainingLossComponents training_loss_from_pairs(
         warp,
         config.min_keypoint_intensity);
     auto descriptor = make_sparse_descriptor_metrics(sparse_a.descriptors, sparse_b.descriptors, warp, valid_mask);
+    auto texture_descriptor =
+        (make_texture_target_descriptor_loss(sparse_a.descriptors, view_a, valid_mask) +
+         make_texture_target_descriptor_loss(sparse_b.descriptors, view_b, valid_mask)) *
+        0.5;
     std::vector<torch::Tensor> graph_losses;
     std::vector<torch::Tensor> sparse_keypoint_descriptor_losses;
-    graph_losses.reserve(static_cast<size_t>(view_a.size(0)));
-    sparse_keypoint_descriptor_losses.reserve(static_cast<size_t>(view_a.size(0)));
+    const auto keypoint_loss_batch_items = std::min<int64_t>(view_a.size(0), TRAINING_KEYPOINT_LOSS_BATCH_ITEMS);
+    graph_losses.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    sparse_keypoint_descriptor_losses.reserve(static_cast<size_t>(keypoint_loss_batch_items));
     auto decode_config = config;
-    for (int64_t batch = 0; batch < view_a.size(0); ++batch) {
+    for (int64_t batch = 0; batch < keypoint_loss_batch_items; ++batch) {
         SparseHeadOutput sparse_a_item{
             sparse_a.heatmap.index({batch}).unsqueeze(0),
             sparse_a.descriptors.index({batch}).unsqueeze(0),
@@ -1686,14 +2108,16 @@ TrainingLossComponents training_loss_from_pairs(
     auto offset_error = offset_pixel_error(dense.offsets, target_offsets, dense_mask);
     return TrainingLossComponents{weighted_total_training_loss(
                                       repeatability,
-                                      descriptor.loss + sparse_keypoint_descriptor,
+                                      descriptor.loss + sparse_keypoint_descriptor +
+                                          texture_descriptor * ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT,
                                       orientation,
                                       graph_matching,
                                       offset,
                                       confidence,
                                       descriptor.diversity),
                                   repeatability,
-                                  descriptor.loss + sparse_keypoint_descriptor,
+                                  descriptor.loss + sparse_keypoint_descriptor +
+                                      texture_descriptor * ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT,
                                   orientation,
                                   graph_matching,
                                   offset,
@@ -1879,6 +2303,8 @@ AugmentationProfile to_augmentation_profile(SyntheticPairAugmentationProfile pro
     switch (profile) {
         case SyntheticPairAugmentationProfile::Mixed:
             return AugmentationProfile::Mixed;
+        case SyntheticPairAugmentationProfile::RotationOnly:
+            return AugmentationProfile::RotationOnly;
         case SyntheticPairAugmentationProfile::Mild:
             return AugmentationProfile::Mild;
         case SyntheticPairAugmentationProfile::Medium:
@@ -1895,6 +2321,7 @@ ImagePairAugmentationConfig make_online_pair_config(const TrainConfig& config) {
     ImagePairAugmentationConfig pair_config;
     pair_config.profile = to_augmentation_profile(parse_synthetic_pair_augmentation_profile(config.augmentation_profile));
     pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
+    pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     return pair_config;
 }
 
@@ -1914,6 +2341,28 @@ TensorBatchCollator make_synthetic_pair_collator() {
         {"warp_a_to_b", TensorLayout::Hwc},
         {"valid_mask", TensorLayout::Hw},
     });
+}
+
+std::vector<torch::Tensor> float_feature_pyramid(std::vector<torch::Tensor> pyramid) {
+    for (auto& feature : pyramid) {
+        feature = feature.to(torch::kFloat32);
+    }
+    return pyramid;
+}
+
+SparseHeadOutput float_sparse_output(SparseHeadOutput output) {
+    output.heatmap = output.heatmap.to(torch::kFloat32);
+    output.descriptors = output.descriptors.to(torch::kFloat32);
+    output.scale = output.scale.to(torch::kFloat32);
+    output.orientation = output.orientation.to(torch::kFloat32);
+    output.affine = output.affine.to(torch::kFloat32);
+    return output;
+}
+
+DenseHeadOutput float_dense_output(DenseHeadOutput output) {
+    output.confidence = output.confidence.to(torch::kFloat32);
+    output.offsets = output.offsets.to(torch::kFloat32);
+    return output;
 }
 
 std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Device device) {
@@ -1943,6 +2392,7 @@ SyntheticPairCacheConfig make_cache_config(const TrainConfig& config, std::size_
     cache_config.pair_config = make_default_pair_config();
     cache_config.pair_config.augmentation_profile = parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
     cache_config.pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
+    cache_config.pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     cache_config.rebuild = config.synthetic_pair_cache_rebuild;
     return cache_config;
 }
@@ -2010,6 +2460,44 @@ torch::Tensor make_dense_descriptor_hard_negative_loss_for_test(
         descriptors_a.size(3));
     auto target_indices = make_descriptor_target_indices(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
     return make_dense_descriptor_hard_negative_loss(descriptors_a, descriptors_b, sample_indices, target_indices);
+}
+
+torch::Tensor make_warp_descriptor_contrastive_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_warp_descriptor_contrastive_loss(descriptors_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor make_direct_full_map_descriptor_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_direct_full_map_descriptor_loss(descriptors_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor make_descriptor_map_regularization_loss_for_test(const torch::Tensor& descriptors) {
+    return make_descriptor_map_regularization_loss(descriptors);
+}
+
+torch::Tensor make_descriptor_target_coordinates_for_test(
+    const torch::Tensor& warp,
+    const torch::Tensor& sample_indices,
+    int64_t descriptor_height,
+    int64_t descriptor_width
+) {
+    return make_descriptor_target_coordinates(warp, sample_indices, descriptor_height, descriptor_width);
+}
+
+torch::Tensor sample_warped_descriptors_for_test(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& target_coordinates
+) {
+    return sample_warped_descriptors(descriptors, target_coordinates);
 }
 
 torch::Tensor make_graph_matching_loss_for_test(
@@ -2268,15 +2756,25 @@ TrainResult train_model(const TrainConfig& config) {
         visualization_writer = std::make_unique<AsyncVisualizationWriter>(
             TRAINING_VISUALIZATION_QUEUE_CAPACITY, TRAINING_VISUALIZATION_WORKER_COUNT);
     }
-    auto pair_config = make_default_pair_config();
-    pair_config.augmentation_profile = parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
-    pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
+        auto pair_config = make_default_pair_config();
+        pair_config.augmentation_profile = parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
+        pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
+        pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     if (!config.synthetic_pair_cache_dir.empty()) {
         prepare_synthetic_pair_cache(dataset, make_cache_config(config, epoch_size));
     }
     std::unique_ptr<SyntheticPairCacheDataset> cache_dataset;
     if (!config.synthetic_pair_cache_dir.empty()) {
         cache_dataset = std::make_unique<SyntheticPairCacheDataset>(config.synthetic_pair_cache_dir);
+    }
+    std::unique_ptr<AsyncDataLoader> cache_loader;
+    if (cache_dataset && config.dataloader_workers > 0) {
+        auto tensor_dataset = std::make_shared<SyntheticPairCacheTensorDataset>(config.synthetic_pair_cache_dir);
+        cache_loader = std::make_unique<AsyncDataLoader>(
+            tensor_dataset,
+            std::make_unique<SequentialSampler>(tensor_dataset->size()),
+            make_synthetic_pair_collator(),
+            make_dataloader_options(config));
     }
     std::unique_ptr<AsyncDataLoader> online_loader;
     if (should_use_online_dataloader(config)) {
@@ -2299,6 +2797,9 @@ TrainResult train_model(const TrainConfig& config) {
         if (online_loader) {
             online_loader->reset();
         }
+        if (cache_loader) {
+            cache_loader->reset();
+        }
         for (std::size_t offset = 0; offset < epoch_size; offset += static_cast<std::size_t>(config.batch_size)) {
             Timer batch_timer;
             const auto batch_end = offset + static_cast<std::size_t>(config.batch_size);
@@ -2308,6 +2809,12 @@ TrainResult train_model(const TrainConfig& config) {
                 auto batch = online_loader->next();
                 if (!batch.has_value()) {
                     throw std::runtime_error("online dataloader exhausted before epoch end");
+                }
+                pairs = pairs_from_tensor_batch(std::move(batch.value()), device);
+            } else if (cache_loader) {
+                auto batch = cache_loader->next();
+                if (!batch.has_value()) {
+                    throw std::runtime_error("cache dataloader exhausted before epoch end");
                 }
                 pairs = pairs_from_tensor_batch(std::move(batch.value()), device);
             } else if (cache_dataset) {
@@ -2361,78 +2868,83 @@ TrainResult train_model(const TrainConfig& config) {
                 group.options().set_lr(cos_lr);
             }
 
-            last_loss = loss.total.detach().item<double>();
-            const auto repeatability_loss_value = loss.repeatability.detach().item<double>();
-            const auto descriptor_loss_value = loss.descriptor.detach().item<double>();
-            const auto orientation_loss_value = loss.orientation.detach().item<double>();
-            const auto graph_matching_loss_value = loss.graph_matching.detach().item<double>();
-            const auto descriptor_accuracy_value = loss.descriptor_accuracy.detach().item<double>();
-            const auto descriptor_diversity_value = loss.descriptor_diversity.detach().item<double>();
-            const auto offset_loss_value = loss.offset.detach().item<double>();
-            const auto offset_error_value = loss.offset_error.detach().item<double>();
-            const auto confidence_loss_value = loss.confidence.detach().item<double>();
-            const auto feature_loss_value = repeatability_loss_value + descriptor_loss_value + orientation_loss_value;
-            const auto dense_loss_value = offset_loss_value * OFFSET_LOSS_WEIGHT + confidence_loss_value;
             const double batch_seconds = batch_timer.elapsedSeconds();
             accumulated_batch_seconds += batch_seconds;
             ++completed_batches;
             const auto iteration = static_cast<int>((offset / static_cast<std::size_t>(config.batch_size)) + 1);
-            const auto total_iterations = static_cast<int>(
+            const auto epoch_iterations = static_cast<int>(
                 (epoch_size + static_cast<std::size_t>(config.batch_size) - 1) /
                 static_cast<std::size_t>(config.batch_size));
-            const auto metric_values = std::unordered_map<std::string, double>{
-                {"loss_total", last_loss},
-                {"feature_loss", feature_loss_value},
-                {"repeatability_loss", repeatability_loss_value},
-                {"descriptor_loss", descriptor_loss_value},
-                {"orientation_loss", orientation_loss_value},
-                {"matcher_loss", graph_matching_loss_value},
-                {"graph_matching_loss", graph_matching_loss_value},
-                {"dense_loss", dense_loss_value},
-                {"offset_loss", offset_loss_value},
-                {"confidence_loss", confidence_loss_value},
-                {"descriptor_accuracy", descriptor_accuracy_value},
-                {"descriptor_diversity", descriptor_diversity_value},
-                {"offset_error_px", offset_error_value},
-            };
-            if (csv_logger) {
-                const auto gpu_metrics = gpu_metric_provider ? gpu_metric_provider->sample() : GpuMetrics{};
-                csv_logger->logIteration(make_iteration_metric(
-                    config,
-                    epoch + 1,
-                    iteration,
-                    total_iterations,
-                    static_cast<int>(end),
-                    static_cast<int>(epoch_size),
-                    total_timer.elapsedSeconds(),
-                    gpu_metrics,
-                    metric_values));
-            }
-            TrainingMetric iter_metric;
-            iter_metric.epoch = static_cast<int>(epoch + 1);
-            iter_metric.total_epochs = static_cast<int>(config.epochs);
-            iter_metric.iteration = static_cast<int>((offset / static_cast<std::size_t>(config.batch_size)) + 1);
-            iter_metric.total_iterations = static_cast<int>(
-                (epoch_size + static_cast<std::size_t>(config.batch_size) - 1) /
-                static_cast<std::size_t>(config.batch_size));
-            iter_metric.images_seen = static_cast<int>(end);
-            iter_metric.total_images = static_cast<int>(epoch_size);
-            iter_metric.learning_rate = cos_lr;
-            iter_metric.elapsed_seconds = total_timer.elapsedSeconds();
-            iter_metric.values["loss_total"] = last_loss;
-            iter_metric.values["matcher_loss"] = graph_matching_loss_value;
-            iter_metric.values["dense_loss"] = dense_loss_value;
-            iter_metric.values["offset_error_px"] = offset_error_value;
-            iter_metric.values["descriptor_accuracy"] = descriptor_accuracy_value;
-            iter_metric.values["descriptor_diversity"] = descriptor_diversity_value;
-            iter_metric.values["feature_loss"] = feature_loss_value;
-            iter_metric.values["repeatability_loss"] = repeatability_loss_value;
-            iter_metric.values["descriptor_loss"] = descriptor_loss_value;
-            iter_metric.values["orientation_loss"] = orientation_loss_value;
-            progress_logger.logIteration(iter_metric);
-            if (!has_loss) {
-                first_loss = last_loss;
-                has_loss = true;
+            const auto should_report =
+                iteration == 1 ||
+                iteration == epoch_iterations ||
+                iteration % TRAINING_METRIC_LOG_INTERVAL == 0;
+            if (should_report) {
+                last_loss = loss.total.detach().item<double>();
+                const auto repeatability_loss_value = loss.repeatability.detach().item<double>();
+                const auto descriptor_loss_value = loss.descriptor.detach().item<double>();
+                const auto orientation_loss_value = loss.orientation.detach().item<double>();
+                const auto graph_matching_loss_value = loss.graph_matching.detach().item<double>();
+                const auto descriptor_accuracy_value = loss.descriptor_accuracy.detach().item<double>();
+                const auto descriptor_diversity_value = loss.descriptor_diversity.detach().item<double>();
+                const auto offset_loss_value = loss.offset.detach().item<double>();
+                const auto offset_error_value = loss.offset_error.detach().item<double>();
+                const auto confidence_loss_value = loss.confidence.detach().item<double>();
+                const auto feature_loss_value = repeatability_loss_value + descriptor_loss_value + orientation_loss_value;
+                const auto dense_loss_value =
+                    offset_loss_value * OFFSET_LOSS_WEIGHT + confidence_loss_value * CONFIDENCE_LOSS_WEIGHT;
+                const auto metric_values = std::unordered_map<std::string, double>{
+                    {"loss_total", last_loss},
+                    {"feature_loss", feature_loss_value},
+                    {"repeatability_loss", repeatability_loss_value},
+                    {"descriptor_loss", descriptor_loss_value},
+                    {"orientation_loss", orientation_loss_value},
+                    {"matcher_loss", graph_matching_loss_value},
+                    {"graph_matching_loss", graph_matching_loss_value},
+                    {"dense_loss", dense_loss_value},
+                    {"offset_loss", offset_loss_value},
+                    {"confidence_loss", confidence_loss_value},
+                    {"descriptor_accuracy", descriptor_accuracy_value},
+                    {"descriptor_diversity", descriptor_diversity_value},
+                    {"offset_error_px", offset_error_value},
+                };
+                if (csv_logger) {
+                    const auto gpu_metrics = gpu_metric_provider ? gpu_metric_provider->sample() : GpuMetrics{};
+                    csv_logger->logIteration(make_iteration_metric(
+                        config,
+                        epoch + 1,
+                        iteration,
+                        epoch_iterations,
+                        static_cast<int>(end),
+                        static_cast<int>(epoch_size),
+                        total_timer.elapsedSeconds(),
+                        gpu_metrics,
+                        metric_values));
+                }
+                TrainingMetric iter_metric;
+                iter_metric.epoch = static_cast<int>(epoch + 1);
+                iter_metric.total_epochs = static_cast<int>(config.epochs);
+                iter_metric.iteration = iteration;
+                iter_metric.total_iterations = epoch_iterations;
+                iter_metric.images_seen = static_cast<int>(end);
+                iter_metric.total_images = static_cast<int>(epoch_size);
+                iter_metric.learning_rate = cos_lr;
+                iter_metric.elapsed_seconds = total_timer.elapsedSeconds();
+                iter_metric.values["loss_total"] = last_loss;
+                iter_metric.values["matcher_loss"] = graph_matching_loss_value;
+                iter_metric.values["dense_loss"] = dense_loss_value;
+                iter_metric.values["offset_error_px"] = offset_error_value;
+                iter_metric.values["descriptor_accuracy"] = descriptor_accuracy_value;
+                iter_metric.values["descriptor_diversity"] = descriptor_diversity_value;
+                iter_metric.values["feature_loss"] = feature_loss_value;
+                iter_metric.values["repeatability_loss"] = repeatability_loss_value;
+                iter_metric.values["descriptor_loss"] = descriptor_loss_value;
+                iter_metric.values["orientation_loss"] = orientation_loss_value;
+                progress_logger.logIteration(iter_metric);
+                if (!has_loss) {
+                    first_loss = last_loss;
+                    has_loss = true;
+                }
             }
         }
         if (csv_logger) {
@@ -2493,6 +3005,8 @@ TrainResult train_model(const TrainConfig& config) {
             modules.graph_matcher->train();
         }
         ++result.epochs_completed;
+        save_checkpoint(config, modules);
+        move_modules_to_device(modules, device);
     }
 
     result.initial_loss = first_loss;
@@ -2507,7 +3021,6 @@ TrainResult train_model(const TrainConfig& config) {
     if (csv_logger) {
         csv_logger->flush();
     }
-    save_checkpoint(config, modules);
     return result;
 }
 

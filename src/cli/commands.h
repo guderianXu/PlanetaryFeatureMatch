@@ -57,6 +57,7 @@ struct CliOptions {
     double weight_decay = 5.0e-4;
     std::string augmentation_profile = "mixed";
     double extreme_pair_ratio = 0.2;
+    double rotation_step_degrees = 15.0;
     double train_ratio = 0.8;
     double val_ratio = 0.1;
     int split_seed = 42;

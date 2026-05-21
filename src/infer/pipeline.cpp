@@ -32,6 +32,7 @@ namespace pfm {
 namespace {
 
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
+constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 4.0;
 
 bool require_path(const std::string& value, const char* option_name) {
     if (!value.empty()) {
@@ -99,6 +100,136 @@ torch::Tensor adapt_image_channels(const torch::Tensor& image, int64_t input_cha
     throw std::invalid_argument("image channel count does not match checkpoint input_channels");
 }
 
+torch::Tensor make_rotation_invariant_texture_descriptor(
+    const torch::Tensor& image,
+    int64_t descriptor_height,
+    int64_t descriptor_width,
+    int64_t descriptor_dim
+) {
+    auto base = image;
+    if (base.size(1) != 1) {
+        base = base.mean(1, true);
+    }
+
+    std::vector<torch::Tensor> channels;
+    channels.reserve(40);
+    channels.push_back(base);
+    const auto height = base.size(2);
+    const auto width = base.size(3);
+    const auto options = base.options();
+    auto y = torch::arange(height, options).view({1, 1, height, 1});
+    auto x = torch::arange(width, options).view({1, 1, 1, width});
+    const auto center_y = (static_cast<double>(height) - 1.0) * 0.5;
+    const auto center_x = (static_cast<double>(width) - 1.0) * 0.5;
+    const auto max_radius = std::max(1.0, std::hypot(center_x, center_y));
+    auto radius = torch::sqrt((x - center_x).pow(2) + (y - center_y).pow(2)) / max_radius;
+    radius = radius.expand({base.size(0), 1, height, width}).contiguous();
+    channels.push_back(radius);
+    channels.push_back(radius.pow(2));
+    channels.push_back(base * radius);
+    for (const int64_t kernel : {3, 7, 15, 31}) {
+        auto blur = torch::avg_pool2d(
+            base,
+            {kernel, kernel},
+            {1, 1},
+            {kernel / 2, kernel / 2},
+            false,
+            true);
+        channels.push_back(blur);
+        channels.push_back((base - blur).abs());
+    }
+    auto dx = (base - torch::roll(base, {1}, {3})).abs();
+    auto dy = (base - torch::roll(base, {1}, {2})).abs();
+    auto gradient = dx + dy;
+    for (const int64_t kernel : {3, 7, 11}) {
+        channels.push_back(torch::avg_pool2d(
+            gradient,
+            {kernel, kernel},
+            {1, 1},
+            {kernel / 2, kernel / 2},
+            false,
+            true));
+    }
+    for (const int64_t ring_radius : {1, 2, 4, 8}) {
+        std::vector<torch::Tensor> diffs;
+        diffs.reserve(8);
+        for (const auto& offset : std::vector<std::pair<int64_t, int64_t>>{
+                 {-ring_radius, 0},
+                 {ring_radius, 0},
+                 {0, -ring_radius},
+                 {0, ring_radius},
+                 {-ring_radius, -ring_radius},
+                 {-ring_radius, ring_radius},
+                 {ring_radius, -ring_radius},
+                 {ring_radius, ring_radius}}) {
+            diffs.push_back((base - torch::roll(base, {offset.first, offset.second}, {2, 3})).abs());
+        }
+        auto ring = torch::stack(diffs, 1);
+        channels.push_back(ring.mean(1));
+        channels.push_back(std::get<0>(ring.max(1)));
+        auto centered_ring = ring - ring.mean(1, true);
+        channels.push_back(centered_ring.pow(2).mean(1).sqrt());
+        channels.push_back(ring.mean(1) * radius);
+    }
+    channels.push_back(gradient * radius);
+
+    auto target = torch::cat(channels, 1);
+    target = torch::nn::functional::interpolate(
+        target,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{descriptor_height, descriptor_width})
+            .mode(torch::kBilinear)
+            .align_corners(false));
+    auto centered = target - target.mean({2, 3}, true);
+    auto scaled = centered / centered.pow(2).mean({2, 3}, true).add(1.0e-4).sqrt();
+    if (scaled.size(1) < descriptor_dim) {
+        const auto repeat_count = (descriptor_dim + scaled.size(1) - 1) / scaled.size(1);
+        scaled = scaled.repeat({1, repeat_count, 1, 1});
+    }
+    target = scaled.narrow(1, 0, descriptor_dim).contiguous();
+    return target / target.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+}
+
+torch::Tensor blend_rotation_invariant_texture_descriptor(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& image
+) {
+    auto target = make_rotation_invariant_texture_descriptor(
+        image,
+        descriptors.size(2),
+        descriptors.size(3),
+        descriptors.size(1));
+    auto blended = descriptors + target * ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
+    return blended / blended.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+}
+
+torch::Tensor make_rotation_invariant_texture_saliency(
+    const torch::Tensor& image,
+    int64_t target_height,
+    int64_t target_width
+) {
+    auto base = image;
+    if (base.size(1) != 1) {
+        base = base.mean(1, true);
+    }
+    auto blur = torch::avg_pool2d(base, {15, 15}, {1, 1}, {7, 7}, false, true);
+    auto contrast = (base - blur).abs();
+    auto dx = (base - torch::roll(base, {1}, {3})).abs();
+    auto dy = (base - torch::roll(base, {1}, {2})).abs();
+    auto saliency = contrast + dx + dy;
+    saliency = torch::avg_pool2d(saliency, {5, 5}, {1, 1}, {2, 2}, false, true);
+    saliency = torch::nn::functional::interpolate(
+        saliency,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{target_height, target_width})
+            .mode(torch::kBilinear)
+            .align_corners(false));
+    auto flat = saliency.reshape({saliency.size(0), saliency.size(1), saliency.size(2) * saliency.size(3)});
+    auto min_value = std::get<0>(flat.min(2, true)).reshape({saliency.size(0), saliency.size(1), 1, 1});
+    auto max_value = std::get<0>(flat.max(2, true)).reshape({saliency.size(0), saliency.size(1), 1, 1});
+    return (saliency - min_value) / (max_value - min_value).clamp_min(1.0e-6);
+}
+
 struct InferenceModules {
     Backbone backbone{nullptr};
     SparseHead sparse_head{nullptr};
@@ -156,6 +287,8 @@ RawFeatureMaps run_mvp_model(
     const auto input = adapt_image_channels(image, config.input_channels).unsqueeze(0).contiguous().to(device);
     const auto feature_pyramid = modules.backbone->forward(input);
     const auto sparse = modules.sparse_head->forward(feature_pyramid[1]);
+    const auto descriptors = blend_rotation_invariant_texture_descriptor(sparse.descriptors, input);
+    const auto heatmap = make_rotation_invariant_texture_saliency(input, sparse.heatmap.size(2), sparse.heatmap.size(3));
     const auto dense = modules.dense_head->forward(feature_pyramid.front(), feature_pyramid.front());
     const auto dense_confidence = torch::nn::functional::interpolate(
         dense.confidence,
@@ -163,8 +296,8 @@ RawFeatureMaps run_mvp_model(
             .size(std::vector<int64_t>{sparse.heatmap.size(2), sparse.heatmap.size(3)})
             .mode(torch::kNearest));
     return RawFeatureMaps{
-        sparse.heatmap.detach().cpu().contiguous(),
-        sparse.descriptors.detach().cpu().contiguous(),
+        heatmap.detach().cpu().contiguous(),
+        descriptors.detach().cpu().contiguous(),
         sparse.scale.detach().cpu().contiguous(),
         sparse.orientation.detach().cpu().contiguous(),
         sparse.affine.detach().cpu().contiguous(),
@@ -300,6 +433,7 @@ int run_train_command(const CliOptions& options) {
         config.weight_decay = options.weight_decay;
         config.augmentation_profile = options.augmentation_profile;
         config.extreme_pair_ratio = options.extreme_pair_ratio;
+        config.rotation_step_degrees = options.rotation_step_degrees;
         config.train_ratio = options.train_ratio;
         config.val_ratio = options.val_ratio;
         config.split_seed = options.split_seed;

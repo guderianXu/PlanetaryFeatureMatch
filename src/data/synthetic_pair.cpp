@@ -11,6 +11,8 @@ AugmentationProfile toAugmentationProfile(SyntheticPairAugmentationProfile profi
     switch (profile) {
         case SyntheticPairAugmentationProfile::Mixed:
             return AugmentationProfile::Mixed;
+        case SyntheticPairAugmentationProfile::RotationOnly:
+            return AugmentationProfile::RotationOnly;
         case SyntheticPairAugmentationProfile::Mild:
             return AugmentationProfile::Mild;
         case SyntheticPairAugmentationProfile::Medium:
@@ -32,6 +34,7 @@ ImagePairAugmentationConfig toAugmentationConfig(const SyntheticPairConfig& conf
     result.brightness_delta = config.brightness_delta;
     result.contrast_scale = config.contrast_scale;
     result.noise_sigma = config.noise_sigma;
+    result.rotation_step_degrees = config.rotation_step_degrees;
     result.variant_index = config.variant_index;
     result.source_index = config.source_index;
     result.profile = toAugmentationProfile(config.augmentation_profile);
@@ -44,6 +47,9 @@ ImagePairAugmentationConfig toAugmentationConfig(const SyntheticPairConfig& conf
 SyntheticPairAugmentationProfile parse_synthetic_pair_augmentation_profile(const std::string& value) {
     if (value == "mixed") {
         return SyntheticPairAugmentationProfile::Mixed;
+    }
+    if (value == "rotation-only" || value == "rotation_only") {
+        return SyntheticPairAugmentationProfile::RotationOnly;
     }
     if (value == "mild") {
         return SyntheticPairAugmentationProfile::Mild;
@@ -64,6 +70,8 @@ std::string synthetic_pair_augmentation_profile_name(SyntheticPairAugmentationPr
     switch (profile) {
         case SyntheticPairAugmentationProfile::Mixed:
             return "mixed";
+        case SyntheticPairAugmentationProfile::RotationOnly:
+            return "rotation-only";
         case SyntheticPairAugmentationProfile::Mild:
             return "mild";
         case SyntheticPairAugmentationProfile::Medium:

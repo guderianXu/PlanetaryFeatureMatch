@@ -87,6 +87,22 @@ static void transformSamplerMixedQuarterTurnIsCleanRotationAnchor() {
     PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
 }
 
+static void transformSamplerMixedIncludesCleanThirtyDegreeAnchors() {
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::Mixed;
+    config.source_index = 0;
+    config.variant_index = 2;
+
+    const auto params = pfm::sampleImagePairTransform(config);
+
+    PFM_REQUIRE_CLOSE(params.rotation_degrees, 30.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_x, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.translation_y, 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.scale, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.gamma, 1.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
+}
+
 static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
@@ -130,6 +146,8 @@ void register_augment_tests() {
     register_test("transform sampler mixed includes quarter turn variants", transformSamplerMixedIncludesQuarterTurnVariants);
     register_test("transform sampler mixed quarter turn is clean rotation anchor",
                   transformSamplerMixedQuarterTurnIsCleanRotationAnchor);
+    register_test("transform sampler mixed includes clean thirty degree anchors",
+                  transformSamplerMixedIncludesCleanThirtyDegreeAnchors);
     register_test("image pair augmentor returns current training keys", imagePairAugmentorReturnsCurrentTrainingKeys);
     register_test("image pair augmentor mixed half turn warp crosses image",
                   imagePairAugmentorMixedHalfTurnWarpCrossesImage);

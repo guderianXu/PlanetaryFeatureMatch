@@ -45,6 +45,8 @@ ProfileStrength profileStrength(AugmentationProfile profile) {
             return ProfileStrength{18.0F, 55.0F, 0.30F, 0.18F, 0.35F, 0.030F};
         case AugmentationProfile::Mixed:
             return profileStrength(AugmentationProfile::Medium);
+        case AugmentationProfile::RotationOnly:
+            return ProfileStrength{};
     }
     return profileStrength(AugmentationProfile::Medium);
 }
@@ -78,6 +80,9 @@ void validateConfig(const ImagePairAugmentationConfig& config) {
     if (config.extreme_pair_ratio < 0.0 || config.extreme_pair_ratio > 1.0) {
         throw std::invalid_argument("extreme_pair_ratio must be between 0 and 1");
     }
+    if (config.rotation_step_degrees <= 0.0F || !std::isfinite(config.rotation_step_degrees)) {
+        throw std::invalid_argument("rotation_step_degrees must be positive and finite");
+    }
 }
 
 }  // namespace
@@ -94,6 +99,19 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     params.contrast_scale = config.contrast_scale;
     params.noise_sigma = config.noise_sigma;
 
+    if (config.profile == AugmentationProfile::RotationOnly) {
+        params.translation_x = 0.0F;
+        params.translation_y = 0.0F;
+        params.rotation_degrees = static_cast<float>(config.variant_index) * config.rotation_step_degrees;
+        params.scale = 1.0F;
+        params.brightness_delta = 0.0F;
+        params.contrast_scale = 1.0F;
+        params.noise_sigma = 0.0F;
+        params.gamma = 1.0F;
+        params.shadow_strength = 0.0F;
+        return params;
+    }
+
     if (!usesProfileAugmentation(config)) {
         return params;
     }
@@ -104,6 +122,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     const auto index = config.variant_index;
     const bool mixed_quarter_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 3;
     const bool mixed_half_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 7;
+    const bool mixed_full_rotation_anchor = config.profile == AugmentationProfile::Mixed && config.variant_index % 2 == 0;
 
     if (mixed_quarter_turn) {
         params.rotation_degrees += deterministicWave(source, index, 0.23F, 0.61F) >= 0.0F ? 90.0F : -90.0F;
@@ -113,6 +132,12 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     }
     if (mixed_half_turn) {
         params.rotation_degrees += deterministicWave(source, index, 0.19F, 0.43F) >= 0.0F ? 180.0F : -180.0F;
+        params.gamma = 1.0F;
+        params.shadow_strength = 0.0F;
+        return params;
+    }
+    if (mixed_full_rotation_anchor) {
+        params.rotation_degrees += static_cast<float>((config.variant_index % 24) * 15);
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
         return params;

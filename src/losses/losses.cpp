@@ -97,29 +97,10 @@ torch::Tensor normalizeDescriptors(const torch::Tensor& descriptors) {
     return descriptors / norm;
 }
 
-bool canUseCyclicDescriptorSimilarity(const torch::Tensor& descriptors) {
-    return descriptors.size(-1) >= 4 && descriptors.size(-1) % 4 == 0;
-}
-
 torch::Tensor cyclicDescriptorLogits(const torch::Tensor& descriptors_a, const torch::Tensor& descriptors_b) {
     auto normalized_a = normalizeDescriptors(descriptors_a);
     auto normalized_b = normalizeDescriptors(descriptors_b);
-    if (!canUseCyclicDescriptorSimilarity(normalized_a)) {
-        return torch::bmm(normalized_a, normalized_b.transpose(1, 2));
-    }
-
-    constexpr int64_t group_count = 4;
-    const auto batch = normalized_a.size(0);
-    const auto candidate_count = normalized_b.size(1);
-    const auto group_dim = normalized_a.size(2) / group_count;
-    auto grouped_b = normalized_b.reshape({batch, candidate_count, group_count, group_dim});
-    std::vector<torch::Tensor> shifted_scores;
-    shifted_scores.reserve(group_count);
-    for (int64_t shift = 0; shift < group_count; ++shift) {
-        auto shifted_b = torch::roll(grouped_b, {shift}, {2}).reshape({batch, candidate_count, group_count * group_dim});
-        shifted_scores.push_back(torch::bmm(normalized_a, shifted_b.transpose(1, 2)));
-    }
-    return std::get<0>(torch::stack(shifted_scores, -1).max(-1));
+    return torch::bmm(normalized_a, normalized_b.transpose(1, 2));
 }
 
 torch::Tensor cyclicCandidateDescriptorLogits(
@@ -128,24 +109,7 @@ torch::Tensor cyclicCandidateDescriptorLogits(
 ) {
     auto normalized_a = normalizeDescriptors(descriptors_a);
     auto normalized_candidates = candidate_descriptors / candidate_descriptors.pow(2).sum(3, true).clamp_min(1.0e-12).sqrt();
-    if (!canUseCyclicDescriptorSimilarity(normalized_a)) {
-        return (normalized_a.unsqueeze(2) * normalized_candidates).sum(3);
-    }
-
-    constexpr int64_t group_count = 4;
-    const auto batch = normalized_a.size(0);
-    const auto query_count = normalized_a.size(1);
-    const auto candidate_count = normalized_candidates.size(2);
-    const auto group_dim = normalized_a.size(2) / group_count;
-    auto grouped_a = normalized_a.reshape({batch, query_count, group_count, group_dim});
-    auto grouped_candidates = normalized_candidates.reshape({batch, query_count, candidate_count, group_count, group_dim});
-    std::vector<torch::Tensor> shifted_scores;
-    shifted_scores.reserve(group_count);
-    for (int64_t shift = 0; shift < group_count; ++shift) {
-        auto shifted_candidates = torch::roll(grouped_candidates, {shift}, {3});
-        shifted_scores.push_back((grouped_a.unsqueeze(2) * shifted_candidates).sum({3, 4}));
-    }
-    return std::get<0>(torch::stack(shifted_scores, -1).max(-1));
+    return (normalized_a.unsqueeze(2) * normalized_candidates).sum(3);
 }
 
 }  // namespace
@@ -247,7 +211,7 @@ torch::Tensor descriptor_diversity_loss(const torch::Tensor& descriptors) {
     auto similarity = torch::bmm(normalized, normalized.transpose(1, 2));
     auto eye = torch::eye(descriptor_count, descriptors.options()).unsqueeze(0).to(torch::kBool);
     auto off_diagonal = similarity.masked_select(eye.logical_not());
-    return torch::relu(off_diagonal).mean();
+    return off_diagonal.pow(2).mean();
 }
 
 torch::Tensor graph_matching_cross_entropy_loss(
