@@ -6,6 +6,7 @@ iteration,name,sparse_matches,features_a,features_b,elapsed,match_time,path
 041,max8192_grid32_kpc8_rotation_only_topk128_fastpath,213,5907,5511,29.157,0.090,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_041_max8192_grid32_kpc8_rotation_only_topk128_fastpath
 038,max2048_grid12_kpc8_rotation_only_topk64_fastpath,169,2048,2048,28.867,0.034,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_038_max2048_grid12_kpc8_rotation_only_topk64_fastpath
 037,max2048_grid12_kpc8_rotation_only_topk64,169,2048,2048,161.442,132.591,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_037_max2048_grid12_kpc8_rotation_only_topk64
+043,cli_sparse_geometry_filter_rotation_only_topk64,134,1499,1499,28.780,0.029,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_043_cli_sparse_geometry_filter_rotation_only_topk64
 036,max1499_grid12_kpc8_rotation_only_topk64,134,1499,1499,28.853,0.031,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_036_max1499_grid12_kpc8_rotation_only_topk64
 035,max1499_grid12_kpc8_rotation_only_topk32,120,1499,1499,28.924,0.023,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_035_max1499_grid12_kpc8_rotation_only_topk32
 034,max1499_grid12_kpc8_rotation_only,82,1499,1499,28.864,0.022,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_034_max1499_grid12_kpc8_rotation_only
@@ -13,4 +14,3 @@ iteration,name,sparse_matches,features_a,features_b,elapsed,match_time,path
 032,max1499_grid12_kpc8,50,1475,1420,31.368,2.294,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_032_max1499_grid12_kpc8
 030,max1499_grid12_kpc2,39,376,359,31.705,2.581,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_030_max1499_grid12_kpc2
 031,max1499_grid12_kpc4,38,745,716,32.842,3.594,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_031_max1499_grid12_kpc4
-011,max1499_min1499_grid12_nms2,36,188,180,32.134,2.220,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_011_max1499_min1499_grid12_nms2

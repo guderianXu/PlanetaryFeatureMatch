@@ -174,6 +174,42 @@ struct CheckpointConfig {
     int64_t graph_attention_layers = 1;
 };
 
+class ScopedEnvironmentOverride {
+public:
+    ScopedEnvironmentOverride(std::string name, const std::string& value)
+        : _name(std::move(name)), _active(!value.empty()) {
+        if (!_active) {
+            return;
+        }
+        const char* old_value = std::getenv(_name.c_str());
+        if (old_value != nullptr) {
+            _had_old_value = true;
+            _old_value = old_value;
+        }
+        setenv(_name.c_str(), value.c_str(), 1);
+    }
+
+    ScopedEnvironmentOverride(const ScopedEnvironmentOverride&) = delete;
+    ScopedEnvironmentOverride& operator=(const ScopedEnvironmentOverride&) = delete;
+
+    ~ScopedEnvironmentOverride() {
+        if (!_active) {
+            return;
+        }
+        if (_had_old_value) {
+            setenv(_name.c_str(), _old_value.c_str(), 1);
+        } else {
+            unsetenv(_name.c_str());
+        }
+    }
+
+private:
+    std::string _name;
+    bool _active = false;
+    bool _had_old_value = false;
+    std::string _old_value;
+};
+
 CheckpointConfig load_checkpoint_config(const std::string& checkpoint) {
     torch::serialize::InputArchive archive;
     archive.load_from(checkpoint);
@@ -852,6 +888,9 @@ int run_match_command(const CliOptions& options) {
 
     try {
         Timer total_timer;
+        ScopedEnvironmentOverride sparse_geometry_filter_env(
+            "PFM_SPARSE_GEOMETRY_FILTER",
+            options.sparse_geometry_filter);
         if (!checkpoint_can_load(options.checkpoint)) {
             std::cerr << "match failed: checkpoint cannot load: " << options.checkpoint << '\n';
             return 1;

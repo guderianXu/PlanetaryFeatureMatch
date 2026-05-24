@@ -1,0 +1,7 @@
+match debug: graph matcher skipped for sparse counts 1499x1499
+match debug: features_a=1499 features_b=1499 descriptor_matches=549 graph_matches=0
+match debug timing: descriptor_topk=0.020s
+match debug timing: topk_rotation=0.006s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=134
+match debug: returning rotation-only descriptor matches before projective filter
+matching complete: matches=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_043_cli_sparse_geometry_filter_rotation_only_topk64/matches.pt features_a=1499 features_b=1499 sparse_matches=134 dense_matches=0 correct_matches=0 wrong_matches=0 match_precision=0 elapsed=28.780s extract_a=15.211s extract_b=13.168s match_time=0.029s save=0.000s visualization=0.167s

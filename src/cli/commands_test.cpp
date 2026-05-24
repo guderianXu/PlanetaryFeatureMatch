@@ -363,6 +363,8 @@ static void parse_match_command() {
         "vis",
         "--min-keypoint-intensity",
         "0.08",
+        "--sparse-geometry-filter",
+        "rotation-only",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Match);
@@ -378,6 +380,7 @@ static void parse_match_command() {
     PFM_REQUIRE_CLOSE(parsed.semi_dense_threshold, 0.5, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.visualization_dir == "vis");
+    PFM_REQUIRE(parsed.sparse_geometry_filter == "rotation-only");
 }
 
 static void parse_match_defaults_to_sparse_mode() {
@@ -506,6 +509,24 @@ static void parseMatchInvalidModeThrows() {
         CLI::ParseError);
 }
 
+static void parse_match_invalid_sparse_geometry_filter_throws() {
+    PFM_REQUIRE_THROWS_AS(
+        pfm::parse_cli({
+            "pfm",
+            "match",
+            "--image-a",
+            "a.png",
+            "--image-b",
+            "b.png",
+            "--checkpoint",
+            "model.pt",
+            "--output",
+            "matches.pt",
+            "--sparse-geometry-filter",
+            "invalid"}),
+        CLI::ParseError);
+}
+
 static void top_level_help_lists_subcommand_options() {
     pfm::CliOptions options;
     auto app = pfm::build_cli_app(options);
@@ -528,6 +549,7 @@ static void top_level_help_lists_subcommand_options() {
     PFM_REQUIRE(help.find("--feature-a") != std::string::npos);
     PFM_REQUIRE(help.find("--feature-b") != std::string::npos);
     PFM_REQUIRE(help.find("--match-mode") != std::string::npos);
+    PFM_REQUIRE(help.find("--sparse-geometry-filter") != std::string::npos);
     PFM_REQUIRE(help.find("extract --image") != std::string::npos);
     PFM_REQUIRE(help.find("match --image-a") != std::string::npos);
     PFM_REQUIRE(help.find("eval --pairs") != std::string::npos);
@@ -628,6 +650,8 @@ void register_cli_tests() {
     register_test("parse_min_keypoint_intensity_out_of_range_throws", parse_min_keypoint_intensity_out_of_range_throws);
     register_test("parse_match_invalid_max_keypoints_throws", parse_match_invalid_max_keypoints_throws);
     register_test("parse_match_invalid_mode_throws", parseMatchInvalidModeThrows);
+    register_test("parse_match_invalid_sparse_geometry_filter_throws",
+                  parse_match_invalid_sparse_geometry_filter_throws);
     register_test("top_level_help_lists_subcommand_options", top_level_help_lists_subcommand_options);
     register_test("run_cli_help_returns_zero", run_cli_help_returns_zero);
     register_test(

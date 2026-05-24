@@ -21,9 +21,9 @@ Recommended balanced visual check:
 Key inference settings for the latest runs:
 
 ```bash
-PFM_SPARSE_GEOMETRY_FILTER=rotation-only
 PFM_DESCRIPTOR_TOPK_CANDIDATES=64
 ./build-pfm-verify-mamba/pfm_cli match \
+  --sparse-geometry-filter rotation-only \
   --max-keypoints 8192 \
   --keypoint-grid-rows 32 \
   --keypoint-grid-cols 32 \
@@ -36,4 +36,5 @@ Summary files:
 - `summary_latest.csv`: all preserved iterations with counts and paths.
 - `summary_best_by_matches.csv`: top iterations sorted by sparse match count.
 
-Default projective/RANSAC inference remains unchanged unless `PFM_SPARSE_GEOMETRY_FILTER=rotation-only` is set.
+Default projective/RANSAC inference remains unchanged unless `--sparse-geometry-filter rotation-only`
+or `PFM_SPARSE_GEOMETRY_FILTER=rotation-only` is set.
