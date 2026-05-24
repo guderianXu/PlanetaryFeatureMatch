@@ -1,0 +1,2 @@
+name=max1499_grid16_int004
+args=--max-keypoints 1499 --min-keypoints 1024 --keypoint-grid-rows 16 --keypoint-grid-cols 16 --nms-radius 2 --min-keypoint-intensity 0.04

@@ -1,0 +1,1 @@
+matching complete: matches=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_013_feat1499_topk32/matches.pt features_a=1499 features_b=1499 sparse_matches=5 dense_matches=0 correct_matches=0 wrong_matches=0 match_precision=0 elapsed=0.814s extract_a=0.000s extract_b=0.000s match_time=0.473s save=0.000s visualization=0.162s

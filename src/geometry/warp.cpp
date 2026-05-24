@@ -56,7 +56,59 @@ AffineTransform AffineTransform::scale_rotate(float scale, float radians, float 
     }};
 }
 
+ProjectiveTransform ProjectiveTransform::identity() {
+    return ProjectiveTransform{{1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F}};
+}
+
+ProjectiveTransform ProjectiveTransform::from_affine(const AffineTransform& transform) {
+    return ProjectiveTransform{{
+        transform.matrix[0],
+        transform.matrix[1],
+        transform.matrix[2],
+        transform.matrix[3],
+        transform.matrix[4],
+        transform.matrix[5],
+        0.0F,
+        0.0F,
+        1.0F,
+    }};
+}
+
+ProjectiveTransform ProjectiveTransform::inverse() const {
+    const auto& m = matrix;
+    const float c00 = m[4] * m[8] - m[5] * m[7];
+    const float c01 = -(m[3] * m[8] - m[5] * m[6]);
+    const float c02 = m[3] * m[7] - m[4] * m[6];
+    const float c10 = -(m[1] * m[8] - m[2] * m[7]);
+    const float c11 = m[0] * m[8] - m[2] * m[6];
+    const float c12 = -(m[0] * m[7] - m[1] * m[6]);
+    const float c20 = m[1] * m[5] - m[2] * m[4];
+    const float c21 = -(m[0] * m[5] - m[2] * m[3]);
+    const float c22 = m[0] * m[4] - m[1] * m[3];
+    const float determinant = m[0] * c00 + m[1] * c01 + m[2] * c02;
+    if (std::abs(determinant) < 1.0e-8F) {
+        throw std::invalid_argument("projective transform is singular");
+    }
+    const float inv_det = 1.0F / determinant;
+    return ProjectiveTransform{{
+        c00 * inv_det,
+        c10 * inv_det,
+        c20 * inv_det,
+        c01 * inv_det,
+        c11 * inv_det,
+        c21 * inv_det,
+        c02 * inv_det,
+        c12 * inv_det,
+        c22 * inv_det,
+    }};
+}
+
 torch::Tensor dense_warp_field(int64_t h, int64_t w, const AffineTransform& transform, torch::Device device) {
+    auto grid = make_xy_grid(h, w, device);
+    return warp_points(grid.reshape({h * w, 2}), transform).reshape({h, w, 2});
+}
+
+torch::Tensor dense_warp_field(int64_t h, int64_t w, const ProjectiveTransform& transform, torch::Device device) {
     auto grid = make_xy_grid(h, w, device);
     return warp_points(grid.reshape({h * w, 2}), transform).reshape({h, w, 2});
 }
@@ -82,6 +134,19 @@ torch::Tensor warp_points(const torch::Tensor& points, const AffineTransform& tr
     auto y = points.index({Slice(), 1});
     auto warped_x = x * transform.matrix[0] + y * transform.matrix[1] + transform.matrix[2];
     auto warped_y = x * transform.matrix[3] + y * transform.matrix[4] + transform.matrix[5];
+    return torch::stack({warped_x, warped_y}, 1);
+}
+
+torch::Tensor warp_points(const torch::Tensor& points, const ProjectiveTransform& transform) {
+    require_point_tensor(points);
+
+    using torch::indexing::Slice;
+    const auto& m = transform.matrix;
+    auto x = points.index({Slice(), 0});
+    auto y = points.index({Slice(), 1});
+    auto denominator = x * m[6] + y * m[7] + m[8];
+    auto warped_x = (x * m[0] + y * m[1] + m[2]) / denominator;
+    auto warped_y = (x * m[3] + y * m[4] + m[5]) / denominator;
     return torch::stack({warped_x, warped_y}, 1);
 }
 

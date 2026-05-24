@@ -43,6 +43,8 @@ void register_planetary_graph_matcher_tests();
 void register_feature_codec_tests();
 void register_feature_extractor_tests();
 void register_match_codec_tests();
+void register_match_metrics_tests();
+void register_checkpoint_gate_tests();
 void register_matching_pipeline_tests();
 void register_eval_pipeline_tests();
 void register_pipeline_tests();
@@ -80,6 +82,8 @@ int main() {
     register_feature_codec_tests();
     register_feature_extractor_tests();
     register_match_codec_tests();
+    register_match_metrics_tests();
+    register_checkpoint_gate_tests();
     register_matching_pipeline_tests();
     register_eval_pipeline_tests();
     register_pipeline_tests();

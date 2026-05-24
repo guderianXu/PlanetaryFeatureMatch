@@ -1,5 +1,7 @@
 #include "tests/test_harness.h"
 
+#include <limits>
+
 #include <torch/torch.h>
 
 #include "models/backbone.h"
@@ -35,8 +37,34 @@ static void backbone_uses_refinement_convolutions_in_each_stage() {
     PFM_REQUIRE(parameter_count(model) > 390000);
 }
 
+static void backbone_sanitizes_nonfinite_batchnorm_buffers_for_eval() {
+    pfm::Backbone model(1, 8);
+    for (auto& item : model->named_buffers(/*recurse=*/true)) {
+        if (item.key().find("running_mean") != std::string::npos ||
+            item.key().find("running_var") != std::string::npos) {
+            item.value().fill_(std::numeric_limits<float>::quiet_NaN());
+        }
+    }
+
+    model->sanitize_nonfinite_state();
+    model->eval();
+    auto outputs = model->forward(torch::randn({1, 1, 32, 32}, torch::kFloat32));
+
+    for (const auto& output : outputs) {
+        PFM_REQUIRE(torch::isfinite(output).all().item<bool>());
+    }
+    for (const auto& item : model->named_buffers(/*recurse=*/true)) {
+        if (item.key().find("running_mean") != std::string::npos ||
+            item.key().find("running_var") != std::string::npos) {
+            PFM_REQUIRE(torch::isfinite(item.value()).all().item<bool>());
+        }
+    }
+}
+
 void register_backbone_tests() {
     register_test("backbone returns four scales", backbone_returns_four_scales);
     register_test("backbone uses refinement convolutions in each stage",
                   backbone_uses_refinement_convolutions_in_each_stage);
+    register_test("backbone sanitizes nonfinite batchnorm buffers for eval",
+                  backbone_sanitizes_nonfinite_batchnorm_buffers_for_eval);
 }

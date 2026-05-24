@@ -18,7 +18,27 @@ torch::Tensor make_intensity_mask(const torch::Tensor& image, double min_keypoin
     validate_min_keypoint_intensity(min_keypoint_intensity);
     require_chw_image(image);
     const auto intensity = image.to(torch::kFloat32).mean(0).contiguous();
-    return intensity.ge(min_keypoint_intensity).to(torch::kFloat32).contiguous();
+    auto bright = intensity.ge(min_keypoint_intensity);
+    if (min_keypoint_intensity <= 0.0 || intensity.size(0) < 7 || intensity.size(1) < 7) {
+        return bright.to(torch::kFloat32).contiguous();
+    }
+
+    const int64_t kernel = 7;
+    auto local_support = torch::nn::functional::avg_pool2d(
+        bright.to(torch::kFloat32).reshape({1, 1, intensity.size(0), intensity.size(1)}),
+        torch::nn::functional::AvgPool2dFuncOptions({kernel, kernel})
+            .stride(1)
+            .padding(kernel / 2)
+            .count_include_pad(false));
+    auto local_mean = torch::nn::functional::avg_pool2d(
+        intensity.reshape({1, 1, intensity.size(0), intensity.size(1)}),
+        torch::nn::functional::AvgPool2dFuncOptions({kernel, kernel})
+            .stride(1)
+            .padding(kernel / 2)
+            .count_include_pad(false));
+    local_support = local_support.reshape({intensity.size(0), intensity.size(1)}).ge(0.25);
+    local_mean = local_mean.reshape({intensity.size(0), intensity.size(1)}).ge(min_keypoint_intensity);
+    return bright.logical_and(local_support).logical_and(local_mean).to(torch::kFloat32).contiguous();
 }
 
 }  // namespace pfm

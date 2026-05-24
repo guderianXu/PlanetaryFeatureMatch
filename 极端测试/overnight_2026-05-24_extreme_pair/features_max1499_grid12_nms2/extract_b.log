@@ -1,0 +1,1 @@
+extraction complete: features=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/features_max1499_grid12_nms2/b_features.pt sparse_features=1499 dense_features=66567 elapsed=14.212s image_load=0.021s model_forward=1.695s decode=12.233s save=0.001s visualization=0.079s

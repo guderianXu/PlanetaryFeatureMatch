@@ -1,0 +1,20 @@
+match debug: graph matcher skipped for sparse counts 1499x1499
+match debug: features_a=1499 features_b=1499 descriptor_matches=549 graph_matches=0
+match debug timing: descriptor_topk=0.016s
+match debug timing: topk_rotation=0.002s
+match debug: descriptor_topk_matches=23984 descriptor_topk_rotation_matches=82
+match debug timing: topk_projective=0.028s
+match debug: descriptor_topk_geometric_matches=5
+match debug: descriptor_mutual_geometric_matches=6
+match debug: descriptor_projective_rescue_matches=6
+match debug: descriptor_wide_topk_geometric_matches=6
+match debug: graph matcher skipped for sparse counts 1475x1420
+match debug: features_a=1475 features_b=1420 descriptor_matches=503 graph_matches=0
+match debug timing: descriptor_topk=0.001s
+match debug timing: topk_rotation=0.003s
+match debug: descriptor_topk_matches=23600 descriptor_topk_rotation_matches=129
+match debug timing: topk_projective=0.004s
+match debug: descriptor_topk_geometric_matches=50
+match debug: descriptor_mutual_geometric_matches=7
+match debug: descriptor_projective_rescue_matches=6
+matching complete: matches=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/debug_current/matches.pt features_a=1475 features_b=1420 sparse_matches=50 dense_matches=0 correct_matches=0 wrong_matches=0 match_precision=0 elapsed=31.213s extract_a=15.336s extract_b=13.210s match_time=2.279s save=0.000s visualization=0.163s

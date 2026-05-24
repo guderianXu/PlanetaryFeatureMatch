@@ -1,0 +1,9 @@
+checkpoint=runs/overnight_2026-05-24/current_best_rotation_viewpoint.pt
+max_keypoints=8192
+min_keypoints=0
+grid=32x32
+keypoints_per_cell=8
+nms_radius=1
+PFM_SPARSE_GEOMETRY_FILTER=rotation-only
+PFM_DESCRIPTOR_TOPK_CANDIDATES=64
+fastpath=skip_expensive_sparse_alternates_after_32_rotation_only_matches

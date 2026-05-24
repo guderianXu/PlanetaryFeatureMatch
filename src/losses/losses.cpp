@@ -97,13 +97,26 @@ torch::Tensor normalizeDescriptors(const torch::Tensor& descriptors) {
     return descriptors / norm;
 }
 
+bool supportsCyclicDescriptorShifts(const torch::Tensor& descriptors) {
+    return descriptors.size(2) >= 4 && descriptors.size(2) % 4 == 0;
+}
+
 torch::Tensor cyclicDescriptorLogits(const torch::Tensor& descriptors_a, const torch::Tensor& descriptors_b) {
     auto normalized_a = normalizeDescriptors(descriptors_a);
     auto normalized_b = normalizeDescriptors(descriptors_b);
-    return torch::bmm(normalized_a, normalized_b.transpose(1, 2));
+    auto best = torch::bmm(normalized_a, normalized_b.transpose(1, 2));
+    if (!supportsCyclicDescriptorShifts(descriptors_a)) {
+        return best;
+    }
+    const auto shift = descriptors_a.size(2) / 4;
+    for (int64_t turn = 1; turn < 4; ++turn) {
+        auto shifted_b = torch::roll(normalized_b, {turn * shift}, {2});
+        best = torch::maximum(best, torch::bmm(normalized_a, shifted_b.transpose(1, 2)));
+    }
+    return best;
 }
 
-torch::Tensor cyclicCandidateDescriptorLogits(
+torch::Tensor strictCandidateDescriptorLogits(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& candidate_descriptors
 ) {
@@ -194,7 +207,7 @@ torch::Tensor descriptor_candidate_cross_entropy_loss(
         throw std::invalid_argument("target_indices labels must be less than descriptor candidate count");
     }
 
-    auto logits = cyclicCandidateDescriptorLogits(descriptors_a, candidate_descriptors) * DESCRIPTOR_LOGIT_SCALE;
+    auto logits = strictCandidateDescriptorLogits(descriptors_a, candidate_descriptors) * DESCRIPTOR_LOGIT_SCALE;
     return torch::nn::functional::cross_entropy(logits.reshape({-1, candidate_count}), target_indices.reshape({-1}));
 }
 
@@ -272,7 +285,11 @@ torch::Tensor masked_smooth_l1_loss(
 torch::Tensor confidence_bce_loss(const torch::Tensor& confidence, const torch::Tensor& target) {
     requireSameDevice(confidence, target, "confidence", "target");
     auto expanded_target = expandScalarOrSameShape(target, confidence, "target");
-    auto probabilities = confidence.clamp(1.0e-6, 1.0 - 1.0e-6);
+    auto finite_confidence = torch::where(
+        torch::isfinite(confidence),
+        confidence,
+        torch::full_like(confidence, 0.5));
+    auto probabilities = finite_confidence.clamp(1.0e-6, 1.0 - 1.0e-6);
     return torch::binary_cross_entropy(probabilities, expanded_target.to(confidence.dtype()));
 }
 

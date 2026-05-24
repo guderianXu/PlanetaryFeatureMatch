@@ -1,13 +1,16 @@
 #pragma once
 
 #include <limits>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pfm {
 
 struct TrainConfig {
     std::string image_dir;
     std::string checkpoint;
+    std::string init_checkpoint;
     std::string device = "cpu";
     int epochs = 1;
     int batch_size = 1;
@@ -17,10 +20,17 @@ struct TrainConfig {
     int graph_attention_layers = 6;
     int resize = 512;
     int pairs_per_image = 1;
+    int max_train_batches = 0;
     std::string augmentation_profile = "mixed";
+    bool augmentation_curriculum = false;
     double extreme_pair_ratio = 0.2;
     double rotation_step_degrees = 15.0;
     std::string synthetic_pair_cache_dir;
+    std::vector<std::string> extra_synthetic_pair_cache_dirs;
+    std::vector<std::string> hard_synthetic_pair_cache_dirs;
+    int hard_synthetic_pair_cache_repeats = 3;
+    std::vector<int64_t> hard_synthetic_pair_cache_indices;
+    bool cache_only = false;
     std::string log_csv;
     bool synthetic_pair_cache_rebuild = false;
     std::string visualization_dir;
@@ -32,16 +42,20 @@ struct TrainConfig {
     int keypoint_grid_cols = 8;
     int keypoints_per_cell = 0;
     int nms_radius = 4;
-    double min_keypoint_intensity = 0.0;
+    double min_keypoint_intensity = 0.08;
     double learning_rate = 3.0e-4;
     double weight_decay = 5.0e-4;
     double gradient_clip_norm = 1.0;
-    double train_ratio = 0.8;
-    double val_ratio = 0.1;
+    double train_ratio = 1.0;
+    double val_ratio = 0.0;
     int split_seed = 42;
     int dataloader_workers = 0;
     int prefetch_batches = 2;
     bool pin_memory = false;
+    bool descriptor_only_finetune = false;
+    bool viewpoint_head_only_finetune = false;
+    bool graph_only_finetune = false;
+    bool descriptor_orientation_canonicalization = true;
 };
 
 struct TrainResult {

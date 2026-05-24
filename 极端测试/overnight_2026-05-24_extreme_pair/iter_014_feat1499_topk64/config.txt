@@ -1,0 +1,3 @@
+name=feat1499_topk64
+env=PFM_DESCRIPTOR_TOPK_CANDIDATES=64
+feature_dir=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/features_max1499_grid12_nms2

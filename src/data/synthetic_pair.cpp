@@ -21,6 +21,10 @@ AugmentationProfile toAugmentationProfile(SyntheticPairAugmentationProfile profi
             return AugmentationProfile::Hard;
         case SyntheticPairAugmentationProfile::Extreme:
             return AugmentationProfile::Extreme;
+        case SyntheticPairAugmentationProfile::Viewpoint:
+            return AugmentationProfile::Viewpoint;
+        case SyntheticPairAugmentationProfile::CompoundViewpoint:
+            return AugmentationProfile::CompoundViewpoint;
     }
     return AugmentationProfile::Mixed;
 }
@@ -63,6 +67,13 @@ SyntheticPairAugmentationProfile parse_synthetic_pair_augmentation_profile(const
     if (value == "extreme") {
         return SyntheticPairAugmentationProfile::Extreme;
     }
+    if (value == "viewpoint" || value == "cross-view" || value == "cross_view") {
+        return SyntheticPairAugmentationProfile::Viewpoint;
+    }
+    if (value == "compound-viewpoint" || value == "compound_viewpoint" || value == "rotation-viewpoint" ||
+        value == "rotation_viewpoint") {
+        return SyntheticPairAugmentationProfile::CompoundViewpoint;
+    }
     throw std::invalid_argument("unsupported synthetic pair augmentation profile: " + value);
 }
 
@@ -80,6 +91,10 @@ std::string synthetic_pair_augmentation_profile_name(SyntheticPairAugmentationPr
             return "hard";
         case SyntheticPairAugmentationProfile::Extreme:
             return "extreme";
+        case SyntheticPairAugmentationProfile::Viewpoint:
+            return "viewpoint";
+        case SyntheticPairAugmentationProfile::CompoundViewpoint:
+            return "compound-viewpoint";
     }
     return "mixed";
 }

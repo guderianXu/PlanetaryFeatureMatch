@@ -31,6 +31,10 @@ struct FeatureDecodeConfig {
     int keypoints_per_cell = 0;
     /// Sparse keypoint non-maximum suppression radius in feature-map pixels.
     int nms_radius = 4;
+    /// Radius for orientation-aware sparse descriptor pooling; 0 keeps the descriptor at the keypoint cell only.
+    int descriptor_pool_radius = 0;
+    /// Roll four-way orientation descriptor channel groups into the predicted local orientation frame.
+    bool descriptor_orientation_canonicalization = false;
 };
 
 /// Decodes sparse and dense feature tensors from raw network output maps.

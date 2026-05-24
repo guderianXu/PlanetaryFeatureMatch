@@ -1,6 +1,7 @@
 #include "augment/image_pair_augmentor.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <ATen/Functions.h>
@@ -24,41 +25,62 @@ AffineTransform makePairTransform(const torch::Tensor& image, const ImagePairTra
     return transform;
 }
 
-torch::Tensor affineWarpChw(const torch::Tensor& image, const AffineTransform& transform) {
+ProjectiveTransform makeProjectivePairTransform(const torch::Tensor& image, const ImagePairTransformParameters& params) {
+    const auto affine = makePairTransform(image, params);
+    const auto cx = static_cast<float>(width(image) - 1) * 0.5F;
+    const auto cy = static_cast<float>(height(image) - 1) * 0.5F;
+
+    const std::array<float, 9> shear{{
+        1.0F,
+        params.shear_x,
+        -params.shear_x * cy,
+        params.shear_y,
+        1.0F,
+        -params.shear_y * cx,
+        0.0F,
+        0.0F,
+        1.0F,
+    }};
+    const std::array<float, 9> a{{
+        affine.matrix[0],
+        affine.matrix[1],
+        affine.matrix[2],
+        affine.matrix[3],
+        affine.matrix[4],
+        affine.matrix[5],
+        0.0F,
+        0.0F,
+        1.0F,
+    }};
+    std::array<float, 9> composed{};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            composed[static_cast<size_t>(row * 3 + col)] =
+                shear[static_cast<size_t>(row * 3 + 0)] * a[static_cast<size_t>(0 * 3 + col)] +
+                shear[static_cast<size_t>(row * 3 + 1)] * a[static_cast<size_t>(1 * 3 + col)] +
+                shear[static_cast<size_t>(row * 3 + 2)] * a[static_cast<size_t>(2 * 3 + col)];
+        }
+    }
+    composed[6] = params.perspective_x;
+    composed[7] = params.perspective_y;
+    composed[8] = 1.0F - params.perspective_x * cx - params.perspective_y * cy;
+    return ProjectiveTransform{composed};
+}
+
+torch::Tensor projectiveWarpChw(const torch::Tensor& image, const ProjectiveTransform& transform) {
     const auto h = height(image);
     const auto w = width(image);
-    const auto options = image.options();
-    auto theta = torch::empty({1, 2, 3}, options);
-    theta.index_put_({0, 0, 0}, transform.matrix[0]);
-    theta.index_put_({0, 0, 1}, transform.matrix[1]);
-    theta.index_put_({0, 0, 2}, transform.matrix[2]);
-    theta.index_put_({0, 1, 0}, transform.matrix[3]);
-    theta.index_put_({0, 1, 1}, transform.matrix[4]);
-    theta.index_put_({0, 1, 2}, transform.matrix[5]);
+    const auto inverse = transform.inverse();
+    const auto output_grid = make_xy_grid(h, w, image.device());
+    const auto input_grid = warp_points(output_grid.reshape({h * w, 2}), inverse).reshape({h, w, 2});
 
-    const auto determinant = transform.matrix[0] * transform.matrix[4] - transform.matrix[1] * transform.matrix[3];
-    auto output_to_input = theta.clone();
-    output_to_input.index_put_({0, 0, 0}, transform.matrix[4] / determinant);
-    output_to_input.index_put_({0, 0, 1}, -transform.matrix[1] / determinant);
-    output_to_input.index_put_({0, 1, 0}, -transform.matrix[3] / determinant);
-    output_to_input.index_put_({0, 1, 1}, transform.matrix[0] / determinant);
-    output_to_input.index_put_(
-        {0, 0, 2},
-        (transform.matrix[1] * transform.matrix[5] - transform.matrix[4] * transform.matrix[2]) / determinant);
-    output_to_input.index_put_(
-        {0, 1, 2},
-        (transform.matrix[3] * transform.matrix[2] - transform.matrix[0] * transform.matrix[5]) / determinant);
-
-    auto normalized = output_to_input.clone();
-    normalized.index_put_({0, 0, 0}, output_to_input.index({0, 0, 0}));
-    normalized.index_put_({0, 0, 1}, output_to_input.index({0, 0, 1}) * static_cast<float>(h - 1) / static_cast<float>(w - 1));
-    normalized.index_put_({0, 0, 2}, (output_to_input.index({0, 0, 2}) * 2.0F + output_to_input.index({0, 0, 0}) * static_cast<float>(w - 1) + output_to_input.index({0, 0, 1}) * static_cast<float>(h - 1) - static_cast<float>(w - 1)) / static_cast<float>(w - 1));
-    normalized.index_put_({0, 1, 0}, output_to_input.index({0, 1, 0}) * static_cast<float>(w - 1) / static_cast<float>(h - 1));
-    normalized.index_put_({0, 1, 1}, output_to_input.index({0, 1, 1}));
-    normalized.index_put_({0, 1, 2}, (output_to_input.index({0, 1, 2}) * 2.0F + output_to_input.index({0, 1, 0}) * static_cast<float>(w - 1) + output_to_input.index({0, 1, 1}) * static_cast<float>(h - 1) - static_cast<float>(h - 1)) / static_cast<float>(h - 1));
-
-    auto grid = at::affine_grid_generator(normalized, std::vector<int64_t>{1, image.size(0), h, w}, true);
-    return at::grid_sampler(image.unsqueeze(0), grid, 0, 0, true).squeeze(0).contiguous();
+    using torch::indexing::Slice;
+    const auto input_x = input_grid.index({Slice(), Slice(), 0});
+    const auto input_y = input_grid.index({Slice(), Slice(), 1});
+    const auto norm_x = input_x / static_cast<float>(std::max<int64_t>(1, w - 1)) * 2.0F - 1.0F;
+    const auto norm_y = input_y / static_cast<float>(std::max<int64_t>(1, h - 1)) * 2.0F - 1.0F;
+    const auto sampler_grid = torch::stack({norm_x, norm_y}, 2).unsqueeze(0).contiguous();
+    return at::grid_sampler(image.unsqueeze(0), sampler_grid, 0, 0, true).squeeze(0).contiguous();
 }
 
 torch::Tensor makeDeterministicNoiseLike(const torch::Tensor& image) {
@@ -98,8 +120,8 @@ ImagePairSample ImagePairAugmentor::augment(const torch::Tensor& image) const {
     const auto params = sampleImagePairTransform(_config);
 
     auto view_a = clamp_unit(image.clone());
-    auto transform = makePairTransform(image, params);
-    auto view_b = affineWarpChw(image, transform);
+    auto transform = makeProjectivePairTransform(image, params);
+    auto view_b = projectiveWarpChw(image, transform);
     applyPhotometric(params, view_b);
     view_b = clamp_unit(view_b * params.contrast_scale + params.brightness_delta);
     if (params.noise_sigma > 0.0F) {
@@ -107,7 +129,9 @@ ImagePairSample ImagePairAugmentor::augment(const torch::Tensor& image) const {
     }
 
     auto field = dense_warp_field(height(image), width(image), transform, image.device());
-    auto mask = valid_warp_mask(field, height(image), width(image));
+    const auto finite_field = torch::isfinite(field);
+    field = torch::where(finite_field, field, torch::full_like(field, -1.0e6F));
+    auto mask = valid_warp_mask(field, height(image), width(image)).logical_and(finite_field.all(2));
 
     return ImagePairSample{view_a, view_b, field, mask};
 }

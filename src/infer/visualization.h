@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <string>
 
+#include <torch/torch.h>
+
 #include "infer/feature_codec.h"
 #include "infer/match_codec.h"
 
@@ -50,6 +52,17 @@ std::filesystem::path save_match_visualization(
     const std::string& visualization_dir
 );
 
+/// Saves a PNG side-by-side overlay and colors matches by dense warp correctness.
+/// Correct matches are green and incorrect matches are red.
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
+);
+
 /// Saves a PNG match overlay after scaling feature-map points to source image pixels.
 /// @param image_a_path First source image path.
 /// @param image_b_path Second source image path.
@@ -70,6 +83,20 @@ std::filesystem::path save_match_visualization(
     int64_t feature_map_a_height,
     int64_t feature_map_b_width,
     int64_t feature_map_b_height
+);
+
+/// Saves a scaled PNG match overlay and colors matches by dense warp correctness.
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_a_width,
+    int64_t feature_map_a_height,
+    int64_t feature_map_b_width,
+    int64_t feature_map_b_height,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
 );
 
 /// Saves a PNG match overlay using sparse match indices and feature-map keypoints.
@@ -96,6 +123,22 @@ std::filesystem::path save_match_visualization(
     int64_t feature_map_a_height,
     int64_t feature_map_b_width,
     int64_t feature_map_b_height
+);
+
+/// Saves a sparse/dense PNG match overlay and colors matches by dense warp correctness.
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_a_width,
+    int64_t feature_map_a_height,
+    int64_t feature_map_b_width,
+    int64_t feature_map_b_height,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
 );
 
 }  // namespace pfm

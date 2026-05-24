@@ -1,0 +1,2 @@
+name=max1024_grid16_topk32
+args=--max-keypoints 1024 --keypoint-grid-rows 16 --keypoint-grid-cols 16 --nms-radius 2

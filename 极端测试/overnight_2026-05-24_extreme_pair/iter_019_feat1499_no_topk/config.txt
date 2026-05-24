@@ -1,0 +1,3 @@
+name=feat1499_no_topk
+env=PFM_MATCH_DEBUG_USE_TOPK_GEOMETRY=0
+feature_dir=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/features_max1499_grid12_nms2

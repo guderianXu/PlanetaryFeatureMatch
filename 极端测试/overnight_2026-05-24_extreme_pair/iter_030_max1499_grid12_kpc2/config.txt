@@ -1,0 +1,2 @@
+name=max1499_grid12_kpc2
+args=--max-keypoints 1499 --min-keypoints 1024 --keypoint-grid-rows 12 --keypoint-grid-cols 12 --keypoints-per-cell 2 --nms-radius 2

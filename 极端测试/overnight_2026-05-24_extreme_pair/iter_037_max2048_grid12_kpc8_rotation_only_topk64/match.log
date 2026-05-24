@@ -1,0 +1,37 @@
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=730 graph_matches=0
+match debug timing: descriptor_topk=0.023s
+match debug timing: topk_rotation=0.007s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=169
+match debug: returning rotation-only descriptor matches before projective filter
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=730 graph_matches=0
+match debug timing: descriptor_topk=0.014s
+match debug timing: topk_rotation=0.007s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=169
+match debug: returning rotation-only descriptor matches before projective filter
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=877 graph_matches=0
+match debug timing: descriptor_topk=0.007s
+match debug timing: topk_rotation=0.007s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=87
+match debug: returning rotation-only descriptor matches before projective filter
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=877 graph_matches=0
+match debug timing: descriptor_topk=0.013s
+match debug timing: topk_rotation=0.006s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=87
+match debug: returning rotation-only descriptor matches before projective filter
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=712 graph_matches=0
+match debug timing: descriptor_topk=0.007s
+match debug timing: topk_rotation=0.007s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=176
+match debug: returning rotation-only descriptor matches before projective filter
+match debug: graph matcher skipped for sparse counts 2048x2048
+match debug: features_a=2048 features_b=2048 descriptor_matches=712 graph_matches=0
+match debug timing: descriptor_topk=0.017s
+match debug timing: topk_rotation=0.007s
+match debug: descriptor_topk_matches=65536 descriptor_topk_rotation_matches=176
+match debug: returning rotation-only descriptor matches before projective filter
+matching complete: matches=/home/xjw/code/deeplearning/PlanetaryFeatureMatch/极端测试/overnight_2026-05-24_extreme_pair/iter_037_max2048_grid12_kpc8_rotation_only_topk64/matches.pt features_a=2048 features_b=2048 sparse_matches=169 dense_matches=0 correct_matches=0 wrong_matches=0 match_precision=0 elapsed=161.442s extract_a=15.269s extract_b=13.200s match_time=132.591s save=0.000s visualization=0.176s

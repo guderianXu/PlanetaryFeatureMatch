@@ -13,6 +13,8 @@ struct ProfileStrength {
     float brightness = 0.0F;
     float contrast = 0.0F;
     float noise = 0.0F;
+    float shear = 0.0F;
+    float perspective = 0.0F;
 };
 
 float deterministicWave(int64_t source_index, int64_t variant_index, float frequency, float phase) {
@@ -36,13 +38,17 @@ AugmentationProfile mixedProfileForVariant(const ImagePairAugmentationConfig& co
 ProfileStrength profileStrength(AugmentationProfile profile) {
     switch (profile) {
         case AugmentationProfile::Mild:
-            return ProfileStrength{3.0F, 6.0F, 0.04F, 0.03F, 0.05F, 0.004F};
+            return ProfileStrength{3.0F, 6.0F, 0.04F, 0.03F, 0.05F, 0.004F, 0.0F, 0.0F};
         case AugmentationProfile::Medium:
-            return ProfileStrength{7.0F, 16.0F, 0.10F, 0.07F, 0.12F, 0.010F};
+            return ProfileStrength{7.0F, 16.0F, 0.10F, 0.07F, 0.12F, 0.010F, 0.0F, 0.0F};
         case AugmentationProfile::Hard:
-            return ProfileStrength{12.0F, 32.0F, 0.18F, 0.12F, 0.22F, 0.018F};
+            return ProfileStrength{12.0F, 32.0F, 0.18F, 0.12F, 0.22F, 0.018F, 0.0F, 0.0F};
         case AugmentationProfile::Extreme:
-            return ProfileStrength{18.0F, 55.0F, 0.30F, 0.18F, 0.35F, 0.030F};
+            return ProfileStrength{18.0F, 55.0F, 0.30F, 0.18F, 0.35F, 0.030F, 0.0F, 0.0F};
+        case AugmentationProfile::Viewpoint:
+            return ProfileStrength{24.0F, 45.0F, 0.30F, 0.12F, 0.22F, 0.018F, 0.32F, 0.00120F};
+        case AugmentationProfile::CompoundViewpoint:
+            return ProfileStrength{28.0F, 180.0F, 0.36F, 0.12F, 0.22F, 0.018F, 0.34F, 0.00135F};
         case AugmentationProfile::Mixed:
             return profileStrength(AugmentationProfile::Medium);
         case AugmentationProfile::RotationOnly:
@@ -123,6 +129,9 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     const bool mixed_quarter_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 3;
     const bool mixed_half_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 7;
     const bool mixed_full_rotation_anchor = config.profile == AugmentationProfile::Mixed && config.variant_index % 2 == 0;
+    const bool viewpoint_profile =
+        profile == AugmentationProfile::Viewpoint || profile == AugmentationProfile::CompoundViewpoint;
+    const bool compound_viewpoint_profile = profile == AugmentationProfile::CompoundViewpoint;
 
     if (mixed_quarter_turn) {
         params.rotation_degrees += deterministicWave(source, index, 0.23F, 0.61F) >= 0.0F ? 90.0F : -90.0F;
@@ -145,13 +154,25 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
 
     params.translation_x += std::round(deterministicWave(source, index, 1.37F, 0.71F) * strength.translation);
     params.translation_y += std::round(deterministicWave(source, index, 1.91F, 1.13F) * strength.translation);
-    params.rotation_degrees += deterministicWave(source, index, 0.73F, 1.53F) * strength.rotation;
+    if (compound_viewpoint_profile) {
+        params.rotation_degrees += static_cast<float>((config.variant_index % 24) * 15) +
+                                   deterministicWave(source, index, 0.73F, 1.53F) * 18.0F;
+    } else {
+        params.rotation_degrees += deterministicWave(source, index, 0.73F, 1.53F) * strength.rotation;
+    }
     params.scale *= 1.0F + deterministicWave(source, index, 0.41F, 0.37F) * strength.scale;
     params.brightness_delta += deterministicWave(source, index, 1.11F, 0.83F) * strength.brightness;
     params.contrast_scale *= 1.0F + deterministicWave(source, index, 0.97F, 1.31F) * strength.contrast;
     params.noise_sigma += std::abs(deterministicWave(source, index, 1.63F, 0.59F)) * strength.noise;
     params.gamma = 1.0F + deterministicWave(source, index, 0.67F, 1.79F) * 0.35F;
     params.shadow_strength = profile == AugmentationProfile::Extreme ? 0.30F : 0.12F;
+    if (viewpoint_profile) {
+        params.shear_x = deterministicWave(source, index, 0.89F, 0.47F) * strength.shear;
+        params.shear_y = deterministicWave(source, index, 1.07F, 0.73F) * strength.shear * 0.55F;
+        params.perspective_x = deterministicWave(source, index, 0.53F, 1.17F) * strength.perspective;
+        params.perspective_y = deterministicWave(source, index, 0.79F, 0.91F) * strength.perspective;
+        params.shadow_strength = 0.18F;
+    }
     return params;
 }
 

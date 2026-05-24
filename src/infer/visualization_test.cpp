@@ -71,6 +71,36 @@ bool has_yellow_pixel_near(const cv::Mat& image, int center_x, int center_y) {
     return false;
 }
 
+bool has_green_pixel_near(const cv::Mat& image, int center_x, int center_y) {
+    for (int y = std::max(0, center_y - 3); y <= std::min(image.rows - 1, center_y + 3); ++y) {
+        for (int x = std::max(0, center_x - 3); x <= std::min(image.cols - 1, center_x + 3); ++x) {
+            const auto pixel = image.at<cv::Vec3b>(y, x);
+            if (pixel[1] > 170 && pixel[0] < 80 && pixel[2] < 80) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool has_red_pixel_near(const cv::Mat& image, int center_x, int center_y) {
+    for (int y = std::max(0, center_y - 3); y <= std::min(image.rows - 1, center_y + 3); ++y) {
+        for (int x = std::max(0, center_x - 3); x <= std::min(image.cols - 1, center_x + 3); ++x) {
+            const auto pixel = image.at<cv::Vec3b>(y, x);
+            if (pixel[2] > 170 && pixel[0] < 80 && pixel[1] < 80) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+torch::Tensor make_shift_warp(int64_t height, int64_t width, float dx, float dy) {
+    auto y = torch::arange(height, torch::kFloat32).view({height, 1}).expand({height, width});
+    auto x = torch::arange(width, torch::kFloat32).view({1, width}).expand({height, width});
+    return torch::stack({x + dx, y + dy}, 2).contiguous();
+}
+
 pfm::FeatureSet make_feature_set(torch::Tensor keypoints) {
     const auto count = keypoints.size(0);
     return pfm::FeatureSet{
@@ -240,6 +270,33 @@ static void visualization_scales_match_points_to_image_pixels() {
     PFM_REQUIRE(!has_yellow_pixel_near(output, 5, 4));
 }
 
+static void visualization_colors_warp_correct_matches_green_and_wrong_matches_red() {
+    TempVisualizationDirectory temp_dir("pfm_visualize_warp_correctness");
+    const auto image_a_path = temp_dir.file("left.png");
+    const auto image_b_path = temp_dir.file("right.png");
+    write_test_image(image_a_path);
+    write_test_image(image_b_path);
+    const auto matches = make_match_set(
+        torch::tensor({{4.0F, 5.0F}, {18.0F, 10.0F}}, torch::kFloat32),
+        torch::tensor({{6.0F, 5.0F}, {20.0F, 18.0F}}, torch::kFloat32),
+        torch::tensor({1.0F, 1.0F}, torch::kFloat32));
+    const auto warp = make_shift_warp(24, 32, 2.0F, 0.0F);
+
+    const auto output_path = pfm::save_match_visualization(
+        image_a_path.string(),
+        image_b_path.string(),
+        matches,
+        temp_dir.file("vis").string(),
+        warp,
+        2.0);
+    const auto output = cv::imread(output_path.string(), cv::IMREAD_COLOR);
+
+    PFM_REQUIRE(has_green_pixel_near(output, 4, 5));
+    PFM_REQUIRE(has_green_pixel_near(output, 32 + 6, 5));
+    PFM_REQUIRE(has_red_pixel_near(output, 18, 10));
+    PFM_REQUIRE(has_red_pixel_near(output, 32 + 20, 18));
+}
+
 void register_visualization_tests() {
     register_test("visualization writes feature keypoint png", visualization_writes_feature_keypoint_png);
     register_test("visualization writes feature png without keypoints", visualization_writes_feature_png_without_keypoints);
@@ -249,4 +306,6 @@ void register_visualization_tests() {
     register_test("visualization writes match png without matches", visualization_writes_match_png_without_matches);
     register_test("visualization draws sparse match indices", visualization_draws_sparse_match_indices);
     register_test("visualization scales match points to image pixels", visualization_scales_match_points_to_image_pixels);
+    register_test("visualization colors warp correct matches green and wrong matches red",
+                  visualization_colors_warp_correct_matches_green_and_wrong_matches_red);
 }

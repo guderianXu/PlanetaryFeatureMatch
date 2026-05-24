@@ -26,12 +26,22 @@ public:
     /// @throws std::invalid_argument if feature is not a 4D tensor or its channel count does not match the constructor.
     SparseHeadOutput forward(const torch::Tensor& feature);
 
+    /// Loads current sparse-head checkpoints and falls back to a partial descriptor load for older descriptor towers.
+    void load_compatible(torch::serialize::InputArchive& archive);
+
 private:
     int64_t _input_channels;
     int64_t _descriptor_dim;
     torch::nn::Sequential _context{nullptr};
     torch::nn::Conv2d _heatmap{nullptr};
+    torch::nn::Conv2d _heatmap_viewpoint_context{nullptr};
     torch::nn::Sequential _descriptors{nullptr};
+    torch::nn::Conv2d _descriptor_multiscale{nullptr};
+    torch::nn::Conv2d _descriptor_attention{nullptr};
+    torch::nn::Conv2d _descriptor_viewpoint_context{nullptr};
+    torch::nn::Conv2d _descriptor_viewpoint_attention{nullptr};
+    torch::nn::Conv2d _descriptor_orientation_alignment{nullptr};
+    torch::nn::Conv2d _descriptor_dilated_context{nullptr};
     torch::nn::Conv2d _descriptor_skip{nullptr};
     torch::nn::Conv2d _scale{nullptr};
     torch::nn::Conv2d _orientation{nullptr};

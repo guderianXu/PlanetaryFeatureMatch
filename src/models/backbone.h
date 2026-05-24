@@ -20,6 +20,9 @@ public:
     /// @throws std::invalid_argument if x is not a 4D tensor or its channel count does not match the constructor.
     std::vector<torch::Tensor> forward(const torch::Tensor& x);
 
+    /// Replaces non-finite normalization buffers so legacy checkpoints remain usable in eval mode.
+    void sanitize_nonfinite_state();
+
 private:
     int64_t _input_channels;
     int64_t _base_channels;

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -127,6 +128,56 @@ std::vector<int64_t> sorted_match_indices(const torch::Tensor& confidence) {
     return indices;
 }
 
+void validate_warp(const torch::Tensor& warp_a_to_b, double correct_threshold_pixels) {
+    if (!warp_a_to_b.defined() || warp_a_to_b.dim() != 3 || warp_a_to_b.size(2) != 2) {
+        throw std::invalid_argument("match visualization warp_a_to_b must have shape HxWx2");
+    }
+    if (!std::isfinite(correct_threshold_pixels) || correct_threshold_pixels < 0.0) {
+        throw std::invalid_argument("match visualization correct_threshold_pixels must be non-negative and finite");
+    }
+}
+
+double scale_coordinate_to_warp(double coordinate, int image_size, int64_t warp_size) {
+    return (coordinate + 0.5) * static_cast<double>(warp_size) /
+               static_cast<double>(std::max(1, image_size)) -
+           0.5;
+}
+
+bool is_warp_correct_match(
+    const torch::Tensor& warp,
+    double correct_threshold_pixels,
+    float image_x_a,
+    float image_y_a,
+    float image_x_b,
+    float image_y_b,
+    int image_a_width,
+    int image_a_height,
+    int image_b_width,
+    int image_b_height
+) {
+    const auto warp_height = warp.size(0);
+    const auto warp_width = warp.size(1);
+    const auto warp_x_a = scale_coordinate_to_warp(image_x_a, image_a_width, warp_width);
+    const auto warp_y_a = scale_coordinate_to_warp(image_y_a, image_a_height, warp_height);
+    const auto source_x = static_cast<int64_t>(std::llround(warp_x_a));
+    const auto source_y = static_cast<int64_t>(std::llround(warp_y_a));
+    if (source_x < 0 || source_x >= warp_width || source_y < 0 || source_y >= warp_height) {
+        return false;
+    }
+
+    const auto expected_x = warp.index({source_y, source_x, 0}).item<float>();
+    const auto expected_y = warp.index({source_y, source_x, 1}).item<float>();
+    if (!std::isfinite(expected_x) || !std::isfinite(expected_y)) {
+        return false;
+    }
+
+    const auto warp_x_b = scale_coordinate_to_warp(image_x_b, image_b_width, warp_width);
+    const auto warp_y_b = scale_coordinate_to_warp(image_y_b, image_b_height, warp_height);
+    const auto dx = warp_x_b - static_cast<double>(expected_x);
+    const auto dy = warp_y_b - static_cast<double>(expected_y);
+    return std::sqrt(dx * dx + dy * dy) <= correct_threshold_pixels;
+}
+
 MatchSet scaled_match_set(
     const MatchSet& match_set,
     int image_a_width,
@@ -212,20 +263,54 @@ MatchSet concatenate_match_points(const MatchSet& sparse_points, const MatchSet&
         torch::cat({sparse_points.confidence, dense_points.confidence}, 0).contiguous()};
 }
 
-void draw_matches(cv::Mat& canvas, int image_b_offset, const MatchSet& match_set) {
+void draw_matches(
+    cv::Mat& canvas,
+    int image_b_offset,
+    int image_a_width,
+    int image_a_height,
+    int image_b_width,
+    int image_b_height,
+    const MatchSet& match_set,
+    const torch::Tensor* warp_a_to_b,
+    double correct_threshold_pixels
+) {
+    const bool use_warp_colors = warp_a_to_b != nullptr && warp_a_to_b->defined();
+    torch::Tensor warp;
+    if (use_warp_colors) {
+        validate_warp(*warp_a_to_b, correct_threshold_pixels);
+        warp = warp_a_to_b->to(torch::kCPU, torch::kFloat32).contiguous();
+    }
     const auto points_a = match_set.points_a.to(torch::kCPU, torch::kFloat32).contiguous();
     const auto points_b = match_set.points_b.to(torch::kCPU, torch::kFloat32).contiguous();
     const auto confidence = match_set.confidence.to(torch::kCPU, torch::kFloat32).contiguous();
     validate_match_points(points_a, points_b, confidence);
     for (const auto index : sorted_match_indices(confidence)) {
         const auto score = std::max(0.0F, std::min(1.0F, confidence.index({index}).item<float>()));
-        const cv::Scalar color(0, 80.0 + 175.0 * score, 255.0 * score);
+        const auto image_x_a = points_a.index({index, 0}).item<float>();
+        const auto image_y_a = points_a.index({index, 1}).item<float>();
+        const auto image_x_b = points_b.index({index, 0}).item<float>();
+        const auto image_y_b = points_b.index({index, 1}).item<float>();
+        const cv::Scalar color = use_warp_colors
+            ? (is_warp_correct_match(
+                   warp,
+                   correct_threshold_pixels,
+                   image_x_a,
+                   image_y_a,
+                   image_x_b,
+                   image_y_b,
+                   image_a_width,
+                   image_a_height,
+                   image_b_width,
+                   image_b_height)
+                   ? cv::Scalar(0, 220, 0)
+                   : cv::Scalar(0, 0, 255))
+            : cv::Scalar(0, 80.0 + 175.0 * score, 255.0 * score);
         const cv::Point point_a(
-            static_cast<int>(std::round(points_a.index({index, 0}).item<float>())),
-            static_cast<int>(std::round(points_a.index({index, 1}).item<float>())));
+            static_cast<int>(std::round(image_x_a)),
+            static_cast<int>(std::round(image_y_a)));
         const cv::Point point_b(
-            image_b_offset + static_cast<int>(std::round(points_b.index({index, 0}).item<float>())),
-            static_cast<int>(std::round(points_b.index({index, 1}).item<float>())));
+            image_b_offset + static_cast<int>(std::round(image_x_b)),
+            static_cast<int>(std::round(image_y_b)));
         cv::line(canvas, point_a, point_b, color, 1, cv::LINE_AA);
         cv::circle(canvas, point_a, 2, color, 1, cv::LINE_AA);
         cv::circle(canvas, point_b, 2, color, 1, cv::LINE_AA);
@@ -271,7 +356,34 @@ std::filesystem::path save_match_visualization(
     const auto image_a = read_color_image(image_a_path);
     const auto image_b = read_color_image(image_b_path);
     auto canvas = make_side_by_side(image_a, image_b);
-    draw_matches(canvas, image_a.cols, match_set);
+    draw_matches(canvas, image_a.cols, image_a.cols, image_a.rows, image_b.cols, image_b.rows, match_set, nullptr, 0.0);
+    const auto output_path = std::filesystem::path(visualization_dir) /
+                             (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
+    write_png(output_path, canvas);
+    return output_path;
+}
+
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
+) {
+    const auto image_a = read_color_image(image_a_path);
+    const auto image_b = read_color_image(image_b_path);
+    auto canvas = make_side_by_side(image_a, image_b);
+    draw_matches(
+        canvas,
+        image_a.cols,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        match_set,
+        &warp_a_to_b,
+        correct_threshold_pixels);
     const auto output_path = std::filesystem::path(visualization_dir) /
                              (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
     write_png(output_path, canvas);
@@ -294,6 +406,10 @@ std::filesystem::path save_match_visualization(
     draw_matches(
         canvas,
         image_a.cols,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
         scaled_match_set(
             match_set,
             image_a.cols,
@@ -303,7 +419,49 @@ std::filesystem::path save_match_visualization(
             feature_map_a_width,
             feature_map_a_height,
             feature_map_b_width,
-            feature_map_b_height));
+            feature_map_b_height),
+        nullptr,
+        0.0);
+    const auto output_path = std::filesystem::path(visualization_dir) /
+                             (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
+    write_png(output_path, canvas);
+    return output_path;
+}
+
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_a_width,
+    int64_t feature_map_a_height,
+    int64_t feature_map_b_width,
+    int64_t feature_map_b_height,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
+) {
+    const auto image_a = read_color_image(image_a_path);
+    const auto image_b = read_color_image(image_b_path);
+    auto canvas = make_side_by_side(image_a, image_b);
+    draw_matches(
+        canvas,
+        image_a.cols,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        scaled_match_set(
+            match_set,
+            image_a.cols,
+            image_a.rows,
+            image_b.cols,
+            image_b.rows,
+            feature_map_a_width,
+            feature_map_a_height,
+            feature_map_b_width,
+            feature_map_b_height),
+        &warp_a_to_b,
+        correct_threshold_pixels);
     const auto output_path = std::filesystem::path(visualization_dir) /
                              (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
     write_png(output_path, canvas);
@@ -345,9 +503,73 @@ std::filesystem::path save_match_visualization(
         feature_map_a_width,
         feature_map_a_height,
         feature_map_b_width,
+            feature_map_b_height);
+    auto canvas = make_side_by_side(image_a, image_b);
+    draw_matches(
+        canvas,
+        image_a.cols,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        concatenate_match_points(sparse_points, dense_points),
+        nullptr,
+        0.0);
+    const auto output_path = std::filesystem::path(visualization_dir) /
+                             (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
+    write_png(output_path, canvas);
+    return output_path;
+}
+
+std::filesystem::path save_match_visualization(
+    const std::string& image_a_path,
+    const std::string& image_b_path,
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const MatchSet& match_set,
+    const std::string& visualization_dir,
+    int64_t feature_map_a_width,
+    int64_t feature_map_a_height,
+    int64_t feature_map_b_width,
+    int64_t feature_map_b_height,
+    const torch::Tensor& warp_a_to_b,
+    double correct_threshold_pixels
+) {
+    const auto image_a = read_color_image(image_a_path);
+    const auto image_b = read_color_image(image_b_path);
+    const auto sparse_points = make_sparse_match_points(
+        features_a,
+        features_b,
+        match_set,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        feature_map_a_width,
+        feature_map_a_height,
+        feature_map_b_width,
+        feature_map_b_height);
+    const auto dense_points = scaled_match_set(
+        match_set,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        feature_map_a_width,
+        feature_map_a_height,
+        feature_map_b_width,
         feature_map_b_height);
     auto canvas = make_side_by_side(image_a, image_b);
-    draw_matches(canvas, image_a.cols, concatenate_match_points(sparse_points, dense_points));
+    draw_matches(
+        canvas,
+        image_a.cols,
+        image_a.cols,
+        image_a.rows,
+        image_b.cols,
+        image_b.rows,
+        concatenate_match_points(sparse_points, dense_points),
+        &warp_a_to_b,
+        correct_threshold_pixels);
     const auto output_path = std::filesystem::path(visualization_dir) /
                              (sanitized_stem(image_a_path) + "__" + sanitized_stem(image_b_path) + "_matches.png");
     write_png(output_path, canvas);

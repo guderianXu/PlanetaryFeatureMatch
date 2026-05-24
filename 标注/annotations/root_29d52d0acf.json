@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "pair_id": "root_29d52d0acf",
+  "image_a": "20260510T173954657_NAS_PAN_L2b.tif",
+  "image_b": "20260510T191252977_NAS_PAN_L2b.tif",
+  "image_size_a": [
+    4024,
+    3036
+  ],
+  "image_size_b": [
+    4024,
+    3036
+  ],
+  "matches": [],
+  "updated_at": "2026-05-24T23:15:58+0800"
+}

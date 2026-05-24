@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <torch/torch.h>
@@ -10,6 +12,11 @@
 
 namespace pfm {
 namespace {
+
+constexpr float DESCRIPTOR_POOL_CENTER_WEIGHT = 8.0F;
+constexpr float DESCRIPTOR_POOL_AXIS_WEIGHT = 1.0F;
+constexpr float DESCRIPTOR_POOL_DIAGONAL_WEIGHT = 0.5F;
+constexpr double PI = 3.14159265358979323846;
 
 void validateMap(const torch::Tensor& tensor, const char* name) {
     if (!tensor.defined()) {
@@ -53,6 +60,9 @@ void validateDecodeConfig(const FeatureDecodeConfig& config) {
     }
     if (config.nms_radius < 0) {
         throw std::invalid_argument("nms_radius must be non-negative");
+    }
+    if (config.descriptor_pool_radius < 0) {
+        throw std::invalid_argument("descriptor_pool_radius must be non-negative");
     }
 }
 
@@ -125,10 +135,16 @@ std::vector<SparseCandidate> makeNmsCandidates(
     int nms_radius
 ) {
     std::vector<SparseCandidate> candidates;
-    for (int64_t y = 0; y < heatmap.size(2); ++y) {
-        for (int64_t x = 0; x < heatmap.size(3); ++x) {
-            if (valid_mask.index({y, x}).item<bool>()) {
-                candidates.push_back(SparseCandidate{y, x, heatmap.index({0, 0, y, x}).item<float>()});
+    const int64_t height = heatmap.size(2);
+    const int64_t width = heatmap.size(3);
+    const auto* heatmap_data = heatmap.data_ptr<float>();
+    const auto* mask_data = valid_mask.data_ptr<bool>();
+    candidates.reserve(static_cast<std::size_t>(height * width));
+    for (int64_t y = 0; y < height; ++y) {
+        for (int64_t x = 0; x < width; ++x) {
+            const auto offset = y * width + x;
+            if (mask_data[offset]) {
+                candidates.push_back(SparseCandidate{y, x, heatmap_data[offset]});
             }
         }
     }
@@ -258,6 +274,275 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(
     return selected;
 }
 
+void appendRawDescriptor(
+    std::vector<float>& output,
+    const float* descriptor_data,
+    int64_t descriptor_channels,
+    int64_t height,
+    int64_t width,
+    int64_t y,
+    int64_t x
+) {
+    const auto spatial_offset = y * width + x;
+    for (int64_t channel = 0; channel < descriptor_channels; ++channel) {
+        output.push_back(descriptor_data[channel * height * width + spatial_offset]);
+    }
+}
+
+void addBilinearDescriptorSample(
+    std::vector<float>& accumulator,
+    float& weight_sum,
+    const float* descriptor_data,
+    const bool* mask_data,
+    int64_t descriptor_channels,
+    int64_t height,
+    int64_t width,
+    float sample_y,
+    float sample_x,
+    float sample_weight
+) {
+    if (!std::isfinite(sample_y) || !std::isfinite(sample_x) || sample_weight <= 0.0F ||
+        sample_y < 0.0F || sample_x < 0.0F ||
+        sample_y > static_cast<float>(height - 1) || sample_x > static_cast<float>(width - 1)) {
+        return;
+    }
+
+    const auto y0 = static_cast<int64_t>(std::floor(sample_y));
+    const auto x0 = static_cast<int64_t>(std::floor(sample_x));
+    const auto y1 = std::min<int64_t>(height - 1, y0 + 1);
+    const auto x1 = std::min<int64_t>(width - 1, x0 + 1);
+    const auto dy = sample_y - static_cast<float>(y0);
+    const auto dx = sample_x - static_cast<float>(x0);
+    const std::vector<std::pair<int64_t, float>> y_weights =
+        y0 == y1
+            ? std::vector<std::pair<int64_t, float>>{{y0, 1.0F}}
+            : std::vector<std::pair<int64_t, float>>{{y0, 1.0F - dy}, {y1, dy}};
+    const std::vector<std::pair<int64_t, float>> x_weights =
+        x0 == x1
+            ? std::vector<std::pair<int64_t, float>>{{x0, 1.0F}}
+            : std::vector<std::pair<int64_t, float>>{{x0, 1.0F - dx}, {x1, dx}};
+
+    for (const auto& [yy, yw] : y_weights) {
+        for (const auto& [xx, xw] : x_weights) {
+            const auto spatial_offset = yy * width + xx;
+            if (!mask_data[spatial_offset]) {
+                continue;
+            }
+            const auto weight = sample_weight * yw * xw;
+            if (weight <= 0.0F) {
+                continue;
+            }
+            for (int64_t channel = 0; channel < descriptor_channels; ++channel) {
+                accumulator[static_cast<std::size_t>(channel)] +=
+                    descriptor_data[channel * height * width + spatial_offset] * weight;
+            }
+            weight_sum += weight;
+        }
+    }
+}
+
+void appendOrientationPooledDescriptor(
+    std::vector<float>& output,
+    const float* descriptor_data,
+    const float* orientation_data,
+    const bool* mask_data,
+    int64_t descriptor_channels,
+    int64_t height,
+    int64_t width,
+    int64_t y,
+    int64_t x,
+    int descriptor_pool_radius
+) {
+    if (descriptor_pool_radius <= 0) {
+        appendRawDescriptor(output, descriptor_data, descriptor_channels, height, width, y, x);
+        return;
+    }
+
+    std::vector<float> accumulator(static_cast<std::size_t>(descriptor_channels), 0.0F);
+    float weight_sum = 0.0F;
+    const auto spatial_offset = y * width + x;
+    addBilinearDescriptorSample(
+        accumulator,
+        weight_sum,
+        descriptor_data,
+        mask_data,
+        descriptor_channels,
+        height,
+        width,
+        static_cast<float>(y),
+        static_cast<float>(x),
+        DESCRIPTOR_POOL_CENTER_WEIGHT);
+
+    float axis_x = orientation_data[spatial_offset];
+    float axis_y = orientation_data[height * width + spatial_offset];
+    const auto axis_norm = std::sqrt(axis_x * axis_x + axis_y * axis_y);
+    if (!std::isfinite(axis_norm) || axis_norm <= 1.0e-6F) {
+        axis_x = 1.0F;
+        axis_y = 0.0F;
+    } else {
+        axis_x /= axis_norm;
+        axis_y /= axis_norm;
+    }
+    const auto ortho_x = -axis_y;
+    const auto ortho_y = axis_x;
+    for (int radius = 1; radius <= descriptor_pool_radius; ++radius) {
+        const auto step = static_cast<float>(radius);
+        const auto axis_weight = DESCRIPTOR_POOL_AXIS_WEIGHT / step;
+        addBilinearDescriptorSample(
+            accumulator,
+            weight_sum,
+            descriptor_data,
+            mask_data,
+            descriptor_channels,
+            height,
+            width,
+            static_cast<float>(y) + axis_y * step,
+            static_cast<float>(x) + axis_x * step,
+            axis_weight);
+        addBilinearDescriptorSample(
+            accumulator,
+            weight_sum,
+            descriptor_data,
+            mask_data,
+            descriptor_channels,
+            height,
+            width,
+            static_cast<float>(y) - axis_y * step,
+            static_cast<float>(x) - axis_x * step,
+            axis_weight);
+        addBilinearDescriptorSample(
+            accumulator,
+            weight_sum,
+            descriptor_data,
+            mask_data,
+            descriptor_channels,
+            height,
+            width,
+            static_cast<float>(y) + ortho_y * step,
+            static_cast<float>(x) + ortho_x * step,
+            axis_weight);
+        addBilinearDescriptorSample(
+            accumulator,
+            weight_sum,
+            descriptor_data,
+            mask_data,
+            descriptor_channels,
+            height,
+            width,
+            static_cast<float>(y) - ortho_y * step,
+            static_cast<float>(x) - ortho_x * step,
+            axis_weight);
+        if (descriptor_pool_radius > 1) {
+            const auto diagonal_weight = DESCRIPTOR_POOL_DIAGONAL_WEIGHT / step;
+            addBilinearDescriptorSample(
+                accumulator,
+                weight_sum,
+                descriptor_data,
+                mask_data,
+                descriptor_channels,
+                height,
+                width,
+                static_cast<float>(y) + (axis_y + ortho_y) * step,
+                static_cast<float>(x) + (axis_x + ortho_x) * step,
+                diagonal_weight);
+            addBilinearDescriptorSample(
+                accumulator,
+                weight_sum,
+                descriptor_data,
+                mask_data,
+                descriptor_channels,
+                height,
+                width,
+                static_cast<float>(y) + (axis_y - ortho_y) * step,
+                static_cast<float>(x) + (axis_x - ortho_x) * step,
+                diagonal_weight);
+            addBilinearDescriptorSample(
+                accumulator,
+                weight_sum,
+                descriptor_data,
+                mask_data,
+                descriptor_channels,
+                height,
+                width,
+                static_cast<float>(y) + (-axis_y + ortho_y) * step,
+                static_cast<float>(x) + (-axis_x + ortho_x) * step,
+                diagonal_weight);
+            addBilinearDescriptorSample(
+                accumulator,
+                weight_sum,
+                descriptor_data,
+                mask_data,
+                descriptor_channels,
+                height,
+                width,
+                static_cast<float>(y) - (axis_y + ortho_y) * step,
+                static_cast<float>(x) - (axis_x + ortho_x) * step,
+                diagonal_weight);
+        }
+    }
+
+    if (weight_sum <= 0.0F) {
+        appendRawDescriptor(output, descriptor_data, descriptor_channels, height, width, y, x);
+        return;
+    }
+    float descriptor_norm = 0.0F;
+    for (const auto value : accumulator) {
+        descriptor_norm += value * value;
+    }
+    descriptor_norm = std::sqrt(descriptor_norm);
+    if (!std::isfinite(descriptor_norm) || descriptor_norm <= 1.0e-12F) {
+        appendRawDescriptor(output, descriptor_data, descriptor_channels, height, width, y, x);
+        return;
+    }
+    for (auto value : accumulator) {
+        output.push_back(value / descriptor_norm);
+    }
+}
+
+int64_t predictedOrientationQuarterTurn(
+    const float* orientation_data,
+    int64_t height,
+    int64_t width,
+    int64_t y,
+    int64_t x
+) {
+    const auto spatial_offset = y * width + x;
+    const auto axis_x = orientation_data[spatial_offset];
+    const auto axis_y = orientation_data[height * width + spatial_offset];
+    const auto axis_norm = std::sqrt(axis_x * axis_x + axis_y * axis_y);
+    if (!std::isfinite(axis_norm) || axis_norm <= 1.0e-6F) {
+        return 0;
+    }
+    const auto angle = std::atan2(static_cast<double>(axis_y), static_cast<double>(axis_x));
+    auto turns = static_cast<int64_t>(std::llround(angle / (PI * 0.5)));
+    turns %= 4;
+    if (turns < 0) {
+        turns += 4;
+    }
+    return turns;
+}
+
+void canonicalizeLastDescriptorOrientation(
+    std::vector<float>& descriptors,
+    int64_t descriptor_channels,
+    int64_t quarter_turns
+) {
+    if (quarter_turns == 0 || descriptor_channels < 4 || descriptor_channels % 4 != 0 ||
+        static_cast<int64_t>(descriptors.size()) < descriptor_channels) {
+        return;
+    }
+    const auto group_channels = descriptor_channels / 4;
+    const auto left_shift = (quarter_turns * group_channels) % descriptor_channels;
+    const auto begin = descriptors.size() - static_cast<std::size_t>(descriptor_channels);
+    std::vector<float> original(
+        descriptors.begin() + static_cast<std::ptrdiff_t>(begin),
+        descriptors.end());
+    for (int64_t channel = 0; channel < descriptor_channels; ++channel) {
+        descriptors[begin + static_cast<std::size_t>(channel)] =
+            original[static_cast<std::size_t>((channel + left_shift) % descriptor_channels)];
+    }
+}
+
 torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width) {
     if (!mask.defined()) {
         return torch::ones({height, width}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
@@ -344,20 +629,41 @@ FeatureSet decode_feature_maps(
 
     std::vector<float> sparse_scores;
     sparse_scores.reserve(static_cast<size_t>(sparse_count));
+    const auto descriptor_channels = descriptors.size(1);
+    const auto* descriptor_data = descriptors.data_ptr<float>();
+    const auto* scale_data = scale.data_ptr<float>();
+    const auto* orientation_data = orientation.data_ptr<float>();
+    const auto* affine_data = affine.data_ptr<float>();
+    const auto* valid_mask_data = valid_mask.data_ptr<bool>();
     for (const auto& candidate : selected_candidates) {
         const int64_t y = candidate.y;
         const int64_t x = candidate.x;
         appendPoint(sparse_points, y, x);
         sparse_scores.push_back(candidate.score);
-        for (int64_t channel = 0; channel < descriptors.size(1); ++channel) {
-            sparse_descriptors.push_back(descriptors.index({0, channel, y, x}).item<float>());
+        const auto spatial_offset = y * width + x;
+        appendOrientationPooledDescriptor(
+            sparse_descriptors,
+            descriptor_data,
+            orientation_data,
+            valid_mask_data,
+            descriptor_channels,
+            height,
+            width,
+            y,
+            x,
+            config.descriptor_pool_radius);
+        if (config.descriptor_orientation_canonicalization) {
+            canonicalizeLastDescriptorOrientation(
+                sparse_descriptors,
+                descriptor_channels,
+                predictedOrientationQuarterTurn(orientation_data, height, width, y, x));
         }
-        sparse_scale.push_back(scale.index({0, 0, y, x}).item<float>());
+        sparse_scale.push_back(scale_data[spatial_offset]);
         for (int64_t channel = 0; channel < orientation.size(1); ++channel) {
-            sparse_orientation.push_back(orientation.index({0, channel, y, x}).item<float>());
+            sparse_orientation.push_back(orientation_data[channel * height * width + spatial_offset]);
         }
         for (int64_t channel = 0; channel < affine.size(1); ++channel) {
-            sparse_affine.push_back(affine.index({0, channel, y, x}).item<float>());
+            sparse_affine.push_back(affine_data[channel * height * width + spatial_offset]);
         }
     }
 
@@ -366,10 +672,13 @@ FeatureSet decode_feature_maps(
     const int64_t dense_height = dense_confidence_map.size(2);
     const int64_t dense_width = dense_confidence_map.size(3);
     const auto dense_valid_mask = prepare_decode_mask(intensity_mask, dense_height, dense_width);
+    const auto* dense_confidence_data = dense_confidence_map.data_ptr<float>();
+    const auto* dense_mask_data = dense_valid_mask.data_ptr<bool>();
     for (int64_t y = 0; y < dense_height; ++y) {
         for (int64_t x = 0; x < dense_width; ++x) {
-            const float confidence = dense_confidence_map.index({0, 0, y, x}).item<float>();
-            if (confidence >= config.semi_dense_threshold && dense_valid_mask.index({y, x}).item<bool>()) {
+            const auto offset = y * dense_width + x;
+            const float confidence = dense_confidence_data[offset];
+            if (confidence >= config.semi_dense_threshold && dense_mask_data[offset]) {
                 appendPoint(dense_points, y, x);
                 dense_confidence.push_back(confidence);
             }

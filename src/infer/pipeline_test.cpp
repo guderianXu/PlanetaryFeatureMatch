@@ -17,10 +17,29 @@
 
 #include "cli/commands.h"
 #include "infer/feature_codec.h"
+#include "infer/feature_extractor.h"
 #include "infer/match_codec.h"
 #include "infer/pipeline.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"
+
+namespace pfm::testing {
+int64_t descriptor_grid_fallback_min_sparse_matches_for_test();
+bool should_use_descriptor_grid_fallback_for_test(int64_t base_sparse_matches, int64_t grid_sparse_matches);
+bool should_use_high_density_sparse_matches_for_test(int64_t base_sparse_matches, int64_t high_density_sparse_matches);
+bool should_use_alternate_texture_blend_matches_for_test(int64_t base_sparse_matches, int64_t alternate_sparse_matches);
+bool should_use_balanced_texture_blend_matches_for_test(int64_t base_sparse_matches, int64_t alternate_sparse_matches);
+bool sparse_geometry_filter_rotation_only_requested_for_test();
+bool should_skip_expensive_sparse_alternates_for_test(int64_t sparse_matches);
+FeatureSet make_descriptor_grid_feature_set_for_test(
+    const RawFeatureMaps& maps,
+    const FeatureDecodeConfig& config,
+    const torch::Tensor& intensity_mask);
+torch::Tensor make_inference_decode_heatmap_for_test(
+    const torch::Tensor& image,
+    const torch::Tensor& learned_heatmap);
+FeatureDecodeConfig make_high_density_decode_config_for_test(FeatureDecodeConfig decode_config);
+}
 
 namespace {
 
@@ -242,6 +261,21 @@ static void pipeline_train_writes_synthetic_pair_cache() {
 
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
     PFM_REQUIRE(std::filesystem::exists(options.checkpoint));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000_view_b.png"));
+}
+
+static void pipeline_train_cache_only_writes_cache_without_checkpoint() {
+    TempPipelineDirectory temp_dir("pfm_pipeline_train_cache_only");
+    write_test_image(temp_dir.file("image_a.png"), 11);
+    write_test_image(temp_dir.file("image_b.png"), 23);
+    auto options = make_train_options(temp_dir);
+    options.synthetic_pair_cache_dir = (temp_dir.path() / "pair_cache").string();
+    options.cache_only = true;
+    options.resize = 32;
+
+    PFM_REQUIRE(pfm::run_train_command(options) == 0);
+    PFM_REQUIRE(!std::filesystem::exists(options.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000_view_b.png"));
 }
@@ -597,6 +631,119 @@ static void pipelineMatchDenseModeOmitsSparseMatches() {
     PFM_REQUIRE(matches.confidence.size(0) == 2);
 }
 
+static void pipeline_inference_decode_heatmap_prefers_texture_saliency() {
+    auto image = torch::zeros({1, 1, 16, 16}, torch::kFloat32);
+    image.index_put_({0, 0, torch::indexing::Slice(), 8}, 1.0F);
+    auto learned_heatmap = torch::ones({1, 1, 8, 8}, torch::kFloat32);
+
+    const auto heatmap = pfm::testing::make_inference_decode_heatmap_for_test(image, learned_heatmap);
+
+    PFM_REQUIRE(heatmap.sizes() == learned_heatmap.sizes());
+    PFM_REQUIRE(heatmap.min().item<float>() < 0.05F);
+    PFM_REQUIRE(heatmap.max().item<float>() > 0.95F);
+}
+
+static void pipeline_descriptor_grid_fallback_handles_low_quality_sparse_sets() {
+    PFM_REQUIRE(pfm::testing::descriptor_grid_fallback_min_sparse_matches_for_test() >= 16);
+    PFM_REQUIRE(pfm::testing::should_use_descriptor_grid_fallback_for_test(0, 24));
+    PFM_REQUIRE(pfm::testing::should_use_descriptor_grid_fallback_for_test(3, 24));
+}
+
+static void pipeline_descriptor_grid_fallback_preserves_existing_geometric_solution() {
+    PFM_REQUIRE(!pfm::testing::should_use_descriptor_grid_fallback_for_test(8, 24));
+    PFM_REQUIRE(!pfm::testing::should_use_descriptor_grid_fallback_for_test(10, 29));
+}
+
+static void pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_cell() {
+    pfm::RawFeatureMaps maps{
+        torch::ones({1, 1, 8, 8}, torch::kFloat32),
+        torch::ones({1, 4, 8, 8}, torch::kFloat32),
+        torch::ones({1, 1, 8, 8}, torch::kFloat32),
+        torch::zeros({1, 2, 8, 8}, torch::kFloat32),
+        torch::ones({1, 4, 8, 8}, torch::kFloat32),
+        torch::ones({1, 1, 8, 8}, torch::kFloat32)};
+    auto mask = torch::zeros({8, 8}, torch::kUInt8);
+    mask.index_put_({torch::indexing::Slice(0, 2), torch::indexing::Slice(0, 2)}, 1);
+    mask.index_put_({torch::indexing::Slice(0, 2), torch::indexing::Slice(2, 4)}, 1);
+
+    pfm::FeatureDecodeConfig one_per_cell;
+    one_per_cell.max_keypoints = 16;
+    one_per_cell.keypoints_per_cell = 1;
+    const auto sparse = pfm::testing::make_descriptor_grid_feature_set_for_test(maps, one_per_cell, mask);
+
+    pfm::FeatureDecodeConfig two_per_cell = one_per_cell;
+    two_per_cell.keypoints_per_cell = 2;
+    const auto denser = pfm::testing::make_descriptor_grid_feature_set_for_test(maps, two_per_cell, mask);
+
+    PFM_REQUIRE(sparse.keypoints.size(0) == 2);
+    PFM_REQUIRE(denser.keypoints.size(0) == 4);
+    for (int64_t row = 0; row < denser.keypoints.size(0); ++row) {
+        const auto x = static_cast<int64_t>(denser.keypoints.index({row, 0}).item<float>());
+        const auto y = static_cast<int64_t>(denser.keypoints.index({row, 1}).item<float>());
+        PFM_REQUIRE(mask.index({y, x}).item<uint8_t>() != 0);
+    }
+}
+
+static void pipeline_adaptive_high_density_requires_large_sparse_gain() {
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(15, 42));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(9, 39));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(11, 54));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(10, 67));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(16, 123));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(16, 57));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(17, 123));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(8, 10));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(8, 57));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(7, 124));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(39, 86));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(220, 420));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(214, 378));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(220, 248));
+    PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(214, 237));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(156, 180));
+    PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(124, 124));
+}
+
+static void pipeline_adaptive_high_density_preserves_decode_nms_radius() {
+    pfm::FeatureDecodeConfig config;
+    config.min_keypoints = 0;
+    config.nms_radius = 2;
+
+    const auto high_density = pfm::testing::make_high_density_decode_config_for_test(config);
+
+    PFM_REQUIRE(high_density.min_keypoints >= 1500);
+    PFM_REQUIRE(high_density.nms_radius == 2);
+}
+
+static void pipeline_alternate_texture_blend_requires_decisive_match_gain() {
+    PFM_REQUIRE(pfm::testing::should_use_alternate_texture_blend_matches_for_test(7, 37));
+    PFM_REQUIRE(pfm::testing::should_use_alternate_texture_blend_matches_for_test(41, 108));
+    PFM_REQUIRE(!pfm::testing::should_use_alternate_texture_blend_matches_for_test(60, 9));
+    PFM_REQUIRE(!pfm::testing::should_use_alternate_texture_blend_matches_for_test(40, 36));
+    PFM_REQUIRE(!pfm::testing::should_use_alternate_texture_blend_matches_for_test(8, 16));
+}
+
+static void pipeline_balanced_texture_blend_requires_stable_base_and_small_gain() {
+    PFM_REQUIRE(pfm::testing::should_use_balanced_texture_blend_matches_for_test(40, 44));
+    PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(8, 32));
+    PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(41, 108));
+    PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(60, 29));
+    PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(40, 36));
+}
+
+static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base() {
+    unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_requested_for_test());
+    PFM_REQUIRE(!pfm::testing::should_skip_expensive_sparse_alternates_for_test(169));
+
+    setenv("PFM_SPARSE_GEOMETRY_FILTER", "rotation-only", 1);
+    PFM_REQUIRE(pfm::testing::sparse_geometry_filter_rotation_only_requested_for_test());
+    PFM_REQUIRE(!pfm::testing::should_skip_expensive_sparse_alternates_for_test(31));
+    PFM_REQUIRE(pfm::testing::should_skip_expensive_sparse_alternates_for_test(32));
+    PFM_REQUIRE(pfm::testing::should_skip_expensive_sparse_alternates_for_test(169));
+    unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
+}
+
 static void pipeline_eval_writes_report_archive() {
     TempPipelineDirectory temp_dir("pfm_pipeline_eval");
     const auto checkpoint = write_checkpoint(temp_dir);
@@ -796,6 +943,8 @@ void register_pipeline_tests() {
     register_test("pipeline_train_writes_loadable_checkpoint", pipeline_train_writes_loadable_checkpoint);
     register_test("pipeline_train_rejects_invalid_training_limits", pipeline_train_rejects_invalid_training_limits);
     register_test("pipeline_train_writes_synthetic_pair_cache", pipeline_train_writes_synthetic_pair_cache);
+    register_test("pipeline_train_cache_only_writes_cache_without_checkpoint",
+                  pipeline_train_cache_only_writes_cache_without_checkpoint);
     register_test("pipeline_train_prints_total_and_average_batch_time",
                   pipeline_train_prints_total_and_average_batch_time);
     register_test("pipeline_train_prints_visualization_note", pipeline_train_prints_visualization_note);
@@ -818,6 +967,24 @@ void register_pipeline_tests() {
     register_test("pipeline_match_feature_files_scale_sparse_visualization",
                   pipelineMatchFeatureFilesScaleSparseVisualization);
     register_test("pipeline_match_dense_mode_omits_sparse_matches", pipelineMatchDenseModeOmitsSparseMatches);
+    register_test("pipeline_inference_decode_heatmap_prefers_texture_saliency",
+                  pipeline_inference_decode_heatmap_prefers_texture_saliency);
+    register_test("pipeline_descriptor_grid_fallback_handles_low_quality_sparse_sets",
+                  pipeline_descriptor_grid_fallback_handles_low_quality_sparse_sets);
+    register_test("pipeline_descriptor_grid_fallback_preserves_existing_geometric_solution",
+                  pipeline_descriptor_grid_fallback_preserves_existing_geometric_solution);
+    register_test("pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_cell",
+                  pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_cell);
+    register_test("pipeline_adaptive_high_density_requires_large_sparse_gain",
+                  pipeline_adaptive_high_density_requires_large_sparse_gain);
+    register_test("pipeline_adaptive_high_density_preserves_decode_nms_radius",
+                  pipeline_adaptive_high_density_preserves_decode_nms_radius);
+    register_test("pipeline_alternate_texture_blend_requires_decisive_match_gain",
+                  pipeline_alternate_texture_blend_requires_decisive_match_gain);
+    register_test("pipeline_balanced_texture_blend_requires_stable_base_and_small_gain",
+                  pipeline_balanced_texture_blend_requires_stable_base_and_small_gain);
+    register_test("pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base",
+                  pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);
     register_test("pipeline_match_eval_and_export_print_timing", pipeline_match_eval_and_export_print_timing);
     register_test("pipeline_extract_rejects_invalid_device", pipeline_extract_rejects_invalid_device);

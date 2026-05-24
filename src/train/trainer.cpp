@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -47,48 +48,100 @@ namespace {
 
 constexpr int64_t INPUT_CHANNELS = 1;
 constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 1024;
-constexpr double REPEATABILITY_LOSS_WEIGHT = 0.0;
-constexpr double DESCRIPTOR_DIVERSITY_WEIGHT = 100.0;
+constexpr double REPEATABILITY_LOSS_WEIGHT = 100.0;
+constexpr double REPEATABLE_SALIENCY_TARGET_WEIGHT = 8.0;
+constexpr double REPEATABLE_KEYPOINT_TARGET_WEIGHT = 25.0;
+constexpr double WARP_ALIGNED_KEYPOINT_TARGET_WEIGHT = 20.0;
+constexpr double WARP_ALIGNED_KEYPOINT_PEAK_WEIGHT = 160.0;
+constexpr double DECODED_KEYPOINT_REPEATABILITY_WEIGHT = 400.0;
+constexpr double REPEATABLE_KEYPOINT_TARGET_FRACTION = 0.03;
+constexpr int64_t REPEATABLE_KEYPOINT_TARGET_MIN_COUNT = 32;
+constexpr int64_t REPEATABLE_KEYPOINT_TARGET_MAX_COUNT = 2048;
+constexpr double REPEATABLE_GRID_KEYPOINT_TARGET_WEIGHT = 150.0;
+constexpr int64_t REPEATABLE_GRID_KEYPOINT_TARGET_ROWS = 32;
+constexpr int64_t REPEATABLE_GRID_KEYPOINT_TARGET_COLS = 32;
+constexpr double DESCRIPTOR_DIVERSITY_WEIGHT = 5.0;
 constexpr double DESCRIPTOR_MAP_STD_TARGET = 0.25;
 constexpr double DESCRIPTOR_MAP_COVARIANCE_WEIGHT = 0.5;
 constexpr double DESCRIPTOR_MAP_UNIFORMITY_WEIGHT = 2.0;
 constexpr int64_t DESCRIPTOR_MAP_UNIFORMITY_MAX_SAMPLES = 512;
 constexpr int64_t DESCRIPTOR_NEGATIVE_SAMPLE_COUNT = 127;
 constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_MARGIN = 0.25;
-constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT = 10.0;
+constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT = 8.0;
 constexpr double DENSE_DESCRIPTOR_HARD_NEGATIVE_EXCLUSION_RADIUS = 2.0;
+constexpr int64_t DENSE_DESCRIPTOR_TOPK_NEGATIVES = 16;
+constexpr double DENSE_DESCRIPTOR_REVERSE_HARD_NEGATIVE_WEIGHT = 0.25;
+constexpr int64_t DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT = 16;
 constexpr double WARP_DESCRIPTOR_CONTRASTIVE_WEIGHT = 3.0;
 constexpr double DIRECT_FULL_MAP_DESCRIPTOR_WEIGHT = 1.5;
-constexpr double CROSS_BATCH_DESCRIPTOR_CONTRASTIVE_WEIGHT = 8.0;
-constexpr double POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT = 10.0;
-constexpr double ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT = 30.0;
-constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 4.0;
+constexpr double CROSS_BATCH_DESCRIPTOR_CONTRASTIVE_WEIGHT = 0.0;
+constexpr double POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT = 80.0;
+constexpr double PATCH_DESCRIPTOR_ALIGNMENT_WEIGHT = 40.0;
+constexpr double DESCRIPTOR_LOCAL_CE_WEIGHT = 0.25;
+constexpr double DESCRIPTOR_GLOBAL_CE_WEIGHT = 0.25;
+constexpr double SUPERVISED_DESCRIPTOR_RANKING_WEIGHT = 160.0;
+constexpr double SUPERVISED_DESCRIPTOR_RANKING_MARGIN = 0.35;
+constexpr double SUPERVISED_DESCRIPTOR_SOFT_RANK_WEIGHT = 0.35;
+constexpr double SUPERVISED_DESCRIPTOR_TAIL_RANK_WEIGHT = 0.2;
+constexpr float SUPERVISED_DESCRIPTOR_TAIL_RANK_START = 16.0F;
+constexpr int64_t SUPERVISED_DESCRIPTOR_TOPK_NEGATIVES = 64;
+constexpr float SUPERVISED_DESCRIPTOR_RANKING_LOGIT_SCALE = 20.0F;
+constexpr float SUPERVISED_DESCRIPTOR_SOFT_RANK_SCALE = 20.0F;
+constexpr double SAMPLED_DESCRIPTOR_DECORRELATION_WEIGHT = 20.0;
+constexpr double SAMPLED_DESCRIPTOR_DECORRELATION_MARGIN = 0.25;
+constexpr int64_t SAMPLED_DESCRIPTOR_DECORRELATION_TOPK = 16;
+constexpr int64_t SAMPLED_DESCRIPTOR_DECORRELATION_EXCLUSION_RADIUS = 2;
+constexpr double PAIRWISE_TEXTURE_TEACHER_WEIGHT = 0.0;
+constexpr double ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT = 20.0;
+constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 0.5;
+constexpr double DESCRIPTOR_FINETUNE_ANCHOR_WEIGHT = 800.0;
 constexpr float CROSS_BATCH_DESCRIPTOR_LOGIT_SCALE = 30.0F;
+constexpr double KEYPOINT_DESCRIPTOR_LOSS_WEIGHT = 8.0;
+constexpr double LEARNED_KEYPOINT_DESCRIPTOR_LOSS_WEIGHT = 64.0;
+constexpr double SUPERVISED_KEYPOINT_DESCRIPTOR_LOSS_WEIGHT = 4.0;
 constexpr double KEYPOINT_DESCRIPTOR_MARGIN = 0.2;
-constexpr double KEYPOINT_DESCRIPTOR_MARGIN_WEIGHT = 5.0;
+constexpr double KEYPOINT_DESCRIPTOR_MARGIN_WEIGHT = 12.0;
+constexpr double KEYPOINT_DESCRIPTOR_POSITIVE_ALIGNMENT_WEIGHT = 40.0;
+constexpr double KEYPOINT_DESCRIPTOR_FALSE_NEGATIVE_RADIUS_PIXELS = 12.0;
 constexpr int64_t KEYPOINT_DESCRIPTOR_MAX_QUERIES = 1024;
+constexpr double KEYPOINT_DENSE_DESCRIPTOR_LOSS_WEIGHT = 1.0;
+constexpr double LEARNED_KEYPOINT_DENSE_DESCRIPTOR_LOSS_WEIGHT = 64.0;
 constexpr double KEYPOINT_DENSE_DESCRIPTOR_MARGIN = 0.25;
-constexpr double KEYPOINT_DENSE_DESCRIPTOR_MARGIN_WEIGHT = 5.0;
+constexpr double KEYPOINT_DENSE_DESCRIPTOR_MARGIN_WEIGHT = 8.0;
+constexpr double KEYPOINT_DENSE_DESCRIPTOR_POSITIVE_ALIGNMENT_WEIGHT = 20.0;
 constexpr int64_t KEYPOINT_DENSE_DESCRIPTOR_MAX_QUERIES = 1024;
+constexpr double KEYPOINT_PATCH_DESCRIPTOR_ALIGNMENT_WEIGHT = 24.0;
+constexpr int64_t KEYPOINT_PATCH_DESCRIPTOR_KERNEL = 3;
+constexpr double WARPED_KEYPOINT_DESCRIPTOR_CONTRASTIVE_WEIGHT = 160.0;
 constexpr double ORIENTATION_LOSS_WEIGHT = 0.0;
-constexpr double GRAPH_MATCHING_LOSS_WEIGHT = 0.0;
+constexpr double GRAPH_MATCHING_LOSS_WEIGHT = 4.0;
+constexpr double LEARNED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT = 4.0;
+constexpr double WARP_COMPLETED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT = 2.0;
+constexpr double SUPERVISED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT = 1.0;
 constexpr double HEATMAP_SELECTION_WEIGHT = 200.0;
 constexpr double HEATMAP_TARGET_MEAN = 0.03;
 constexpr double HEATMAP_BINARY_WEIGHT = 0.05;
-constexpr int64_t GRAPH_MATCHING_MAX_QUERIES = 256;
-constexpr double GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS = 3.0;
+constexpr int64_t GRAPH_MATCHING_MAX_QUERIES = 512;
+constexpr int64_t GRAPH_DENSE_MATCHING_MAX_SAMPLES = 256;
+constexpr int64_t GRAPH_DENSE_MATCHING_GRID_ROWS = 8;
+constexpr int64_t GRAPH_DENSE_MATCHING_GRID_COLS = 8;
+constexpr float HEATMAP_TARGET_POSITIVE_WEIGHT = 8.0F;
+constexpr double GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS = 6.0;
+constexpr float GRAPH_POSITIVE_MARGIN = 1.0F;
+constexpr float GRAPH_POSITIVE_MARGIN_WEIGHT = 2.0F;
 constexpr float OFFSET_LOSS_WEIGHT = 0.0F;
 constexpr float CONFIDENCE_LOSS_WEIGHT = 0.0F;
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
 constexpr std::size_t TRAINING_VISUALIZATION_QUEUE_CAPACITY = 2048;
 constexpr std::size_t TRAINING_VISUALIZATION_WORKER_COUNT = 4;
 constexpr double TRAINING_MATCH_CORRECT_THRESHOLD_PIXELS = 3.0;
+constexpr double PI = 3.14159265358979323846;
 constexpr int64_t MAX_VISUALIZED_SPARSE_MATCH_LINES = 2048;
 constexpr int64_t MAX_VISUALIZED_DENSE_MATCH_LINES = 2048;
 constexpr int TRAINING_METRIC_LOG_INTERVAL = 10;
-constexpr int TRAINING_DECODE_MAX_KEYPOINTS = 512;
+constexpr int TRAINING_DECODE_MAX_KEYPOINTS = 2048;
 constexpr int64_t DESCRIPTOR_SIMILARITY_QUERY_CHUNK = 128;
-constexpr int64_t TRAINING_KEYPOINT_LOSS_BATCH_ITEMS = 0;
+constexpr int64_t TRAINING_KEYPOINT_LOSS_BATCH_ITEMS = 4;
 const std::vector<std::string> TRAINING_CSV_COLUMNS = {
     "loss_total",
     "feature_loss",
@@ -97,15 +150,45 @@ const std::vector<std::string> TRAINING_CSV_COLUMNS = {
     "orientation_loss",
     "matcher_loss",
     "graph_matching_loss",
+    "graph_matching_accuracy",
+    "graph_positive_fraction",
+    "graph_positive_count",
+    "graph_query_count",
+    "graph_features_a",
+    "graph_features_b",
+    "learned_graph_matching_accuracy",
+    "learned_graph_positive_fraction",
+    "learned_graph_positive_count",
+    "learned_graph_query_count",
     "dense_loss",
     "offset_loss",
     "confidence_loss",
     "descriptor_accuracy",
+    "descriptor_positive_score",
+    "descriptor_hard_negative_score",
+    "descriptor_positive_margin",
+    "descriptor_positive_rank",
+    "keypoint_descriptor_accuracy",
+    "keypoint_descriptor_positive_margin",
+    "keypoint_descriptor_positive_rank",
     "descriptor_diversity",
     "offset_error_px",
     "gpu_utilization_percent",
     "gpu_power_watts",
 };
+
+int64_t descriptor_broad_far_negative_count_for_progress(double progress) {
+    if (!std::isfinite(progress) || progress <= 0.25) {
+        return 0;
+    }
+    if (progress < 0.50) {
+        return std::max<int64_t>(1, DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT / 8);
+    }
+    if (progress < 0.75) {
+        return std::max<int64_t>(1, DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT / 4);
+    }
+    return std::max<int64_t>(1, DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT / 2);
+}
 
 enum class MatchLineColor {
     Red,
@@ -117,12 +200,27 @@ struct MatchCorrectnessStats {
     int64_t wrong = 0;
 };
 
+struct TrainingCacheSpec {
+    std::string cache_dir;
+    std::optional<std::size_t> pair_index;
+};
+
 void validate_config(const TrainConfig& config) {
     if (config.image_dir.empty()) {
         throw std::invalid_argument("image_dir must not be empty");
     }
     if (config.checkpoint.empty()) {
         throw std::invalid_argument("checkpoint must not be empty");
+    }
+    if (!config.init_checkpoint.empty() && !std::filesystem::exists(config.init_checkpoint)) {
+        throw std::invalid_argument("init_checkpoint does not exist: " + config.init_checkpoint);
+    }
+    const int finetune_modes = (config.descriptor_only_finetune ? 1 : 0) +
+                               (config.viewpoint_head_only_finetune ? 1 : 0) +
+                               (config.graph_only_finetune ? 1 : 0);
+    if (finetune_modes > 1) {
+        throw std::invalid_argument(
+            "descriptor_only_finetune, viewpoint_head_only_finetune, and graph_only_finetune are mutually exclusive");
     }
     if (config.epochs <= 0) {
         throw std::invalid_argument("epochs must be positive");
@@ -148,6 +246,9 @@ void validate_config(const TrainConfig& config) {
     if (config.pairs_per_image <= 0) {
         throw std::invalid_argument("pairs_per_image must be positive");
     }
+    if (config.max_train_batches < 0) {
+        throw std::invalid_argument("max_train_batches must be non-negative");
+    }
     (void)parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
     if (!std::isfinite(config.rotation_step_degrees) || config.rotation_step_degrees <= 0.0) {
         throw std::invalid_argument("rotation_step_degrees must be positive and finite");
@@ -167,8 +268,29 @@ void validate_config(const TrainConfig& config) {
     if (config.dataloader_workers < 0) {
         throw std::invalid_argument("dataloader_workers must be non-negative");
     }
+    for (const auto& cache_dir : config.extra_synthetic_pair_cache_dirs) {
+        if (cache_dir.empty()) {
+            throw std::invalid_argument("extra_synthetic_pair_cache_dirs must not contain empty paths");
+        }
+    }
+    for (const auto& cache_dir : config.hard_synthetic_pair_cache_dirs) {
+        if (cache_dir.empty()) {
+            throw std::invalid_argument("hard_synthetic_pair_cache_dirs must not contain empty paths");
+        }
+    }
+    if (config.hard_synthetic_pair_cache_repeats <= 0) {
+        throw std::invalid_argument("hard_synthetic_pair_cache_repeats must be positive");
+    }
+    for (const auto index : config.hard_synthetic_pair_cache_indices) {
+        if (index < 0) {
+            throw std::invalid_argument("hard_synthetic_pair_cache_indices must be non-negative");
+        }
+    }
     if (config.prefetch_batches <= 0) {
         throw std::invalid_argument("prefetch_batches must be positive");
+    }
+    if (config.cache_only && config.synthetic_pair_cache_dir.empty()) {
+        throw std::invalid_argument("cache_only requires synthetic_pair_cache_dir");
     }
     if (config.visualization_samples < 0) {
         throw std::invalid_argument("visualization_samples must be non-negative");
@@ -664,7 +786,7 @@ torch::Tensor make_descriptor_target_indices(
 
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
-    auto source_y = (sample_indices / descriptor_width).to(torch::kFloat32);
+    auto source_y = torch::floor_divide(sample_indices, descriptor_width).to(torch::kFloat32);
     auto source_x = sample_indices.remainder(descriptor_width).to(torch::kFloat32);
     auto image_x = ((source_x + 0.5F) * static_cast<float>(image_width) /
                     static_cast<float>(descriptor_width) - 0.5F)
@@ -698,7 +820,7 @@ torch::Tensor make_descriptor_target_coordinates(
 
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
-    auto source_y = (sample_indices / descriptor_width).to(torch::kFloat32);
+    auto source_y = torch::floor_divide(sample_indices, descriptor_width).to(torch::kFloat32);
     auto source_x = sample_indices.remainder(descriptor_width).to(torch::kFloat32);
     auto image_x = ((source_x + 0.5F) * static_cast<float>(image_width) /
                     static_cast<float>(descriptor_width) - 0.5F)
@@ -764,8 +886,7 @@ torch::Tensor sample_warped_descriptors(
         .contiguous();
 }
 
-torch::Tensor filter_descriptor_sample_indices(
-    const torch::Tensor& sample_indices,
+torch::Tensor make_descriptor_valid_mask(
     const torch::Tensor& valid_mask,
     int64_t descriptor_height,
     int64_t descriptor_width
@@ -776,20 +897,236 @@ torch::Tensor filter_descriptor_sample_indices(
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{descriptor_height, descriptor_width})
             .mode(torch::kNearest));
-    auto flat = resized.squeeze(1).reshape({valid_mask.size(0), descriptor_height * descriptor_width});
+    return resized.squeeze(1).reshape({valid_mask.size(0), descriptor_height * descriptor_width}).to(torch::kBool);
+}
+
+torch::Tensor filter_descriptor_sample_indices(
+    const torch::Tensor& sample_indices,
+    const torch::Tensor& valid_mask,
+    int64_t descriptor_height,
+    int64_t descriptor_width
+) {
+    auto flat = make_descriptor_valid_mask(valid_mask, descriptor_height, descriptor_width);
     auto valid_for_batch = flat.index_select(1, sample_indices).to(torch::kBool).all(0);
     return sample_indices.index({valid_for_batch}).contiguous();
 }
 
-torch::Tensor make_descriptor_candidate_indices(const torch::Tensor& target_indices, int64_t spatial_count) {
+torch::Tensor make_balanced_descriptor_sample_indices(
+    const torch::Tensor& valid_mask,
+    int64_t descriptor_height,
+    int64_t descriptor_width,
+    int64_t max_samples
+) {
+    auto mask = valid_mask.to(torch::kFloat32).unsqueeze(1);
+    auto resized = torch::nn::functional::interpolate(
+        mask,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{descriptor_height, descriptor_width})
+            .mode(torch::kNearest));
+    auto valid = resized.squeeze(1).to(torch::kBool).all(0).contiguous();
+    const auto long_options = torch::TensorOptions().dtype(torch::kLong).device(valid.device());
+    auto global_indices = torch::arange(descriptor_height * descriptor_width, long_options)
+                              .reshape({descriptor_height, descriptor_width});
+    const auto cell_count = GRAPH_DENSE_MATCHING_GRID_ROWS * GRAPH_DENSE_MATCHING_GRID_COLS;
+    const auto per_cell = std::max<int64_t>(1, (max_samples + cell_count - 1) / cell_count);
+    std::vector<torch::Tensor> selected_cells;
+    selected_cells.reserve(static_cast<std::size_t>(cell_count));
+    for (int64_t row = 0; row < GRAPH_DENSE_MATCHING_GRID_ROWS; ++row) {
+        const auto y0 = descriptor_height * row / GRAPH_DENSE_MATCHING_GRID_ROWS;
+        const auto y1 = descriptor_height * (row + 1) / GRAPH_DENSE_MATCHING_GRID_ROWS;
+        for (int64_t col = 0; col < GRAPH_DENSE_MATCHING_GRID_COLS; ++col) {
+            const auto x0 = descriptor_width * col / GRAPH_DENSE_MATCHING_GRID_COLS;
+            const auto x1 = descriptor_width * (col + 1) / GRAPH_DENSE_MATCHING_GRID_COLS;
+            auto cell_valid = valid.index({
+                torch::indexing::Slice(y0, y1),
+                torch::indexing::Slice(x0, x1)}).reshape({-1});
+            auto cell_indices = global_indices.index({
+                torch::indexing::Slice(y0, y1),
+                torch::indexing::Slice(x0, x1)}).reshape({-1}).index({cell_valid});
+            if (cell_indices.numel() == 0) {
+                continue;
+            }
+            if (cell_indices.size(0) > per_cell) {
+                auto order = torch::randperm(cell_indices.size(0), long_options).narrow(0, 0, per_cell);
+                cell_indices = cell_indices.index_select(0, order);
+            }
+            selected_cells.push_back(cell_indices);
+        }
+    }
+    if (selected_cells.empty()) {
+        return torch::empty({0}, long_options);
+    }
+    auto selected = torch::cat(selected_cells, 0).contiguous();
+    if (selected.size(0) > max_samples) {
+        selected = selected.index_select(
+            0,
+            torch::randperm(selected.size(0), long_options).narrow(0, 0, max_samples));
+    }
+    return selected.contiguous();
+}
+
+torch::Tensor make_descriptor_candidate_indices(
+    const torch::Tensor& target_indices,
+    int64_t spatial_count,
+    int64_t descriptor_width,
+    const torch::Tensor& candidate_valid_mask = torch::Tensor(),
+    int64_t broad_far_negative_count = DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT
+) {
     const auto negative_count = std::min<int64_t>(DESCRIPTOR_NEGATIVE_SAMPLE_COUNT, spatial_count - 1);
-    const auto stride = std::max<int64_t>(1, spatial_count / (negative_count + 1));
-    auto offsets = (torch::arange(
-                        1,
-                        negative_count + 1,
-                        torch::TensorOptions().dtype(torch::kLong).device(target_indices.device())) * stride)
-                       .reshape({1, 1, negative_count});
-    auto negatives = (target_indices.unsqueeze(2) + offsets).remainder(spatial_count);
+    if (negative_count <= 0) {
+        return target_indices.unsqueeze(2).contiguous();
+    }
+    const auto long_options = torch::TensorOptions().dtype(torch::kLong).device(target_indices.device());
+    auto offsets = torch::arange(1, spatial_count, long_options).reshape({1, 1, spatial_count - 1});
+    auto all_negatives = (target_indices.unsqueeze(2) + offsets).remainder(spatial_count);
+    auto negatives = all_negatives.narrow(2, 0, negative_count);
+    if (descriptor_width > 0 && spatial_count % descriptor_width == 0 && spatial_count >= 32) {
+        constexpr int64_t exclusion_radius = 2;
+        constexpr int64_t near_ring_radius = 6;
+        constexpr int64_t max_excluded_nearby = (exclusion_radius * 2 + 1) * (exclusion_radius * 2 + 1) - 1;
+        const auto far_negative_count =
+            std::min<int64_t>(negative_count, std::max<int64_t>(1, spatial_count - 1 - max_excluded_nearby));
+        const auto descriptor_height = spatial_count / descriptor_width;
+        const auto effective_broad_far_negative_count =
+            std::clamp<int64_t>(broad_far_negative_count, 0, DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT);
+        auto gcd = [](int64_t lhs, int64_t rhs) {
+            lhs = lhs < 0 ? -lhs : lhs;
+            rhs = rhs < 0 ? -rhs : rhs;
+            while (rhs != 0) {
+                const auto next = lhs % rhs;
+                lhs = rhs;
+                rhs = next;
+            }
+            return std::max<int64_t>(1, lhs);
+        };
+        auto broad_stride = std::max<int64_t>(
+            1,
+            static_cast<int64_t>(std::floor(static_cast<double>(spatial_count) * 0.61803398875)));
+        while (broad_stride < spatial_count && gcd(broad_stride, spatial_count) != 1) {
+            ++broad_stride;
+        }
+        if (broad_stride >= spatial_count) {
+            broad_stride = 1;
+        }
+        auto targets_cpu = target_indices.to(torch::kCPU).contiguous();
+        auto valid_cpu = candidate_valid_mask.defined()
+            ? candidate_valid_mask.to(torch::kCPU, torch::kBool).contiguous()
+            : torch::Tensor();
+        auto targets = targets_cpu.accessor<int64_t, 2>();
+        const bool has_valid_mask =
+            valid_cpu.defined() && valid_cpu.dim() == 2 && valid_cpu.size(0) == target_indices.size(0) &&
+            valid_cpu.size(1) == spatial_count;
+        const auto* valid_data = has_valid_mask ? valid_cpu.data_ptr<bool>() : nullptr;
+        std::vector<std::vector<int64_t>> rows;
+        rows.reserve(static_cast<size_t>(target_indices.numel()));
+        int64_t effective_negative_count = far_negative_count;
+        for (int64_t batch = 0; batch < target_indices.size(0); ++batch) {
+            for (int64_t query = 0; query < target_indices.size(1); ++query) {
+                const auto target = targets[batch][query];
+                const auto target_x = target % descriptor_width;
+                const auto target_y = target / descriptor_width;
+                std::vector<int64_t> row_indices;
+                row_indices.reserve(static_cast<size_t>(far_negative_count));
+                auto add_candidate = [&](int64_t candidate) {
+                    if (candidate < 0 || candidate >= spatial_count || candidate == target) {
+                        return;
+                    }
+                    if (std::find(row_indices.begin(), row_indices.end(), candidate) != row_indices.end()) {
+                        return;
+                    }
+                    if (has_valid_mask && !valid_data[batch * spatial_count + candidate]) {
+                        return;
+                    }
+                    const auto candidate_x = candidate % descriptor_width;
+                    const auto candidate_y = candidate / descriptor_width;
+                    const auto dx = candidate_x - target_x;
+                    const auto dy = candidate_y - target_y;
+                    if (dx * dx + dy * dy <= exclusion_radius * exclusion_radius) {
+                        return;
+                    }
+                    row_indices.push_back(candidate);
+                };
+                for (int64_t radius = exclusion_radius + 1;
+                     radius <= near_ring_radius &&
+                         static_cast<int64_t>(row_indices.size()) < far_negative_count;
+                     ++radius) {
+                    for (int64_t dy = -radius;
+                         dy <= radius && static_cast<int64_t>(row_indices.size()) < far_negative_count;
+                         ++dy) {
+                        for (int64_t dx = -radius;
+                             dx <= radius && static_cast<int64_t>(row_indices.size()) < far_negative_count;
+                             ++dx) {
+                            const auto abs_dx = dx < 0 ? -dx : dx;
+                            const auto abs_dy = dy < 0 ? -dy : dy;
+                            if (std::max(abs_dx, abs_dy) != radius) {
+                                continue;
+                            }
+                            const auto distance_sq = dx * dx + dy * dy;
+                            if (distance_sq <= exclusion_radius * exclusion_radius ||
+                                distance_sq > near_ring_radius * near_ring_radius) {
+                                continue;
+                            }
+                            const auto candidate_x = target_x + dx;
+                            const auto candidate_y = target_y + dy;
+                            if (candidate_x < 0 || candidate_x >= descriptor_width ||
+                                candidate_y < 0 || candidate_y >= descriptor_height) {
+                                continue;
+                            }
+                            add_candidate(candidate_y * descriptor_width + candidate_x);
+                        }
+                    }
+                }
+                const auto broad_start_count = static_cast<int64_t>(row_indices.size());
+                const bool restrict_global_fill =
+                    effective_broad_far_negative_count < DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT;
+                const auto row_negative_limit = restrict_global_fill
+                    ? std::min<int64_t>(far_negative_count, broad_start_count + effective_broad_far_negative_count)
+                    : far_negative_count;
+                for (int64_t step = 1;
+                     step < spatial_count &&
+                         static_cast<int64_t>(row_indices.size()) < row_negative_limit &&
+                         static_cast<int64_t>(row_indices.size()) < broad_start_count + effective_broad_far_negative_count;
+                     ++step) {
+                    add_candidate((target + step * broad_stride) % spatial_count);
+                }
+                for (int64_t candidate = 0; candidate < spatial_count &&
+                                           static_cast<int64_t>(row_indices.size()) < row_negative_limit;
+                     ++candidate) {
+                    add_candidate(candidate);
+                }
+                for (int64_t offset = 1; !has_valid_mask &&
+                                           static_cast<int64_t>(row_indices.size()) < row_negative_limit;
+                     ++offset) {
+                    const auto candidate = (target + offset) % spatial_count;
+                    if (candidate == target ||
+                        std::find(row_indices.begin(), row_indices.end(), candidate) != row_indices.end()) {
+                        continue;
+                    }
+                    row_indices.push_back(candidate);
+                }
+                effective_negative_count =
+                    std::min<int64_t>(effective_negative_count, static_cast<int64_t>(row_indices.size()));
+                rows.push_back(std::move(row_indices));
+            }
+        }
+        if (effective_negative_count <= 0) {
+            negatives = torch::empty(
+                {target_indices.size(0), target_indices.size(1), 0},
+                torch::TensorOptions().dtype(torch::kLong).device(target_indices.device()));
+            return torch::cat({target_indices.unsqueeze(2), negatives}, 2).contiguous();
+        }
+        std::vector<int64_t> far_indices;
+        far_indices.reserve(static_cast<size_t>(target_indices.numel() * effective_negative_count));
+        for (const auto& row : rows) {
+            far_indices.insert(far_indices.end(), row.begin(), row.begin() + effective_negative_count);
+        }
+        negatives = torch::from_blob(
+                        far_indices.data(),
+                        {target_indices.size(0), target_indices.size(1), effective_negative_count},
+                        torch::TensorOptions().dtype(torch::kLong))
+                        .clone()
+                        .to(target_indices.device());
+    }
     return torch::cat({target_indices.unsqueeze(2), negatives}, 2).contiguous();
 }
 
@@ -818,30 +1155,82 @@ torch::Tensor descriptor_pair_similarity_scores(
         DESCRIPTOR_SIMILARITY_QUERY_CHUNK);
 }
 
-torch::Tensor make_dense_descriptor_hard_negative_loss(
+torch::Tensor descriptor_candidate_similarity_scores(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& candidate_descriptors
+) {
+    if (descriptors_a.dim() != 3 || candidate_descriptors.dim() != 4 ||
+        descriptors_a.size(0) != candidate_descriptors.size(0) ||
+        descriptors_a.size(1) != candidate_descriptors.size(1) ||
+        descriptors_a.size(2) != candidate_descriptors.size(3)) {
+        throw std::invalid_argument("descriptor candidate similarity inputs must have shape BxNxD and BxNxKxD");
+    }
+    const auto batch_size = descriptors_a.size(0);
+    const auto query_count = descriptors_a.size(1);
+    const auto candidate_count = candidate_descriptors.size(2);
+    const auto descriptor_dim = descriptors_a.size(2);
+    auto queries = descriptors_a.reshape({batch_size * query_count, 1, descriptor_dim});
+    auto candidates = candidate_descriptors.reshape({batch_size * query_count, candidate_count, descriptor_dim});
+    auto normalized_queries = queries / queries.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    auto normalized_candidates = candidates / candidates.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    return torch::bmm(normalized_queries, normalized_candidates.transpose(1, 2))
+        .reshape({batch_size, query_count, candidate_count});
+}
+
+torch::Tensor make_strict_descriptor_cross_entropy_loss(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
-    const torch::Tensor& sample_indices,
     const torch::Tensor& target_indices
 ) {
-    const auto spatial_count = descriptors_b.size(2) * descriptors_b.size(3);
-    if (sample_indices.numel() == 0 || spatial_count < 2) {
-        return torch::zeros({}, descriptors_a.options());
+    if (descriptors_a.dim() != 3 || descriptors_b.dim() != 3 ||
+        descriptors_a.size(0) != descriptors_b.size(0) || descriptors_a.size(2) != descriptors_b.size(2) ||
+        target_indices.dim() != 2 || target_indices.size(0) != descriptors_a.size(0) ||
+        target_indices.size(1) != descriptors_a.size(1) || target_indices.dtype() != torch::kLong) {
+        throw std::invalid_argument("strict descriptor CE inputs must have BxNxD, BxMxD, and BxN long shapes");
+    }
+    const auto candidate_count = descriptors_b.size(1);
+    if (target_indices.numel() > 0 && (target_indices.lt(0).any().item<bool>() ||
+                                       target_indices.ge(candidate_count).any().item<bool>())) {
+        throw std::invalid_argument("strict descriptor CE target indices are out of range");
+    }
+    auto normalized_a = descriptors_a / descriptors_a.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    auto normalized_b = descriptors_b / descriptors_b.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    auto logits = torch::bmm(normalized_a, normalized_b.transpose(1, 2)) * SUPERVISED_DESCRIPTOR_RANKING_LOGIT_SCALE;
+    return torch::nn::functional::cross_entropy(
+        logits.reshape({descriptors_a.size(0) * descriptors_a.size(1), candidate_count}),
+        target_indices.reshape({descriptors_a.size(0) * descriptors_a.size(1)}));
+}
+
+torch::Tensor make_descriptor_map_hard_negative_loss(
+    const torch::Tensor& query_descriptors,
+    const torch::Tensor& candidate_map_descriptors,
+    const torch::Tensor& target_indices
+) {
+    if (query_descriptors.dim() != 3 || candidate_map_descriptors.dim() != 4 ||
+        target_indices.dim() != 2 || target_indices.size(0) != query_descriptors.size(0) ||
+        target_indices.size(1) != query_descriptors.size(1) ||
+        candidate_map_descriptors.size(0) != query_descriptors.size(0) ||
+        candidate_map_descriptors.size(1) != query_descriptors.size(2)) {
+        throw std::invalid_argument("descriptor map hard negative inputs must have BxNxD, BxDxHxW, and BxN target shapes");
+    }
+    const auto spatial_count = candidate_map_descriptors.size(2) * candidate_map_descriptors.size(3);
+    if (query_descriptors.size(1) == 0 || spatial_count < 2) {
+        return torch::zeros({}, query_descriptors.options());
     }
 
-    const auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
-    const auto batch_size = descriptors_b.size(0);
-    const auto descriptor_dim = descriptors_b.size(1);
-    const auto descriptor_width = descriptors_b.size(3);
-    const auto flat_b = descriptors_b.permute({0, 2, 3, 1}).reshape({batch_size, spatial_count, descriptor_dim});
-    auto scores = descriptor_pair_similarity_scores(sampled_a, flat_b);
+    const auto batch_size = candidate_map_descriptors.size(0);
+    const auto descriptor_dim = candidate_map_descriptors.size(1);
+    const auto descriptor_width = candidate_map_descriptors.size(3);
+    const auto flat_candidates =
+        candidate_map_descriptors.permute({0, 2, 3, 1}).reshape({batch_size, spatial_count, descriptor_dim});
+    auto scores = descriptor_pair_similarity_scores(query_descriptors, flat_candidates);
     auto positive_scores = scores.gather(2, target_indices.unsqueeze(2)).squeeze(2);
 
     auto spatial_indices = torch::arange(spatial_count, target_indices.options());
     auto candidate_x = spatial_indices.remainder(descriptor_width).reshape({1, 1, spatial_count});
-    auto candidate_y = (spatial_indices / descriptor_width).reshape({1, 1, spatial_count});
+    auto candidate_y = torch::floor_divide(spatial_indices, descriptor_width).reshape({1, 1, spatial_count});
     auto target_x = target_indices.remainder(descriptor_width).unsqueeze(2);
-    auto target_y = (target_indices / descriptor_width).unsqueeze(2);
+    auto target_y = torch::floor_divide(target_indices, descriptor_width).unsqueeze(2);
     const auto exclusion_radius_sq =
         DENSE_DESCRIPTOR_HARD_NEGATIVE_EXCLUSION_RADIUS * DENSE_DESCRIPTOR_HARD_NEGATIVE_EXCLUSION_RADIUS;
     auto dx = (candidate_x - target_x).to(torch::kFloat32);
@@ -849,13 +1238,90 @@ torch::Tensor make_dense_descriptor_hard_negative_loss(
     auto near_positive = (dx.pow(2) + dy.pow(2)).le(exclusion_radius_sq);
 
     auto negative_scores = scores.masked_fill(near_positive, -std::numeric_limits<float>::infinity());
-    auto hardest_negative = std::get<0>(negative_scores.max(2));
-    auto finite_mask = torch::isfinite(hardest_negative);
+    const auto hard_count = std::min<int64_t>(DENSE_DESCRIPTOR_TOPK_NEGATIVES, negative_scores.size(2));
+    auto hard_negatives = std::get<0>(negative_scores.topk(hard_count, 2));
+    auto finite_mask = torch::isfinite(hard_negatives);
     if (!finite_mask.any().item<bool>()) {
+        return torch::zeros({}, query_descriptors.options());
+    }
+    auto margin = torch::relu(hard_negatives - positive_scores.unsqueeze(2) + DENSE_DESCRIPTOR_HARD_NEGATIVE_MARGIN);
+    auto finite_margin = margin.index({finite_mask});
+    auto strongest_margin = std::get<0>(margin.masked_fill(~finite_mask, 0.0F).max(2)).mean();
+    return strongest_margin * 0.5 + finite_margin.mean() * 0.5;
+}
+
+torch::Tensor make_dense_descriptor_hard_negative_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& sample_indices,
+    const torch::Tensor& target_indices
+) {
+    if (sample_indices.numel() == 0) {
         return torch::zeros({}, descriptors_a.options());
     }
-    auto margin = torch::relu(hardest_negative - positive_scores + DENSE_DESCRIPTOR_HARD_NEGATIVE_MARGIN);
-    return margin.index({finite_mask}).mean();
+    const auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
+    return make_descriptor_map_hard_negative_loss(sampled_a, descriptors_b, target_indices);
+}
+
+torch::Tensor make_bidirectional_dense_descriptor_hard_negative_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& sample_indices,
+    const torch::Tensor& target_indices
+) {
+    if (sample_indices.numel() == 0) {
+        return torch::zeros({}, descriptors_a.options());
+    }
+    auto forward = make_dense_descriptor_hard_negative_loss(descriptors_a, descriptors_b, sample_indices, target_indices);
+    auto target_candidate_indices = target_indices.unsqueeze(2);
+    auto positive_b = gather_descriptor_candidates(descriptors_b, target_candidate_indices).squeeze(2);
+    auto source_indices = sample_indices
+                              .to(target_indices.device(), torch::kLong)
+                              .unsqueeze(0)
+                              .expand_as(target_indices)
+                              .contiguous();
+    auto reverse = make_descriptor_map_hard_negative_loss(positive_b, descriptors_a, source_indices);
+    return forward + reverse * DENSE_DESCRIPTOR_REVERSE_HARD_NEGATIVE_WEIGHT;
+}
+
+torch::Tensor make_descriptor_finetune_anchor_loss(
+    const torch::Tensor& current_a,
+    const torch::Tensor& current_b,
+    const torch::Tensor& anchor_a,
+    const torch::Tensor& anchor_b,
+    const torch::Tensor& valid_mask
+) {
+    if (current_a.dim() != 4 || current_b.dim() != 4 || anchor_a.sizes() != current_a.sizes() ||
+        anchor_b.sizes() != current_b.sizes() || current_a.sizes() != current_b.sizes() ||
+        valid_mask.dim() != 3 || valid_mask.size(0) != current_a.size(0)) {
+        throw std::invalid_argument(
+            "descriptor finetune anchor inputs must have matching BxDxHxW descriptors and BxHxW mask");
+    }
+    auto mask = valid_mask.to(current_a.device(), torch::kFloat32).unsqueeze(1);
+    if (mask.size(2) != current_a.size(2) || mask.size(3) != current_a.size(3)) {
+        mask = torch::nn::functional::interpolate(
+            mask,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{current_a.size(2), current_a.size(3)})
+                .mode(torch::kNearest));
+    }
+    mask = mask.gt(0.0F).to(current_a.dtype());
+    const auto denom = mask.sum() * 2.0;
+    if (denom.item<double>() <= 0.0) {
+        return torch::zeros({}, current_a.options());
+    }
+    auto normalize = [](const torch::Tensor& descriptors) {
+        return torch::nn::functional::normalize(
+            descriptors,
+            torch::nn::functional::NormalizeFuncOptions().p(2).dim(1).eps(1.0e-12));
+    };
+    const auto current_a_normalized = normalize(current_a);
+    const auto current_b_normalized = normalize(current_b);
+    const auto anchor_a_normalized = normalize(anchor_a.to(current_a.device(), current_a.dtype()));
+    const auto anchor_b_normalized = normalize(anchor_b.to(current_b.device(), current_b.dtype()));
+    const auto drift_a = 1.0F - (current_a_normalized * anchor_a_normalized).sum(1, true);
+    const auto drift_b = 1.0F - (current_b_normalized * anchor_b_normalized).sum(1, true);
+    return ((drift_a + drift_b) * mask).sum() / denom.clamp_min(1.0);
 }
 
 torch::Tensor make_warp_descriptor_contrastive_loss(
@@ -864,11 +1330,11 @@ torch::Tensor make_warp_descriptor_contrastive_loss(
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask
 ) {
-    auto sample_indices = filter_descriptor_sample_indices(
-        make_descriptor_sample_indices(descriptors_a),
+    auto sample_indices = make_balanced_descriptor_sample_indices(
         valid_mask,
         descriptors_a.size(2),
-        descriptors_a.size(3));
+        descriptors_a.size(3),
+        MAX_DESCRIPTOR_LOSS_SAMPLES);
     if (sample_indices.numel() < 2) {
         return torch::zeros({}, descriptors_a.options());
     }
@@ -906,11 +1372,11 @@ torch::Tensor make_direct_full_map_descriptor_loss(
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask
 ) {
-    auto sample_indices = filter_descriptor_sample_indices(
-        make_descriptor_sample_indices(descriptors_a),
+    auto sample_indices = make_balanced_descriptor_sample_indices(
         valid_mask,
         descriptors_a.size(2),
-        descriptors_a.size(3));
+        descriptors_a.size(3),
+        MAX_DESCRIPTOR_LOSS_SAMPLES);
     const auto spatial_count_b = descriptors_b.size(2) * descriptors_b.size(3);
     if (sample_indices.numel() == 0 || spatial_count_b < 2) {
         return torch::zeros({}, descriptors_a.options());
@@ -966,6 +1432,86 @@ torch::Tensor make_positive_descriptor_alignment_loss(
     return (1.0F - (normalized_a * normalized_b).sum(2)).mean();
 }
 
+torch::Tensor make_patch_descriptor_alignment_loss(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto sample_indices = make_balanced_descriptor_sample_indices(
+        valid_mask,
+        descriptors_a.size(2),
+        descriptors_a.size(3),
+        MAX_DESCRIPTOR_LOSS_SAMPLES);
+    if (sample_indices.numel() == 0) {
+        return torch::zeros({}, descriptors_a.options());
+    }
+
+    auto target_coordinates =
+        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto make_scale_loss = [&](int64_t kernel_size) {
+        const auto padding = kernel_size / 2;
+        auto patch_a = torch::avg_pool2d(
+            descriptors_a,
+            {kernel_size, kernel_size},
+            {1, 1},
+            {padding, padding},
+            false,
+            true);
+        auto patch_b = torch::avg_pool2d(
+            descriptors_b,
+            {kernel_size, kernel_size},
+            {1, 1},
+            {padding, padding},
+            false,
+            true);
+        patch_a = patch_a / patch_a.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+        patch_b = patch_b / patch_b.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+        auto sampled_a = sample_spatial_descriptors(patch_a, sample_indices);
+        auto positive_b = sample_warped_descriptors(patch_b, target_coordinates);
+        return make_positive_descriptor_alignment_loss(sampled_a, positive_b);
+    };
+    return make_scale_loss(3) * 0.5 + make_scale_loss(5) * 0.5;
+}
+
+torch::Tensor make_supervised_descriptor_ranking_loss(
+    const torch::Tensor& sampled_a,
+    const torch::Tensor& candidate_b
+) {
+    if (sampled_a.dim() != 3 || candidate_b.dim() != 4 ||
+        sampled_a.size(0) != candidate_b.size(0) || sampled_a.size(1) != candidate_b.size(1) ||
+        sampled_a.size(2) != candidate_b.size(3)) {
+        throw std::invalid_argument("sampled_a and candidate_b must have matching BxNxD and BxNxKxD shapes");
+    }
+    if (candidate_b.size(2) < 2) {
+        return torch::zeros({}, sampled_a.options());
+    }
+
+    auto scores = descriptor_candidate_similarity_scores(sampled_a, candidate_b);
+    auto positive_scores = scores.narrow(2, 0, 1);
+    auto negative_scores = scores.narrow(2, 1, scores.size(2) - 1);
+    auto margin = torch::relu(negative_scores - positive_scores + SUPERVISED_DESCRIPTOR_RANKING_MARGIN);
+    const auto hard_count = std::min<int64_t>(SUPERVISED_DESCRIPTOR_TOPK_NEGATIVES, margin.size(2));
+    auto hard_negatives = std::get<0>(margin.topk(hard_count, 2)).mean();
+    auto all_negatives = margin.mean();
+    auto targets = torch::zeros(
+        {sampled_a.size(0), sampled_a.size(1)},
+        torch::TensorOptions().dtype(torch::kLong).device(sampled_a.device()));
+    auto ranking_ce = torch::nn::functional::cross_entropy(
+        (scores * SUPERVISED_DESCRIPTOR_RANKING_LOGIT_SCALE).reshape({sampled_a.size(0) * sampled_a.size(1), scores.size(2)}),
+        targets.reshape({sampled_a.size(0) * sampled_a.size(1)}));
+    auto soft_rank = 1.0F + torch::sigmoid(
+        (negative_scores - positive_scores) * SUPERVISED_DESCRIPTOR_SOFT_RANK_SCALE).sum(2);
+    auto soft_rank_loss = torch::log(soft_rank).mean();
+    auto tail_rank_loss = torch::log1p(
+        torch::relu(soft_rank - SUPERVISED_DESCRIPTOR_TAIL_RANK_START)).mean();
+    return ranking_ce * 0.4 +
+           hard_negatives * 0.45 +
+           all_negatives * 0.15 +
+           soft_rank_loss * SUPERVISED_DESCRIPTOR_SOFT_RANK_WEIGHT +
+           tail_rank_loss * SUPERVISED_DESCRIPTOR_TAIL_RANK_WEIGHT;
+}
+
 torch::Tensor make_descriptor_map_regularization_loss(const torch::Tensor& descriptors) {
     if (!descriptors.defined() || descriptors.dim() != 4) {
         throw std::invalid_argument("descriptors must have shape BxCxHxW");
@@ -1003,6 +1549,41 @@ torch::Tensor make_descriptor_map_regularization_loss(const torch::Tensor& descr
     auto uniformity_loss = similarity.pow(2).masked_select(sample_eye.logical_not()).mean();
     return variance_loss + covariance_loss * DESCRIPTOR_MAP_COVARIANCE_WEIGHT +
            uniformity_loss * DESCRIPTOR_MAP_UNIFORMITY_WEIGHT;
+}
+
+torch::Tensor make_sampled_descriptor_decorrelation_loss(
+    const torch::Tensor& sampled_descriptors,
+    const torch::Tensor& sample_indices,
+    int64_t descriptor_width
+) {
+    if (sampled_descriptors.dim() != 3 || sample_indices.dim() != 1 ||
+        sampled_descriptors.size(1) != sample_indices.size(0)) {
+        throw std::invalid_argument("sampled descriptor decorrelation inputs must have BxNxD descriptors and N indices");
+    }
+    const auto sample_count = sampled_descriptors.size(1);
+    if (sample_count < 2 || descriptor_width <= 0) {
+        return torch::zeros({}, sampled_descriptors.options());
+    }
+    auto normalized =
+        sampled_descriptors / sampled_descriptors.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    auto scores = torch::bmm(normalized, normalized.transpose(1, 2));
+
+    auto x = sample_indices.remainder(descriptor_width);
+    auto y = torch::floor_divide(sample_indices, descriptor_width);
+    auto dx = (x.reshape({sample_count, 1}) - x.reshape({1, sample_count})).abs();
+    auto dy = (y.reshape({sample_count, 1}) - y.reshape({1, sample_count})).abs();
+    auto nearby = dx.le(SAMPLED_DESCRIPTOR_DECORRELATION_EXCLUSION_RADIUS)
+                      .logical_and(dy.le(SAMPLED_DESCRIPTOR_DECORRELATION_EXCLUSION_RADIUS));
+    auto mask = nearby.unsqueeze(0).expand({sampled_descriptors.size(0), sample_count, sample_count});
+    auto negatives = scores.masked_fill(mask, -std::numeric_limits<float>::infinity());
+    const auto hard_count = std::min<int64_t>(SAMPLED_DESCRIPTOR_DECORRELATION_TOPK, sample_count);
+    auto hard_scores = std::get<0>(negatives.topk(hard_count, 2));
+    auto finite = torch::isfinite(hard_scores);
+    if (!finite.any().item<bool>()) {
+        return torch::zeros({}, sampled_descriptors.options());
+    }
+    auto margin = torch::relu(hard_scores - SAMPLED_DESCRIPTOR_DECORRELATION_MARGIN);
+    return margin.index({finite}).mean();
 }
 
 torch::Tensor make_rotation_invariant_texture_target(
@@ -1127,77 +1708,234 @@ torch::Tensor blend_rotation_invariant_texture_descriptor(
     return blended / blended.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
 }
 
-struct DescriptorTrainingMetrics {
-    torch::Tensor loss;
-    torch::Tensor accuracy;
-    torch::Tensor diversity;
-};
+torch::Tensor canonicalize_descriptor_map_by_orientation(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& orientation
+) {
+    if (!descriptors.defined() || !orientation.defined() || descriptors.dim() != 4 || orientation.dim() != 4 ||
+        descriptors.size(1) < 4 || descriptors.size(1) % 4 != 0 || orientation.size(0) != descriptors.size(0) ||
+        orientation.size(1) < 2) {
+        return descriptors;
+    }
 
-struct GraphMatchingTrainingMetrics {
-    torch::Tensor loss;
-    torch::Tensor sparse_descriptor_loss;
-    torch::Tensor accuracy;
-    int64_t query_count = 0;
-    int64_t positive_count = 0;
-    int64_t dustbin_count = 0;
-};
+    auto orientation_map = orientation.to(descriptors.device(), torch::kFloat32);
+    if (orientation_map.size(2) != descriptors.size(2) || orientation_map.size(3) != descriptors.size(3)) {
+        orientation_map = torch::nn::functional::interpolate(
+            orientation_map,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{descriptors.size(2), descriptors.size(3)})
+                .mode(torch::kBilinear)
+                .align_corners(false));
+    }
 
-DescriptorTrainingMetrics make_sparse_descriptor_metrics(
+    auto axis_x = orientation_map.narrow(1, 0, 1);
+    auto axis_y = orientation_map.narrow(1, 1, 1);
+    auto axis_norm = (axis_x * axis_x + axis_y * axis_y).sqrt();
+    auto turns = torch::round(torch::atan2(axis_y, axis_x) / (PI * 0.5)).to(torch::kLong).remainder(4);
+    turns = torch::where(turns.lt(0), turns + 4, turns);
+    turns = torch::where(axis_norm.gt(1.0e-6F), turns, torch::zeros_like(turns));
+
+    const auto group_channels = descriptors.size(1) / 4;
+    auto canonical = torch::zeros_like(descriptors);
+    for (int64_t turn = 0; turn < 4; ++turn) {
+        auto shifted = turn == 0 ? descriptors : torch::roll(descriptors, {-turn * group_channels}, {1});
+        canonical = canonical + shifted * turns.eq(turn).to(descriptors.dtype());
+    }
+    return canonical.contiguous();
+}
+
+torch::Tensor make_pairwise_texture_teacher_descriptor_loss(
     const torch::Tensor& descriptors_a,
     const torch::Tensor& descriptors_b,
+    const torch::Tensor& view_a,
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask
 ) {
-    const auto spatial_count = descriptors_b.size(2) * descriptors_b.size(3);
     auto sample_indices = filter_descriptor_sample_indices(
         make_descriptor_sample_indices(descriptors_a),
         valid_mask,
         descriptors_a.size(2),
         descriptors_a.size(3));
     if (sample_indices.numel() == 0) {
+        return torch::zeros({}, descriptors_a.options());
+    }
+
+    auto teacher_a = make_rotation_invariant_texture_target(
+        view_a,
+        descriptors_a.size(2),
+        descriptors_a.size(3),
+        descriptors_a.size(1));
+    auto sampled_teacher = sample_spatial_descriptors(teacher_a, sample_indices);
+    auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
+    auto target_coordinates =
+        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto positive_b = sample_warped_descriptors(descriptors_b, target_coordinates);
+
+    auto normalize = [](const torch::Tensor& tensor) {
+        return tensor / tensor.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
+    };
+    sampled_teacher = normalize(sampled_teacher);
+    sampled_a = normalize(sampled_a);
+    positive_b = normalize(positive_b);
+    auto loss_a = 1.0F - (sampled_a * sampled_teacher).sum(2);
+    auto loss_b = 1.0F - (positive_b * sampled_teacher).sum(2);
+    return (loss_a + loss_b).mean() * 0.5;
+}
+
+struct DescriptorTrainingMetrics {
+    torch::Tensor loss;
+    torch::Tensor accuracy;
+    torch::Tensor positive_score;
+    torch::Tensor hard_negative_score;
+    torch::Tensor positive_margin;
+    torch::Tensor positive_rank;
+    torch::Tensor diversity;
+};
+
+struct GraphMatchingTrainingMetrics {
+    torch::Tensor loss;
+    DescriptorTrainingMetrics sparse_descriptor;
+    torch::Tensor accuracy;
+    int64_t query_count = 0;
+    int64_t positive_count = 0;
+    int64_t dustbin_count = 0;
+    int64_t features_a_count = 0;
+    int64_t features_b_count = 0;
+};
+
+DescriptorTrainingMetrics make_sparse_descriptor_metrics(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask,
+    const torch::Tensor& candidate_valid_mask = torch::Tensor(),
+    int64_t broad_far_negative_count = DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT
+) {
+    if (descriptors_a.size(0) > 1) {
+        std::vector<DescriptorTrainingMetrics> batch_metrics;
+        batch_metrics.reserve(static_cast<size_t>(descriptors_a.size(0)));
+        for (int64_t batch = 0; batch < descriptors_a.size(0); ++batch) {
+            auto candidate_mask = candidate_valid_mask.defined()
+                ? candidate_valid_mask.index({batch}).unsqueeze(0).contiguous()
+                : torch::Tensor();
+            batch_metrics.push_back(make_sparse_descriptor_metrics(
+                descriptors_a.index({batch}).unsqueeze(0),
+                descriptors_b.index({batch}).unsqueeze(0),
+                warp.index({batch}).unsqueeze(0),
+                valid_mask.index({batch}).unsqueeze(0),
+                candidate_mask,
+                broad_far_negative_count));
+        }
+        auto stack_metric = [](const std::vector<DescriptorTrainingMetrics>& metrics, auto member) {
+            std::vector<torch::Tensor> values;
+            values.reserve(metrics.size());
+            for (const auto& metric : metrics) {
+                values.push_back(member(metric));
+            }
+            return torch::stack(values).mean();
+        };
+        return DescriptorTrainingMetrics{
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.loss; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.accuracy; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.positive_score; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.hard_negative_score; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.positive_margin; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.positive_rank; }),
+            stack_metric(batch_metrics, [](const DescriptorTrainingMetrics& metric) { return metric.diversity; })};
+    }
+    const auto spatial_count = descriptors_b.size(2) * descriptors_b.size(3);
+    auto sample_indices = make_balanced_descriptor_sample_indices(
+        valid_mask,
+        descriptors_a.size(2),
+        descriptors_a.size(3),
+        MAX_DESCRIPTOR_LOSS_SAMPLES);
+    if (sample_indices.numel() == 0) {
         auto zero = torch::zeros({}, descriptors_a.options());
-        return DescriptorTrainingMetrics{zero, zero, zero};
+        return DescriptorTrainingMetrics{zero, zero, zero, zero, zero, zero, zero};
     }
     auto sampled_a = sample_spatial_descriptors(descriptors_a, sample_indices);
     auto target_indices = make_descriptor_target_indices(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
-    auto candidate_indices = make_descriptor_candidate_indices(target_indices, spatial_count);
+    auto candidate_indices = make_descriptor_candidate_indices(
+        target_indices,
+        spatial_count,
+        descriptors_b.size(3),
+        candidate_valid_mask,
+        broad_far_negative_count);
     auto sampled_b = gather_descriptor_candidates(descriptors_b, candidate_indices);
+    auto target_coordinates =
+        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    auto positive_b = sample_warped_descriptors(descriptors_b, target_coordinates);
+    if (sampled_b.size(2) > 1) {
+        sampled_b = torch::cat({positive_b.unsqueeze(2), sampled_b.narrow(2, 1, sampled_b.size(2) - 1)}, 2);
+    } else {
+        sampled_b = positive_b.unsqueeze(2);
+    }
     auto target = torch::zeros(
         {descriptors_a.size(0), sample_indices.size(0)},
         torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device()));
     auto local_loss = descriptor_candidate_cross_entropy_loss(sampled_a, sampled_b, target);
-    auto target_coordinates =
-        make_descriptor_target_coordinates(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
-    auto positive_b = sample_warped_descriptors(descriptors_b, target_coordinates);
     auto global_targets = torch::arange(
                               sample_indices.size(0),
                               torch::TensorOptions().dtype(torch::kLong).device(descriptors_a.device()))
                               .unsqueeze(0)
                               .expand({descriptors_a.size(0), sample_indices.size(0)});
-    auto global_ab = descriptor_cross_entropy_loss(sampled_a, positive_b, global_targets);
-    auto global_ba = descriptor_cross_entropy_loss(positive_b, sampled_a, global_targets);
+    auto global_ab = make_strict_descriptor_cross_entropy_loss(sampled_a, positive_b, global_targets);
+    auto global_ba = make_strict_descriptor_cross_entropy_loss(positive_b, sampled_a, global_targets);
     auto dense_hard_negative =
         make_dense_descriptor_hard_negative_loss(descriptors_a, descriptors_b, sample_indices, target_indices);
     auto warp_contrastive = make_warp_descriptor_contrastive_loss(descriptors_a, descriptors_b, warp, valid_mask);
     auto direct_full_map = make_direct_full_map_descriptor_loss(descriptors_a, descriptors_b, warp, valid_mask);
     auto cross_batch_contrastive = make_cross_batch_descriptor_contrastive_loss(sampled_a, positive_b);
     auto positive_alignment = make_positive_descriptor_alignment_loss(sampled_a, positive_b);
-    auto loss = local_loss + (global_ab + global_ba) * 0.5 +
+    auto patch_alignment = make_patch_descriptor_alignment_loss(descriptors_a, descriptors_b, warp, valid_mask);
+    auto supervised_ranking = make_supervised_descriptor_ranking_loss(sampled_a, sampled_b);
+    auto sampled_decorrelation = torch::zeros({}, descriptors_a.options());
+    if constexpr (SAMPLED_DESCRIPTOR_DECORRELATION_WEIGHT > 0.0) {
+        sampled_decorrelation =
+            (make_sampled_descriptor_decorrelation_loss(sampled_a, sample_indices, descriptors_a.size(3)) +
+             make_sampled_descriptor_decorrelation_loss(positive_b, sample_indices, descriptors_a.size(3))) *
+            0.5;
+    }
+    auto loss = local_loss * DESCRIPTOR_LOCAL_CE_WEIGHT +
+                (global_ab + global_ba) * (0.5 * DESCRIPTOR_GLOBAL_CE_WEIGHT) +
                 dense_hard_negative * DENSE_DESCRIPTOR_HARD_NEGATIVE_WEIGHT +
                 warp_contrastive * WARP_DESCRIPTOR_CONTRASTIVE_WEIGHT +
                 direct_full_map * DIRECT_FULL_MAP_DESCRIPTOR_WEIGHT +
                 cross_batch_contrastive * CROSS_BATCH_DESCRIPTOR_CONTRASTIVE_WEIGHT +
-                positive_alignment * POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT;
-    auto normalized_a = sampled_a / sampled_a.pow(2).sum(2, true).clamp_min(1.0e-12).sqrt();
-    auto normalized_b = sampled_b / sampled_b.pow(2).sum(3, true).clamp_min(1.0e-12).sqrt();
-    auto logits = (normalized_a.unsqueeze(2) * normalized_b).sum(3);
+                positive_alignment * POSITIVE_DESCRIPTOR_ALIGNMENT_WEIGHT +
+                patch_alignment * PATCH_DESCRIPTOR_ALIGNMENT_WEIGHT +
+                supervised_ranking * SUPERVISED_DESCRIPTOR_RANKING_WEIGHT +
+                sampled_decorrelation * SAMPLED_DESCRIPTOR_DECORRELATION_WEIGHT;
+    auto logits = descriptor_candidate_similarity_scores(sampled_a, sampled_b);
     auto predictions = logits.argmax(2);
     auto accuracy = predictions.eq(target).to(torch::kFloat32).mean();
+    auto positive_scores = logits.narrow(2, 0, 1).squeeze(2);
+    torch::Tensor hard_negative_scores;
+    torch::Tensor positive_ranks;
+    if (logits.size(2) > 1) {
+        auto negative_scores = logits.narrow(2, 1, logits.size(2) - 1);
+        hard_negative_scores = std::get<0>(negative_scores.max(2));
+        positive_ranks = negative_scores.gt(positive_scores.unsqueeze(2)).to(torch::kFloat32).sum(2) + 1.0F;
+    } else {
+        hard_negative_scores = positive_scores;
+        positive_ranks = torch::ones_like(positive_scores);
+    }
+    auto positive_score = positive_scores.mean();
+    auto hard_negative_score = hard_negative_scores.mean();
+    auto positive_margin = (positive_scores - hard_negative_scores).mean();
+    auto positive_rank = positive_ranks.mean();
     auto diversity = (descriptor_diversity_loss(sampled_a) + descriptor_diversity_loss(positive_b)) * 0.5 +
                      (make_descriptor_map_regularization_loss(descriptors_a) +
                       make_descriptor_map_regularization_loss(descriptors_b)) *
                          0.5;
-    return DescriptorTrainingMetrics{loss, accuracy, diversity};
+    return DescriptorTrainingMetrics{
+        loss,
+        accuracy,
+        positive_score,
+        hard_negative_score,
+        positive_margin,
+        positive_rank,
+        diversity};
 }
 
 
@@ -1217,47 +1955,34 @@ torch::Tensor assign_graph_matching_targets(
         return targets;
     }
 
-    auto points_a_cpu = keypoints_a.detach().to(torch::kCPU, torch::kFloat32).contiguous();
-    auto points_b_cpu = keypoints_b.detach().to(torch::kCPU, torch::kFloat32).contiguous();
-    auto warp_cpu = warp.detach().to(torch::kCPU, torch::kFloat32).contiguous();
-    auto mask_cpu = valid_mask.detach().to(torch::kCPU, torch::kBool).contiguous();
-    std::vector<int64_t> labels(static_cast<size_t>(keypoints_a.size(0)), dustbin);
-    const auto radius_sq = positive_radius_pixels * positive_radius_pixels;
+    const auto image_height = warp.size(1);
+    const auto image_width = warp.size(2);
+    auto points_a = keypoints_a.to(warp.device(), torch::kFloat32).contiguous();
+    auto points_b = keypoints_b.to(warp.device(), torch::kFloat32).contiguous();
+    auto x = points_a.index({torch::indexing::Slice(), 0}).round().to(torch::kLong);
+    auto y = points_a.index({torch::indexing::Slice(), 1}).round().to(torch::kLong);
+    auto source_in_bounds = x.ge(0).logical_and(x.lt(image_width)).logical_and(y.ge(0)).logical_and(y.lt(image_height));
+    auto x_safe = x.clamp(0, image_width - 1);
+    auto y_safe = y.clamp(0, image_height - 1);
+    auto source_linear = y_safe * image_width + x_safe;
+    auto source_valid = valid_mask.to(warp.device(), torch::kBool)
+                            .reshape({image_height * image_width})
+                            .index_select(0, source_linear)
+                            .logical_and(source_in_bounds);
 
-    for (int64_t index = 0; index < points_a_cpu.size(0); ++index) {
-        const auto x = static_cast<int64_t>(std::llround(points_a_cpu.index({index, 0}).item<float>()));
-        const auto y = static_cast<int64_t>(std::llround(points_a_cpu.index({index, 1}).item<float>()));
-        if (y < 0 || y >= warp_cpu.size(1) || x < 0 || x >= warp_cpu.size(2)) {
-            continue;
-        }
-        if (!mask_cpu.index({0, y, x}).item<bool>()) {
-            continue;
-        }
-        const auto expected_x = warp_cpu.index({0, y, x, 0}).item<float>();
-        const auto expected_y = warp_cpu.index({0, y, x, 1}).item<float>();
-        const auto target_x = static_cast<int64_t>(std::llround(expected_x));
-        const auto target_y = static_cast<int64_t>(std::llround(expected_y));
-        if (target_y < 0 || target_y >= mask_cpu.size(1) || target_x < 0 || target_x >= mask_cpu.size(2)) {
-            continue;
-        }
-        if (!mask_cpu.index({0, target_y, target_x}).item<bool>()) {
-            continue;
-        }
-        int64_t best = dustbin;
-        double best_distance = radius_sq;
-        for (int64_t candidate = 0; candidate < points_b_cpu.size(0); ++candidate) {
-            const auto dx = static_cast<double>(points_b_cpu.index({candidate, 0}).item<float>()) - expected_x;
-            const auto dy = static_cast<double>(points_b_cpu.index({candidate, 1}).item<float>()) - expected_y;
-            const auto distance = dx * dx + dy * dy;
-            if (distance <= best_distance) {
-                best_distance = distance;
-                best = candidate;
-            }
-        }
-        labels[static_cast<size_t>(index)] = best;
-    }
+    auto sampled_warp = warp.reshape({image_height * image_width, 2}).index_select(0, source_linear);
+    auto target_x = sampled_warp.index({torch::indexing::Slice(), 0}).round().to(torch::kLong);
+    auto target_y = sampled_warp.index({torch::indexing::Slice(), 1}).round().to(torch::kLong);
+    auto target_in_bounds =
+        target_x.ge(0).logical_and(target_x.lt(image_width)).logical_and(target_y.ge(0)).logical_and(target_y.lt(image_height));
 
-    return torch::tensor(labels, targets.options());
+    auto delta = points_b.unsqueeze(0) - sampled_warp.unsqueeze(1);
+    auto distances = delta.pow(2).sum(2);
+    auto min_result = distances.min(1);
+    auto best_distance = std::get<0>(min_result);
+    auto best_index = std::get<1>(min_result).to(torch::kLong);
+    auto positive = source_valid.logical_and(target_in_bounds).logical_and(best_distance.le(positive_radius_pixels * positive_radius_pixels));
+    return torch::where(positive, best_index, targets.to(warp.device())).to(keypoints_a.device(), torch::kLong);
 }
 
 torch::Tensor make_graph_candidate_indices(
@@ -1290,6 +2015,36 @@ torch::Tensor make_graph_candidate_indices(
     return torch::tensor(candidates, torch::TensorOptions().dtype(torch::kLong).device(target_indices.device()));
 }
 
+torch::Tensor make_graph_training_query_indices(
+    const torch::Tensor& target_indices,
+    int64_t keypoint_count_b,
+    int64_t max_queries
+) {
+    if (max_queries <= 0 || target_indices.numel() == 0) {
+        return torch::empty({0}, torch::TensorOptions().dtype(torch::kLong).device(target_indices.device()));
+    }
+
+    const auto positive_mask = target_indices.ge(0).logical_and(target_indices.lt(keypoint_count_b));
+    auto positive_indices = torch::nonzero(positive_mask).flatten();
+    auto background_indices = torch::nonzero(positive_mask.logical_not()).flatten();
+    const auto reserved_background = background_indices.size(0) > 0
+        ? std::min<int64_t>(background_indices.size(0), std::max<int64_t>(1, max_queries / 4))
+        : 0;
+    const auto positive_keep = std::min<int64_t>(
+        positive_indices.size(0),
+        max_queries - reserved_background);
+    if (positive_keep >= max_queries) {
+        return positive_indices.narrow(0, 0, max_queries).contiguous();
+    }
+    const auto background_keep = std::min<int64_t>(background_indices.size(0), max_queries - positive_keep);
+    if (background_keep <= 0) {
+        return positive_indices.narrow(0, 0, positive_keep).contiguous();
+    }
+    return torch::cat({
+        positive_indices.narrow(0, 0, positive_keep),
+        background_indices.narrow(0, 0, background_keep)}, 0).contiguous();
+}
+
 torch::Tensor scale_feature_keypoints_to_image(
     const torch::Tensor& keypoints,
     int64_t feature_width,
@@ -1304,10 +2059,52 @@ torch::Tensor scale_feature_keypoints_to_image(
         {static_cast<float>(image_width) / static_cast<float>(feature_width),
          static_cast<float>(image_height) / static_cast<float>(feature_height)},
         keypoints.options());
-    return keypoints * scale;
+    return (keypoints + 0.5F) * scale - 0.5F;
 }
 
-torch::Tensor make_keypoint_descriptor_loss(
+torch::Tensor make_keypoint_descriptor_target_coordinates(
+    const torch::Tensor& image_keypoints_a,
+    const torch::Tensor& warp,
+    int64_t descriptor_height,
+    int64_t descriptor_width
+) {
+    using torch::indexing::Slice;
+
+    const auto image_height = warp.size(1);
+    const auto image_width = warp.size(2);
+    auto image_x = image_keypoints_a.index({Slice(), 0}).clamp(0, image_width - 1);
+    auto image_y = image_keypoints_a.index({Slice(), 1}).clamp(0, image_height - 1);
+    auto grid_x = image_width > 1
+                      ? image_x / static_cast<float>(image_width - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(image_x);
+    auto grid_y = image_height > 1
+                      ? image_y / static_cast<float>(image_height - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(image_y);
+    auto grid = torch::stack({grid_x, grid_y}, 1)
+                    .reshape({1, image_keypoints_a.size(0), 1, 2})
+                    .expand({warp.size(0), image_keypoints_a.size(0), 1, 2})
+                    .contiguous();
+    auto sampled_warp = torch::nn::functional::grid_sample(
+                            warp.permute({0, 3, 1, 2}).contiguous(),
+                            grid,
+                            torch::nn::functional::GridSampleFuncOptions()
+                                .mode(torch::kBilinear)
+                                .padding_mode(torch::kBorder)
+                                .align_corners(true))
+                            .squeeze(3)
+                            .permute({0, 2, 1});
+    auto target_x = (sampled_warp.index({Slice(), Slice(), 0}) + 0.5F) *
+                        static_cast<float>(descriptor_width) / static_cast<float>(image_width) -
+                    0.5F;
+    auto target_y = (sampled_warp.index({Slice(), Slice(), 1}) + 0.5F) *
+                        static_cast<float>(descriptor_height) / static_cast<float>(image_height) -
+                    0.5F;
+    target_x = target_x.clamp(0, descriptor_width - 1);
+    target_y = target_y.clamp(0, descriptor_height - 1);
+    return torch::stack({target_x, target_y}, 2).contiguous();
+}
+
+DescriptorTrainingMetrics make_keypoint_descriptor_metrics(
     const FeatureSet& features_a,
     const FeatureSet& features_b,
     const torch::Tensor& warp,
@@ -1316,7 +2113,7 @@ torch::Tensor make_keypoint_descriptor_loss(
     auto zero = torch::zeros({}, warp.options());
     if (!features_a.keypoints.defined() || !features_b.keypoints.defined() ||
         features_a.keypoints.size(0) == 0 || features_b.keypoints.size(0) == 0) {
-        return zero;
+        return DescriptorTrainingMetrics{zero, zero, zero, zero, zero, zero, zero};
     }
 
     const auto query_count = std::min<int64_t>(features_a.keypoints.size(0), KEYPOINT_DESCRIPTOR_MAX_QUERIES);
@@ -1348,30 +2145,87 @@ torch::Tensor make_keypoint_descriptor_loss(
         GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS);
     const auto positive_mask = target_full.lt(keypoints_b.size(0));
     if (!positive_mask.any().item<bool>()) {
-        return zero;
+        return DescriptorTrainingMetrics{zero, zero, zero, zero, zero, zero, zero};
     }
 
     auto positive_descriptors_a = descriptors_a.index({positive_mask});
     auto positive_targets = target_full.index({positive_mask});
-    auto ce_loss = descriptor_cross_entropy_loss(
+    auto strict_ce_loss = make_strict_descriptor_cross_entropy_loss(
         positive_descriptors_a.unsqueeze(0),
         descriptors_b.unsqueeze(0),
         positive_targets.unsqueeze(0));
-    if (descriptors_b.size(0) < 2) {
-        return ce_loss;
-    }
-
     auto scores = descriptor_pair_similarity_scores(
                       positive_descriptors_a.unsqueeze(0),
                       descriptors_b.unsqueeze(0))
                       .squeeze(0);
     auto row_indices = torch::arange(positive_targets.size(0), positive_targets.options());
     auto positive_scores = scores.index({row_indices, positive_targets});
-    auto negative_scores = scores.clone();
+    auto predictions = scores.argmax(1);
+    auto accuracy = predictions.eq(positive_targets).to(torch::kFloat32).mean();
+    auto positive_score = positive_scores.mean();
+    auto diversity = (descriptor_diversity_loss(positive_descriptors_a.unsqueeze(0)) +
+                      descriptor_diversity_loss(descriptors_b.unsqueeze(0))) *
+                     0.5;
+    if (descriptors_b.size(0) < 2) {
+        return DescriptorTrainingMetrics{
+            strict_ce_loss,
+            accuracy,
+            positive_score,
+            positive_score,
+            torch::zeros({}, scores.options()),
+            torch::ones({}, scores.options()),
+            diversity};
+    }
+
+    auto positive_source_indices = torch::nonzero(positive_mask).flatten();
+    auto positive_image_keypoints_a = image_keypoints_a.index_select(0, positive_source_indices)
+                                          .round()
+                                          .to(torch::kLong);
+    auto positive_source_linear =
+        positive_image_keypoints_a.index({torch::indexing::Slice(), 1}).clamp(0, warp.size(1) - 1) * warp.size(2) +
+        positive_image_keypoints_a.index({torch::indexing::Slice(), 0}).clamp(0, warp.size(2) - 1);
+    auto warped_positive_targets = warp.reshape({warp.size(1) * warp.size(2), 2}).index_select(
+        0,
+        positive_source_linear);
+    auto candidate_delta = image_keypoints_b.unsqueeze(0) - warped_positive_targets.unsqueeze(1);
+    auto false_negative_mask = candidate_delta.pow(2).sum(2).le(
+        KEYPOINT_DESCRIPTOR_FALSE_NEGATIVE_RADIUS_PIXELS * KEYPOINT_DESCRIPTOR_FALSE_NEGATIVE_RADIUS_PIXELS);
+    false_negative_mask.index_put_({row_indices, positive_targets}, false);
+    auto candidate_available = false_negative_mask.logical_not();
+    candidate_available.index_put_({row_indices, positive_targets}, false);
+    auto has_available_negative = candidate_available.any(1);
+    if (has_available_negative.logical_not().any().item<bool>()) {
+        false_negative_mask.index_put_({has_available_negative.logical_not()}, false);
+    }
+
+    auto masked_logits = scores * 20.0F;
+    masked_logits = masked_logits.masked_fill(false_negative_mask, -std::numeric_limits<float>::infinity());
+    auto ce_loss = torch::nn::functional::cross_entropy(masked_logits, positive_targets);
+    auto negative_scores = scores.masked_fill(false_negative_mask, -std::numeric_limits<float>::infinity());
     negative_scores.index_put_({row_indices, positive_targets}, -std::numeric_limits<float>::infinity());
     auto hardest_negative = std::get<0>(negative_scores.max(1));
     auto margin_loss = torch::relu(hardest_negative - positive_scores + KEYPOINT_DESCRIPTOR_MARGIN).mean();
-    return ce_loss + margin_loss * KEYPOINT_DESCRIPTOR_MARGIN_WEIGHT;
+    auto alignment_loss = (1.0F - positive_scores).mean();
+    auto hard_negative_score = hardest_negative.mean();
+    auto positive_ranks = negative_scores.gt(positive_scores.unsqueeze(1)).to(torch::kFloat32).sum(1) + 1.0F;
+    return DescriptorTrainingMetrics{
+        ce_loss + margin_loss * KEYPOINT_DESCRIPTOR_MARGIN_WEIGHT +
+            alignment_loss * KEYPOINT_DESCRIPTOR_POSITIVE_ALIGNMENT_WEIGHT,
+        accuracy,
+        positive_score,
+        hard_negative_score,
+        (positive_scores - hardest_negative).mean(),
+        positive_ranks.mean(),
+        diversity};
+}
+
+torch::Tensor make_keypoint_descriptor_loss(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_keypoint_descriptor_metrics(features_a, features_b, warp, valid_mask).loss;
 }
 
 torch::Tensor make_keypoint_dense_descriptor_loss(
@@ -1409,17 +2263,26 @@ torch::Tensor make_keypoint_dense_descriptor_loss(
     auto flat_valid = valid_mask.reshape({image_height * image_width}).to(torch::kBool);
     auto source_valid = flat_valid.index_select(0, source_linear);
     auto sampled_warp = warp.reshape({image_height * image_width, 2}).index_select(0, source_linear);
-    auto target_x_image = sampled_warp.index({torch::indexing::Slice(), 0}).round().to(torch::kLong).clamp(0, image_width - 1);
-    auto target_y_image = sampled_warp.index({torch::indexing::Slice(), 1}).round().to(torch::kLong).clamp(0, image_height - 1);
-    auto target_valid = flat_valid.index_select(0, target_y_image * image_width + target_x_image);
-    auto positive_mask = source_valid.logical_and(target_valid);
+    auto target_x_float = sampled_warp.index({torch::indexing::Slice(), 0});
+    auto target_y_float = sampled_warp.index({torch::indexing::Slice(), 1});
+    auto target_in_bounds = target_x_float.ge(0.0F)
+                                .logical_and(target_x_float.le(static_cast<float>(image_width - 1)))
+                                .logical_and(target_y_float.ge(0.0F))
+                                .logical_and(target_y_float.le(static_cast<float>(image_height - 1)));
+    auto target_x_image = target_x_float.round().to(torch::kLong).clamp(0, image_width - 1);
+    auto target_y_image = target_y_float.round().to(torch::kLong).clamp(0, image_height - 1);
+    auto positive_mask = source_valid.logical_and(target_in_bounds);
     if (!positive_mask.any().item<bool>()) {
         return zero;
     }
 
     auto positive_descriptors_a = descriptors_a.index({positive_mask});
-    auto target_x = (target_x_image.index({positive_mask}) * descriptor_width / image_width).clamp(0, descriptor_width - 1);
-    auto target_y = (target_y_image.index({positive_mask}) * descriptor_height / image_height).clamp(0, descriptor_height - 1);
+    auto target_x = torch::floor_divide(
+        target_x_image.index({positive_mask}) * descriptor_width,
+        image_width).clamp(0, descriptor_width - 1);
+    auto target_y = torch::floor_divide(
+        target_y_image.index({positive_mask}) * descriptor_height,
+        image_height).clamp(0, descriptor_height - 1);
     auto target_indices = (target_y * descriptor_width + target_x).to(torch::kLong);
     const auto spatial_count = descriptor_width * descriptor_height;
     auto flat_b = descriptors_b.squeeze(0).permute({1, 2, 0}).reshape({spatial_count, descriptors_b.size(1)}).unsqueeze(0);
@@ -1431,7 +2294,7 @@ torch::Tensor make_keypoint_dense_descriptor_loss(
     auto positive_scores = scores.index({row_indices, target_indices});
     auto spatial_indices = torch::arange(spatial_count, target_indices.options());
     auto candidate_x = spatial_indices.remainder(descriptor_width).reshape({1, spatial_count});
-    auto candidate_y = (spatial_indices / descriptor_width).reshape({1, spatial_count});
+    auto candidate_y = torch::floor_divide(spatial_indices, descriptor_width).reshape({1, spatial_count});
     auto dx = (candidate_x - target_x.unsqueeze(1)).to(torch::kFloat32);
     auto dy = (candidate_y - target_y.unsqueeze(1)).to(torch::kFloat32);
     const auto exclusion_radius_sq =
@@ -1444,7 +2307,154 @@ torch::Tensor make_keypoint_dense_descriptor_loss(
         return ce_loss;
     }
     auto margin_loss = torch::relu(hardest_negative - positive_scores + KEYPOINT_DENSE_DESCRIPTOR_MARGIN);
-    return ce_loss + margin_loss.index({finite_mask}).mean() * KEYPOINT_DENSE_DESCRIPTOR_MARGIN_WEIGHT;
+    auto alignment_loss = (1.0F - positive_scores).mean();
+    return ce_loss + margin_loss.index({finite_mask}).mean() * KEYPOINT_DENSE_DESCRIPTOR_MARGIN_WEIGHT +
+           alignment_loss * KEYPOINT_DENSE_DESCRIPTOR_POSITIVE_ALIGNMENT_WEIGHT;
+}
+
+torch::Tensor make_keypoint_patch_descriptor_alignment_loss(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto zero = torch::zeros({}, warp.options());
+    if (!features_a.keypoints.defined() || !features_a.descriptors.defined() ||
+        features_a.keypoints.size(0) == 0 || descriptors_b.size(0) == 0 ||
+        descriptors_b.size(2) == 0 || descriptors_b.size(3) == 0) {
+        return zero;
+    }
+
+    const auto query_count = std::min<int64_t>(features_a.keypoints.size(0), KEYPOINT_DENSE_DESCRIPTOR_MAX_QUERIES);
+    auto query_indices = torch::arange(
+        query_count,
+        torch::TensorOptions().dtype(torch::kLong).device(features_a.keypoints.device()));
+    auto keypoints_a = features_a.keypoints.index_select(0, query_indices).to(warp.device());
+    auto descriptors_a = features_a.descriptors.index_select(0, query_indices).to(warp.device());
+    auto image_keypoints_a = scale_feature_keypoints_to_image(
+        keypoints_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height,
+        warp.size(2),
+        warp.size(1));
+
+    const auto image_width = warp.size(2);
+    const auto image_height = warp.size(1);
+    const auto descriptor_width = descriptors_b.size(3);
+    const auto descriptor_height = descriptors_b.size(2);
+    auto source_x = image_keypoints_a.index({torch::indexing::Slice(), 0}).round().to(torch::kLong).clamp(0, image_width - 1);
+    auto source_y = image_keypoints_a.index({torch::indexing::Slice(), 1}).round().to(torch::kLong).clamp(0, image_height - 1);
+    auto source_linear = source_y * image_width + source_x;
+    auto flat_valid = valid_mask.reshape({image_height * image_width}).to(torch::kBool);
+    auto source_valid = flat_valid.index_select(0, source_linear);
+    auto sampled_warp = warp.reshape({image_height * image_width, 2}).index_select(0, source_linear);
+    auto target_x_float = sampled_warp.index({torch::indexing::Slice(), 0});
+    auto target_y_float = sampled_warp.index({torch::indexing::Slice(), 1});
+    auto target_in_bounds = target_x_float.ge(0.0F)
+                                .logical_and(target_x_float.le(static_cast<float>(image_width - 1)))
+                                .logical_and(target_y_float.ge(0.0F))
+                                .logical_and(target_y_float.le(static_cast<float>(image_height - 1)));
+    auto positive_mask = source_valid.logical_and(target_in_bounds);
+    if (!positive_mask.any().item<bool>()) {
+        return zero;
+    }
+
+    auto positive_descriptors_a =
+        torch::nn::functional::normalize(descriptors_a.index({positive_mask}), torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto normalized_descriptors_b = torch::nn::functional::normalize(
+        descriptors_b,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto target_coordinates = make_keypoint_descriptor_target_coordinates(
+        image_keypoints_a.index({positive_mask}),
+        warp,
+        descriptor_height,
+        descriptor_width);
+    auto positive_descriptors_b =
+        sample_warped_descriptors(normalized_descriptors_b, target_coordinates).squeeze(0);
+    auto positive_scores = (positive_descriptors_a * positive_descriptors_b).sum(1);
+    return (1.0F - positive_scores).mean();
+}
+
+torch::Tensor make_warped_keypoint_descriptor_contrastive_loss(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto zero = torch::zeros({}, warp.options());
+    if (!features_a.keypoints.defined() || !features_a.descriptors.defined() ||
+        features_a.keypoints.size(0) == 0 || descriptors_b.size(0) == 0 ||
+        descriptors_b.size(2) == 0 || descriptors_b.size(3) == 0) {
+        return zero;
+    }
+
+    const auto query_count = std::min<int64_t>(features_a.keypoints.size(0), KEYPOINT_DESCRIPTOR_MAX_QUERIES);
+    auto query_indices = torch::arange(
+        query_count,
+        torch::TensorOptions().dtype(torch::kLong).device(features_a.keypoints.device()));
+    auto keypoints_a = features_a.keypoints.index_select(0, query_indices).to(warp.device());
+    auto descriptors_a = features_a.descriptors.index_select(0, query_indices).to(warp.device());
+    auto image_keypoints_a = scale_feature_keypoints_to_image(
+        keypoints_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height,
+        warp.size(2),
+        warp.size(1));
+
+    const auto image_width = warp.size(2);
+    const auto image_height = warp.size(1);
+    auto source_x = image_keypoints_a.index({torch::indexing::Slice(), 0}).round().to(torch::kLong).clamp(0, image_width - 1);
+    auto source_y = image_keypoints_a.index({torch::indexing::Slice(), 1}).round().to(torch::kLong).clamp(0, image_height - 1);
+    auto source_linear = source_y * image_width + source_x;
+    auto source_valid = valid_mask.reshape({image_height * image_width})
+                            .to(warp.device(), torch::kBool)
+                            .index_select(0, source_linear);
+    auto sampled_warp = warp.reshape({image_height * image_width, 2}).index_select(0, source_linear);
+    auto target_x_float = sampled_warp.index({torch::indexing::Slice(), 0});
+    auto target_y_float = sampled_warp.index({torch::indexing::Slice(), 1});
+    auto target_in_bounds = target_x_float.ge(0.0F)
+                                .logical_and(target_x_float.le(static_cast<float>(image_width - 1)))
+                                .logical_and(target_y_float.ge(0.0F))
+                                .logical_and(target_y_float.le(static_cast<float>(image_height - 1)));
+    auto positive_mask = source_valid.logical_and(target_in_bounds);
+    if (!positive_mask.any().item<bool>()) {
+        return zero;
+    }
+
+    auto positive_descriptors_a = descriptors_a.index({positive_mask});
+    auto positive_keypoints_a = image_keypoints_a.index({positive_mask});
+    auto normalized_descriptors_b = torch::nn::functional::normalize(
+        descriptors_b,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto target_coordinates = make_keypoint_descriptor_target_coordinates(
+        positive_keypoints_a,
+        warp,
+        descriptors_b.size(2),
+        descriptors_b.size(3));
+    auto positive_descriptors_b =
+        sample_warped_descriptors(normalized_descriptors_b, target_coordinates).squeeze(0);
+    positive_descriptors_a = torch::nn::functional::normalize(
+        positive_descriptors_a,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+
+    if (positive_descriptors_a.size(0) < 2) {
+        auto positive_scores = (positive_descriptors_a * positive_descriptors_b).sum(1);
+        return (1.0F - positive_scores).mean();
+    }
+    auto targets = torch::arange(
+        positive_descriptors_a.size(0),
+        torch::TensorOptions().dtype(torch::kLong).device(warp.device()));
+    auto scores = descriptor_pair_similarity_scores(
+                      positive_descriptors_a.unsqueeze(0),
+                      positive_descriptors_b.unsqueeze(0))
+                      .squeeze(0) *
+                  20.0F;
+    auto loss_ab = torch::nn::functional::cross_entropy(scores, targets);
+    auto loss_ba = torch::nn::functional::cross_entropy(scores.transpose(0, 1).contiguous(), targets);
+    auto row_indices = torch::arange(positive_descriptors_a.size(0), targets.options());
+    auto positive_scores = scores.index({row_indices, targets}) / 20.0F;
+    auto alignment = (1.0F - positive_scores).mean();
+    return (loss_ab + loss_ba) * 0.5F + alignment * 8.0F;
 }
 
 GraphMatchingTrainingMetrics make_keypoint_graph_matching_metrics(
@@ -1457,20 +2467,23 @@ GraphMatchingTrainingMetrics make_keypoint_graph_matching_metrics(
     auto zero = torch::zeros({}, warp.options());
     if (!features_a.keypoints.defined() || !features_b.keypoints.defined() ||
         features_a.keypoints.size(0) == 0 || features_b.keypoints.size(0) == 0) {
-        return GraphMatchingTrainingMetrics{zero, zero, zero, 0, 0, 0};
+        return GraphMatchingTrainingMetrics{
+            zero,
+            DescriptorTrainingMetrics{zero, zero, zero, zero, zero, zero, zero},
+            zero,
+            0,
+            0,
+            0,
+            features_a.keypoints.defined() ? features_a.keypoints.size(0) : 0,
+            features_b.keypoints.defined() ? features_b.keypoints.size(0) : 0};
     }
 
-    const auto query_count = std::min<int64_t>(features_a.keypoints.size(0), GRAPH_MATCHING_MAX_QUERIES);
-    auto query_indices = torch::arange(
-        query_count,
-        torch::TensorOptions().dtype(torch::kLong).device(features_a.keypoints.device()));
-    auto keypoints_a = features_a.keypoints.index_select(0, query_indices).to(warp.device());
-    auto descriptors_a = features_a.descriptors.index_select(0, query_indices).to(warp.device());
     auto keypoints_b = features_b.keypoints.to(warp.device());
     auto descriptors_b = features_b.descriptors.to(warp.device());
 
-    auto image_keypoints_a = scale_feature_keypoints_to_image(
-        keypoints_a,
+    auto all_keypoints_a = features_a.keypoints.to(warp.device());
+    auto image_keypoints_a_all = scale_feature_keypoints_to_image(
+        all_keypoints_a,
         features_a.feature_map_width,
         features_a.feature_map_height,
         warp.size(2),
@@ -1481,26 +2494,304 @@ GraphMatchingTrainingMetrics make_keypoint_graph_matching_metrics(
         features_b.feature_map_height,
         warp.size(2),
         warp.size(1));
-    auto target_full = assign_graph_matching_targets(
-        image_keypoints_a,
+    auto target_full_all = assign_graph_matching_targets(
+        image_keypoints_a_all,
         image_keypoints_b,
         warp,
         valid_mask,
         GRAPH_MATCHING_POSITIVE_RADIUS_PIXELS);
+    auto query_indices = make_graph_training_query_indices(
+        target_full_all,
+        keypoints_b.size(0),
+        GRAPH_MATCHING_MAX_QUERIES);
+    if (query_indices.size(0) == 0) {
+        return GraphMatchingTrainingMetrics{
+            zero,
+            DescriptorTrainingMetrics{zero, zero, zero, zero, zero, zero, zero},
+            zero,
+            0,
+            0,
+            0,
+            features_a.keypoints.size(0),
+            features_b.keypoints.size(0)};
+    }
+    auto feature_query_indices = query_indices.to(features_a.keypoints.device());
+    auto keypoints_a = features_a.keypoints.index_select(0, feature_query_indices).to(warp.device());
+    auto descriptors_a = features_a.descriptors.index_select(0, feature_query_indices).to(warp.device());
+    auto target_full = target_full_all.index_select(0, query_indices);
     auto output = graph_matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b);
-    auto loss = graph_matching_cross_entropy_loss(output.logits, target_full);
-    auto sparse_descriptor_loss = make_keypoint_descriptor_loss(features_a, features_b, warp, valid_mask);
-    auto predictions = output.logits.narrow(0, 0, target_full.size(0)).argmax(1);
-    auto accuracy = predictions.eq(target_full).to(torch::kFloat32).mean();
+    auto row_logits = output.logits.narrow(0, 0, target_full.size(0));
+    const auto positive_mask = target_full.lt(keypoints_b.size(0));
+    const auto dustbin_mask = target_full.eq(keypoints_b.size(0));
+    auto positive_indices = torch::nonzero(positive_mask).flatten();
+    auto dustbin_indices = torch::nonzero(dustbin_mask).flatten();
+    torch::Tensor loss_indices;
+    if (positive_indices.numel() > 0) {
+        const auto dustbin_keep = std::min<int64_t>(dustbin_indices.size(0), positive_indices.size(0));
+        loss_indices = dustbin_keep > 0
+            ? torch::cat({positive_indices, dustbin_indices.narrow(0, 0, dustbin_keep)}, 0)
+            : positive_indices;
+    } else {
+        const auto dustbin_keep = std::min<int64_t>(dustbin_indices.size(0), GRAPH_MATCHING_MAX_QUERIES / 4);
+        loss_indices = dustbin_keep > 0 ? dustbin_indices.narrow(0, 0, dustbin_keep) : torch::empty({0}, target_full.options());
+    }
+    auto row_loss = loss_indices.numel() > 0
+        ? torch::nn::functional::cross_entropy(
+              row_logits.index_select(0, loss_indices),
+              target_full.index_select(0, loss_indices))
+        : zero;
+    auto column_loss = zero;
+    auto positive_margin_loss = zero;
+    if (positive_indices.numel() > 0) {
+        auto positive_targets = target_full.index_select(0, positive_indices);
+        auto positive_row_logits = row_logits.index_select(0, positive_indices);
+        auto row_indices = torch::arange(positive_indices.size(0), positive_targets.options());
+        auto positive_logits = positive_row_logits.index({row_indices, positive_targets});
+        auto negative_logits = positive_row_logits.narrow(1, 0, keypoints_b.size(0)).clone();
+        negative_logits.index_put_({row_indices, positive_targets}, -std::numeric_limits<float>::infinity());
+        auto hardest_negative = std::get<0>(negative_logits.max(1));
+        auto dustbin_logits = positive_row_logits.index({torch::indexing::Slice(), keypoints_b.size(0)});
+        auto finite_negative = torch::isfinite(hardest_negative);
+        auto margin_terms = torch::relu(dustbin_logits - positive_logits + GRAPH_POSITIVE_MARGIN);
+        if (finite_negative.any().item<bool>()) {
+            margin_terms = margin_terms + torch::relu(
+                hardest_negative.index({finite_negative}) -
+                positive_logits.index({finite_negative}) +
+                GRAPH_POSITIVE_MARGIN).mean();
+        }
+        positive_margin_loss = margin_terms.mean();
+
+        auto targets_cpu = target_full.index_select(0, positive_indices).detach().to(torch::kCPU, torch::kLong).contiguous();
+        std::vector<char> seen_targets(static_cast<std::size_t>(keypoints_b.size(0)), 0);
+        std::vector<int64_t> unique_offsets;
+        unique_offsets.reserve(static_cast<std::size_t>(targets_cpu.numel()));
+        for (int64_t offset = 0; offset < targets_cpu.numel(); ++offset) {
+            const auto target = targets_cpu.index({offset}).item<int64_t>();
+            if (target >= 0 && target < keypoints_b.size(0) && !seen_targets[static_cast<std::size_t>(target)]) {
+                seen_targets[static_cast<std::size_t>(target)] = 1;
+                unique_offsets.push_back(offset);
+            }
+        }
+        if (!unique_offsets.empty()) {
+            auto keep = torch::from_blob(
+                            unique_offsets.data(),
+                            {static_cast<int64_t>(unique_offsets.size())},
+                            torch::TensorOptions().dtype(torch::kLong))
+                            .clone()
+                            .to(target_full.device());
+            auto column_indices = target_full.index_select(0, positive_indices).index_select(0, keep);
+            auto column_targets = positive_indices.index_select(0, keep);
+            auto column_logits = output.logits
+                                     .index({
+                                         torch::indexing::Slice(0, keypoints_a.size(0) + 1),
+                                         column_indices})
+                                     .transpose(0, 1)
+                                     .contiguous();
+            column_loss = torch::nn::functional::cross_entropy(column_logits, column_targets);
+        }
+    }
+    auto loss = row_loss + column_loss * 0.5F + positive_margin_loss * GRAPH_POSITIVE_MARGIN_WEIGHT;
+    auto sparse_descriptor = make_keypoint_descriptor_metrics(features_a, features_b, warp, valid_mask);
+    auto predictions = row_logits.argmax(1);
+    auto accuracy = positive_mask.any().item<bool>()
+        ? predictions.index({positive_mask}).eq(target_full.index({positive_mask})).to(torch::kFloat32).mean()
+        : zero;
     const auto dustbin_label = keypoints_b.size(0);
     const auto dustbin_count = target_full.eq(dustbin_label).sum().item<int64_t>();
     return GraphMatchingTrainingMetrics{
         loss,
-        sparse_descriptor_loss,
+        sparse_descriptor,
         accuracy,
         target_full.size(0),
         target_full.size(0) - dustbin_count,
-        dustbin_count};
+        dustbin_count,
+        features_a.keypoints.size(0),
+        features_b.keypoints.size(0)};
+}
+
+std::pair<FeatureSet, FeatureSet> make_supervised_graph_feature_pair(
+    const SparseHeadOutput& sparse_a,
+    const SparseHeadOutput& sparse_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    const auto descriptor_height = sparse_a.descriptors.size(2);
+    const auto descriptor_width = sparse_a.descriptors.size(3);
+    auto sample_indices = make_balanced_descriptor_sample_indices(
+        valid_mask,
+        descriptor_height,
+        descriptor_width,
+        GRAPH_MATCHING_MAX_QUERIES);
+    const auto descriptor_options = sparse_a.descriptors.options();
+    const auto point_options = descriptor_options.dtype(torch::kFloat32);
+    auto empty_points = torch::empty({0, 2}, point_options);
+    auto empty_descriptors = torch::empty({0, sparse_a.descriptors.size(1)}, descriptor_options);
+    auto empty_scores = torch::empty({0}, point_options);
+    FeatureSet empty{
+        empty_points,
+        empty_scores,
+        empty_descriptors,
+        torch::empty({0}, point_options),
+        torch::empty({0}, point_options),
+        torch::empty({0, 4}, point_options),
+        empty_points,
+        empty_scores,
+        descriptor_width,
+        descriptor_height};
+    if (sample_indices.numel() == 0) {
+        return {empty, empty};
+    }
+
+    auto keypoint_y = torch::floor_divide(sample_indices, descriptor_width).to(torch::kFloat32);
+    auto keypoint_x = sample_indices.remainder(descriptor_width).to(torch::kFloat32);
+    auto keypoints_a = torch::stack({keypoint_x, keypoint_y}, 1).contiguous();
+    auto keypoints_b = make_descriptor_target_coordinates(
+                           warp,
+                           sample_indices,
+                           descriptor_height,
+                           descriptor_width)
+                           .squeeze(0)
+                           .contiguous();
+    auto descriptors_a = sample_spatial_descriptors(sparse_a.descriptors, sample_indices).squeeze(0);
+    auto descriptors_b = sample_warped_descriptors(sparse_b.descriptors, keypoints_b.unsqueeze(0)).squeeze(0);
+    descriptors_a = descriptors_a / descriptors_a.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    descriptors_b = descriptors_b / descriptors_b.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    auto scores = torch::ones({sample_indices.size(0)}, point_options);
+    auto scale = torch::ones({sample_indices.size(0)}, point_options);
+    auto orientation = torch::zeros({sample_indices.size(0)}, point_options);
+    auto affine = torch::zeros({sample_indices.size(0), 4}, point_options);
+
+    FeatureSet features_a{
+        keypoints_a,
+        scores,
+        descriptors_a,
+        scale,
+        orientation,
+        affine,
+        keypoints_a,
+        scores,
+        descriptor_width,
+        descriptor_height};
+    FeatureSet features_b{
+        keypoints_b,
+        scores,
+        descriptors_b,
+        scale,
+        orientation,
+        affine,
+        keypoints_b,
+        scores,
+        descriptor_width,
+        descriptor_height};
+    return {features_a, features_b};
+}
+
+std::pair<FeatureSet, FeatureSet> make_warp_completed_keypoint_feature_pair(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    const auto descriptor_height = descriptors_b.size(2);
+    const auto descriptor_width = descriptors_b.size(3);
+    const auto descriptor_options = descriptors_b.options();
+    const auto point_options = descriptor_options.dtype(torch::kFloat32);
+    auto make_empty = [&]() {
+        auto empty_points = torch::empty({0, 2}, point_options);
+        auto empty_descriptors = torch::empty({0, descriptors_b.size(1)}, descriptor_options);
+        auto empty_scores = torch::empty({0}, point_options);
+        return FeatureSet{
+            empty_points,
+            empty_scores,
+            empty_descriptors,
+            torch::empty({0}, point_options),
+            torch::empty({0}, point_options),
+            torch::empty({0, 4}, point_options),
+            empty_points,
+            empty_scores,
+            descriptor_width,
+            descriptor_height};
+    };
+    if (!features_a.keypoints.defined() || !features_a.descriptors.defined() ||
+        features_a.keypoints.size(0) == 0 || descriptors_b.size(0) == 0 ||
+        descriptor_height == 0 || descriptor_width == 0) {
+        auto empty = make_empty();
+        return {empty, empty};
+    }
+
+    auto keypoints_a = features_a.keypoints.to(warp.device());
+    auto descriptors_a = features_a.descriptors.to(warp.device());
+    auto image_keypoints_a = scale_feature_keypoints_to_image(
+        keypoints_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height,
+        warp.size(2),
+        warp.size(1));
+    const auto image_width = warp.size(2);
+    const auto image_height = warp.size(1);
+    auto source_x = image_keypoints_a.index({torch::indexing::Slice(), 0}).round().to(torch::kLong).clamp(0, image_width - 1);
+    auto source_y = image_keypoints_a.index({torch::indexing::Slice(), 1}).round().to(torch::kLong).clamp(0, image_height - 1);
+    auto source_linear = source_y * image_width + source_x;
+    auto source_valid = valid_mask.reshape({image_height * image_width})
+                            .to(warp.device(), torch::kBool)
+                            .index_select(0, source_linear);
+    if (!source_valid.any().item<bool>()) {
+        auto empty = make_empty();
+        return {empty, empty};
+    }
+
+    auto kept_keypoints_a = keypoints_a.index({source_valid}).contiguous();
+    auto kept_descriptors_a = descriptors_a.index({source_valid}).contiguous();
+    auto kept_scores_a = features_a.scores.defined() && features_a.scores.size(0) == features_a.keypoints.size(0)
+        ? features_a.scores.to(warp.device()).index({source_valid}).contiguous()
+        : torch::ones({kept_keypoints_a.size(0)}, point_options.device(warp.device()));
+    auto kept_image_keypoints_a = image_keypoints_a.index({source_valid}).contiguous();
+    auto keypoints_b = make_keypoint_descriptor_target_coordinates(
+                           kept_image_keypoints_a,
+                           warp,
+                           descriptor_height,
+                           descriptor_width)
+                           .squeeze(0)
+                           .contiguous();
+    auto sampled_descriptors_b = sample_warped_descriptors(
+                                     descriptors_b,
+                                     keypoints_b.unsqueeze(0))
+                                     .squeeze(0)
+                                     .contiguous();
+    kept_descriptors_a = torch::nn::functional::normalize(
+        kept_descriptors_a,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    sampled_descriptors_b = torch::nn::functional::normalize(
+        sampled_descriptors_b,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto scores_b = torch::ones({keypoints_b.size(0)}, point_options.device(warp.device()));
+    auto scale = torch::ones({keypoints_b.size(0)}, point_options.device(warp.device()));
+    auto orientation = torch::zeros({keypoints_b.size(0)}, point_options.device(warp.device()));
+    auto affine = torch::zeros({keypoints_b.size(0), 4}, point_options.device(warp.device()));
+
+    FeatureSet completed_a{
+        kept_keypoints_a,
+        kept_scores_a,
+        kept_descriptors_a,
+        scale,
+        orientation,
+        affine,
+        kept_keypoints_a,
+        kept_scores_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height};
+    FeatureSet completed_b{
+        keypoints_b,
+        scores_b,
+        sampled_descriptors_b,
+        scale,
+        orientation,
+        affine,
+        keypoints_b,
+        scores_b,
+        descriptor_width,
+        descriptor_height};
+    return {completed_a, completed_b};
 }
 
 torch::Tensor make_keypoint_graph_matching_loss(
@@ -1529,11 +2820,11 @@ torch::Tensor make_graph_matching_loss(
     const torch::Tensor& warp,
     const torch::Tensor& valid_mask
 ) {
-    auto sample_indices = filter_descriptor_sample_indices(
-        make_descriptor_sample_indices(descriptors_a),
+    auto sample_indices = make_balanced_descriptor_sample_indices(
         valid_mask,
         descriptors_a.size(2),
-        descriptors_a.size(3));
+        descriptors_a.size(3),
+        GRAPH_DENSE_MATCHING_MAX_SAMPLES);
     if (sample_indices.numel() == 0) {
         return torch::zeros({}, descriptors_a.options());
     }
@@ -1556,7 +2847,7 @@ torch::Tensor make_graph_matching_loss(
     losses.reserve(static_cast<size_t>(batch_size));
     auto keypoints_a = torch::stack(
         {sample_indices.remainder(descriptors_a.size(3)).to(descriptors_a.dtype()),
-         (sample_indices / descriptors_a.size(3)).to(descriptors_a.dtype())},
+         torch::floor_divide(sample_indices, descriptors_a.size(3)).to(descriptors_a.dtype())},
         1);
     auto desc_w = static_cast<int64_t>(descriptors_b.size(3));
     for (int64_t batch = 0; batch < batch_size; ++batch) {
@@ -1766,17 +3057,6 @@ FeatureDecodeConfig make_training_decode_config(const TrainConfig& config) {
     return decode_config;
 }
 
-torch::Tensor resize_dense_confidence_for_sparse_decode(
-    const torch::Tensor& dense_confidence,
-    const torch::Tensor& sparse_heatmap
-) {
-    return torch::nn::functional::interpolate(
-        dense_confidence,
-        torch::nn::functional::InterpolateFuncOptions()
-            .size(std::vector<int64_t>{sparse_heatmap.size(2), sparse_heatmap.size(3)})
-            .mode(torch::kNearest));
-}
-
 FeatureSet decode_training_features(
     const torch::Tensor& view,
     const SparseHeadOutput& sparse,
@@ -1799,44 +3079,271 @@ FeatureSet decode_training_features(
     return features;
 }
 
-FeatureSet attach_differentiable_sparse_descriptors(
-    FeatureSet features,
-    const torch::Tensor& descriptor_map
-) {
-    if (!features.keypoints.defined() || features.keypoints.size(0) == 0) {
-        return features;
+torch::Tensor make_texture_saliency_target(
+    const torch::Tensor& image,
+    int64_t target_height,
+    int64_t target_width
+);
+
+torch::Tensor make_training_decode_mask_gpu(const torch::Tensor& image, double min_keypoint_intensity) {
+    auto intensity = image.to(torch::kFloat32).mean(0).contiguous();
+    auto bright = intensity.ge(min_keypoint_intensity);
+    if (min_keypoint_intensity <= 0.0 || intensity.size(0) < 7 || intensity.size(1) < 7) {
+        return bright;
     }
-    const auto width = descriptor_map.size(3);
-    const auto height = descriptor_map.size(2);
-    auto keypoints = features.keypoints.to(descriptor_map.device(), torch::kFloat32).contiguous();
-    auto xs = keypoints.index({torch::indexing::Slice(), 0}).round().clamp(0, width - 1).to(torch::kLong);
-    auto ys = keypoints.index({torch::indexing::Slice(), 1}).round().clamp(0, height - 1).to(torch::kLong);
-    auto linear = ys * width + xs;
-    auto flat = descriptor_map.squeeze(0).permute({1, 2, 0}).reshape({height * width, descriptor_map.size(1)});
-    features.keypoints = keypoints;
-    features.scores = features.scores.to(descriptor_map.device(), torch::kFloat32).contiguous();
-    features.descriptors = flat.index_select(0, linear).contiguous();
-    features.scale = features.scale.to(descriptor_map.device(), torch::kFloat32).contiguous();
-    features.orientation = features.orientation.to(descriptor_map.device(), torch::kFloat32).contiguous();
-    features.affine = features.affine.to(descriptor_map.device(), torch::kFloat32).contiguous();
-    return features;
+
+    const int64_t kernel = 7;
+    auto local_support = torch::nn::functional::avg_pool2d(
+        bright.to(torch::kFloat32).reshape({1, 1, intensity.size(0), intensity.size(1)}),
+        torch::nn::functional::AvgPool2dFuncOptions({kernel, kernel})
+            .stride(1)
+            .padding(kernel / 2)
+            .count_include_pad(false));
+    auto local_mean = torch::nn::functional::avg_pool2d(
+        intensity.reshape({1, 1, intensity.size(0), intensity.size(1)}),
+        torch::nn::functional::AvgPool2dFuncOptions({kernel, kernel})
+            .stride(1)
+            .padding(kernel / 2)
+            .count_include_pad(false));
+    local_support = local_support.reshape({intensity.size(0), intensity.size(1)}).ge(0.25);
+    local_mean = local_mean.reshape({intensity.size(0), intensity.size(1)}).ge(min_keypoint_intensity);
+    return bright.logical_and(local_support).logical_and(local_mean);
+}
+
+FeatureSet decode_training_features_fast(
+    const torch::Tensor& view,
+    const SparseHeadOutput& sparse,
+    const TrainConfig& config
+) {
+    const auto height = sparse.heatmap.size(2);
+    const auto width = sparse.heatmap.size(3);
+    auto mask = make_training_decode_mask_gpu(view, config.min_keypoint_intensity)
+                    .to(sparse.heatmap.device(), torch::kFloat32)
+                    .reshape({1, 1, view.size(1), view.size(2)});
+    if (view.size(1) != height || view.size(2) != width) {
+        mask = torch::nn::functional::interpolate(
+            mask,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{height, width})
+                .mode(torch::kNearest));
+    }
+
+    const auto spatial_count = height * width;
+    auto saliency = make_texture_saliency_target(
+        view.unsqueeze(0).to(sparse.heatmap.device(), sparse.heatmap.dtype()),
+        height,
+        width);
+    auto score_map = (sparse.heatmap * 0.5F + saliency * 0.5F).reshape({height, width});
+    auto valid_map = mask.reshape({height, width}).gt(0.0);
+    if (config.nms_radius > 0) {
+        const auto kernel = static_cast<int64_t>(config.nms_radius) * 2 + 1;
+        auto local_max = torch::max_pool2d(
+            score_map.reshape({1, 1, height, width}),
+            {kernel, kernel},
+            {1, 1},
+            {static_cast<int64_t>(config.nms_radius), static_cast<int64_t>(config.nms_radius)});
+        valid_map = valid_map.logical_and(score_map.eq(local_max.reshape({height, width})));
+    }
+    const auto cell_count = std::max<int64_t>(1, config.keypoint_grid_rows * config.keypoint_grid_cols);
+    const auto per_cell = config.keypoints_per_cell > 0
+        ? static_cast<int64_t>(config.keypoints_per_cell)
+        : std::max<int64_t>(1, (static_cast<int64_t>(config.max_keypoints) + cell_count - 1) / cell_count);
+    std::vector<torch::Tensor> selected_scores;
+    std::vector<torch::Tensor> selected_indices;
+    for (int row = 0; row < config.keypoint_grid_rows; ++row) {
+        const auto y0 = static_cast<int64_t>(row) * height / config.keypoint_grid_rows;
+        const auto y1 = static_cast<int64_t>(row + 1) * height / config.keypoint_grid_rows;
+        if (y1 <= y0) {
+            continue;
+        }
+        for (int col = 0; col < config.keypoint_grid_cols; ++col) {
+            const auto x0 = static_cast<int64_t>(col) * width / config.keypoint_grid_cols;
+            const auto x1 = static_cast<int64_t>(col + 1) * width / config.keypoint_grid_cols;
+            if (x1 <= x0) {
+                continue;
+            }
+            auto cell_scores = score_map.index({
+                torch::indexing::Slice(y0, y1),
+                torch::indexing::Slice(x0, x1)}).reshape({(y1 - y0) * (x1 - x0)});
+            auto cell_valid = valid_map.index({
+                torch::indexing::Slice(y0, y1),
+                torch::indexing::Slice(x0, x1)}).reshape({(y1 - y0) * (x1 - x0)});
+            auto masked_cell_scores = cell_scores.masked_fill(
+                cell_valid.logical_not(),
+                -std::numeric_limits<float>::infinity());
+            const auto k = std::min<int64_t>(per_cell, masked_cell_scores.numel());
+            auto topk = masked_cell_scores.topk(k);
+            auto top_scores = std::get<0>(topk);
+            auto local_indices = std::get<1>(topk).to(torch::kLong);
+            auto finite = torch::isfinite(top_scores);
+            if (!finite.any().item<bool>()) {
+                continue;
+            }
+            top_scores = top_scores.index({finite}).contiguous();
+            local_indices = local_indices.index({finite}).contiguous();
+            auto local_x = local_indices.remainder(x1 - x0);
+            auto local_y = torch::floor_divide(local_indices, x1 - x0);
+            auto global_indices = (local_y + y0) * width + (local_x + x0);
+            selected_scores.push_back(top_scores);
+            selected_indices.push_back(global_indices.to(torch::kLong).contiguous());
+        }
+    }
+    torch::Tensor top_scores;
+    torch::Tensor top_indices;
+    if (selected_indices.empty()) {
+        top_scores = torch::empty({0}, sparse.heatmap.options());
+        top_indices = torch::empty({0}, torch::TensorOptions().dtype(torch::kLong).device(sparse.heatmap.device()));
+    } else {
+        top_scores = torch::cat(selected_scores, 0);
+        top_indices = torch::cat(selected_indices, 0);
+        if (top_indices.size(0) > config.max_keypoints) {
+            auto keep_topk = top_scores.topk(config.max_keypoints);
+            auto keep = std::get<1>(keep_topk).to(torch::kLong);
+            top_scores = std::get<0>(keep_topk).contiguous();
+            top_indices = top_indices.index_select(0, keep).contiguous();
+        }
+    }
+
+    auto xs = top_indices.remainder(width).to(torch::kFloat32);
+    auto ys = torch::floor_divide(top_indices, width).to(torch::kFloat32);
+    auto keypoints = torch::stack({xs, ys}, 1).contiguous();
+    auto descriptor_map = sparse.descriptors;
+    if (descriptor_map.size(2) != height || descriptor_map.size(3) != width) {
+        descriptor_map = torch::nn::functional::interpolate(
+            descriptor_map,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{height, width})
+                .mode(torch::kBilinear)
+                .align_corners(false));
+    }
+    descriptor_map = torch::nn::functional::normalize(
+        descriptor_map,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1).eps(1.0e-12));
+    auto flat_descriptors =
+        descriptor_map.squeeze(0).permute({1, 2, 0}).reshape({spatial_count, descriptor_map.size(1)});
+    auto safe_indices = top_indices.clamp(0, spatial_count - 1);
+    auto descriptors = flat_descriptors.index_select(0, safe_indices).contiguous();
+    return FeatureSet{
+        keypoints,
+        top_scores,
+        descriptors,
+        torch::empty({top_indices.size(0)}, descriptors.options()),
+        torch::empty({top_indices.size(0), 2}, descriptors.options()),
+        torch::empty({top_indices.size(0), 2, 2}, descriptors.options()),
+        torch::empty({0, 2}, descriptors.options()),
+        torch::empty({0}, descriptors.options()),
+        width,
+        height};
 }
 
 std::vector<torch::Tensor> module_parameters(TrainModules& modules) {
     std::vector<torch::Tensor> parameters;
     for (auto& parameter : modules.backbone->parameters()) {
-        parameters.push_back(parameter);
+        if (parameter.requires_grad()) {
+            parameters.push_back(parameter);
+        }
     }
     for (auto& parameter : modules.sparse_head->parameters()) {
-        parameters.push_back(parameter);
+        if (parameter.requires_grad()) {
+            parameters.push_back(parameter);
+        }
     }
     for (auto& parameter : modules.dense_head->parameters()) {
-        parameters.push_back(parameter);
+        if (parameter.requires_grad()) {
+            parameters.push_back(parameter);
+        }
     }
     for (auto& parameter : modules.graph_matcher->parameters()) {
-        parameters.push_back(parameter);
+        if (parameter.requires_grad()) {
+            parameters.push_back(parameter);
+        }
     }
     return parameters;
+}
+
+void set_module_trainable(torch::nn::Module& module, bool trainable) {
+    for (auto& parameter : module.parameters()) {
+        parameter.set_requires_grad(trainable);
+    }
+}
+
+bool is_sparse_descriptor_parameter(const std::string& name) {
+    return name.rfind("descriptors.", 0) == 0 || name.rfind("descriptor_", 0) == 0;
+}
+
+bool is_sparse_viewpoint_descriptor_parameter(const std::string& name) {
+    return name.rfind("descriptor_viewpoint_", 0) == 0;
+}
+
+void apply_descriptor_only_finetune(TrainModules& modules, const TrainConfig& config) {
+    if (!config.descriptor_only_finetune) {
+        return;
+    }
+    set_module_trainable(*modules.backbone, false);
+    set_module_trainable(*modules.dense_head, false);
+    for (auto& named_parameter : modules.sparse_head->named_parameters()) {
+        named_parameter.value().set_requires_grad(is_sparse_descriptor_parameter(named_parameter.key()));
+    }
+    set_module_trainable(*modules.graph_matcher, false);
+}
+
+void apply_viewpoint_head_only_finetune(TrainModules& modules, const TrainConfig& config) {
+    if (!config.viewpoint_head_only_finetune) {
+        return;
+    }
+    set_module_trainable(*modules.backbone, false);
+    set_module_trainable(*modules.dense_head, false);
+    for (auto& named_parameter : modules.sparse_head->named_parameters()) {
+        named_parameter.value().set_requires_grad(is_sparse_viewpoint_descriptor_parameter(named_parameter.key()));
+    }
+    set_module_trainable(*modules.graph_matcher, false);
+}
+
+void keep_descriptor_only_frozen_modules_eval(TrainModules& modules, const TrainConfig& config) {
+    if (!config.descriptor_only_finetune && !config.viewpoint_head_only_finetune) {
+        return;
+    }
+    modules.backbone->eval();
+    modules.dense_head->eval();
+    modules.graph_matcher->eval();
+}
+
+void apply_graph_only_finetune(TrainModules& modules, const TrainConfig& config) {
+    if (!config.graph_only_finetune) {
+        return;
+    }
+    set_module_trainable(*modules.backbone, false);
+    set_module_trainable(*modules.sparse_head, false);
+    set_module_trainable(*modules.dense_head, false);
+    set_module_trainable(*modules.graph_matcher, true);
+}
+
+void keep_graph_only_frozen_modules_eval(TrainModules& modules, const TrainConfig& config) {
+    if (!config.graph_only_finetune) {
+        return;
+    }
+    modules.backbone->eval();
+    modules.sparse_head->eval();
+    modules.dense_head->eval();
+}
+
+void set_all_modules_trainable(TrainModules& modules, bool trainable) {
+    set_module_trainable(*modules.backbone, trainable);
+    set_module_trainable(*modules.sparse_head, trainable);
+    set_module_trainable(*modules.dense_head, trainable);
+    set_module_trainable(*modules.graph_matcher, trainable);
+}
+
+void set_all_modules_eval(TrainModules& modules) {
+    modules.backbone->eval();
+    modules.sparse_head->eval();
+    modules.dense_head->eval();
+    modules.graph_matcher->eval();
+}
+
+bool should_use_descriptor_finetune_anchor(const TrainConfig& config) {
+    return (config.descriptor_only_finetune || config.viewpoint_head_only_finetune) &&
+           !config.init_checkpoint.empty();
 }
 
 SyntheticPairConfig make_default_pair_config() {
@@ -1870,8 +3377,140 @@ SyntheticPair move_pair_to_device(const SyntheticPair& pair, torch::Device devic
         pair.valid_mask.to(device)};
 }
 
+class CompositeSyntheticPairCacheDataset {
+public:
+    explicit CompositeSyntheticPairCacheDataset(const std::vector<TrainingCacheSpec>& cache_specs) {
+        if (cache_specs.empty()) {
+            throw std::invalid_argument("cache_specs must not be empty");
+        }
+        std::size_t offset = 0;
+        for (const auto& cache_spec : cache_specs) {
+            auto dataset = std::make_unique<SyntheticPairCacheDataset>(cache_spec.cache_dir);
+            const auto dataset_size = dataset->size();
+            if (dataset_size == 0) {
+                continue;
+            }
+            if (cache_spec.pair_index.has_value()) {
+                if (*cache_spec.pair_index >= dataset_size) {
+                    throw std::invalid_argument("hard synthetic pair cache index is out of range: " +
+                                                std::to_string(*cache_spec.pair_index));
+                }
+                offset += 1;
+            } else {
+                offset += dataset_size;
+            }
+            _offsets.push_back(offset);
+            _explicit_pair_indices.push_back(cache_spec.pair_index);
+            _datasets.push_back(std::move(dataset));
+        }
+        if (_datasets.empty()) {
+            throw std::invalid_argument("combined synthetic pair cache is empty");
+        }
+    }
+
+    std::size_t size() const {
+        return _offsets.back();
+    }
+
+    SyntheticPair load(std::size_t index) const {
+        if (index >= size()) {
+            throw std::out_of_range("synthetic pair cache index out of range");
+        }
+        const auto dataset_index = static_cast<std::size_t>(
+            std::upper_bound(_offsets.begin(), _offsets.end(), index) - _offsets.begin());
+        const auto previous_offset = dataset_index == 0 ? 0 : _offsets[dataset_index - 1];
+        if (_explicit_pair_indices[dataset_index].has_value()) {
+            return _datasets[dataset_index]->load(*_explicit_pair_indices[dataset_index]);
+        }
+        return _datasets[dataset_index]->load(index - previous_offset);
+    }
+
+private:
+    std::vector<std::unique_ptr<SyntheticPairCacheDataset>> _datasets;
+    std::vector<std::size_t> _offsets;
+    std::vector<std::optional<std::size_t>> _explicit_pair_indices;
+};
+
+class CompositeTensorDataset : public TensorDataset {
+public:
+    explicit CompositeTensorDataset(std::vector<std::shared_ptr<TensorDataset>> datasets) : _datasets(std::move(datasets)) {
+        if (_datasets.empty()) {
+            throw std::invalid_argument("datasets must not be empty");
+        }
+        std::size_t offset = 0;
+        for (const auto& dataset : _datasets) {
+            if (!dataset) {
+                throw std::invalid_argument("datasets must not contain null entries");
+            }
+            offset += dataset->size();
+            _offsets.push_back(offset);
+        }
+        if (offset == 0) {
+            throw std::invalid_argument("combined tensor dataset is empty");
+        }
+    }
+
+    size_t size() const override {
+        return _offsets.back();
+    }
+
+    TensorBatch get(size_t index) override {
+        if (index >= size()) {
+            throw std::out_of_range("combined tensor dataset index out of range");
+        }
+        const auto dataset_index = static_cast<std::size_t>(
+            std::upper_bound(_offsets.begin(), _offsets.end(), index) - _offsets.begin());
+        const auto previous_offset = dataset_index == 0 ? 0 : _offsets[dataset_index - 1];
+        return _datasets[dataset_index]->get(index - previous_offset);
+    }
+
+private:
+    std::vector<std::shared_ptr<TensorDataset>> _datasets;
+    std::vector<std::size_t> _offsets;
+};
+
+TensorBatch cached_pair_to_tensor_batch(const SyntheticPair& pair) {
+    TensorBatch batch;
+    batch["view_a"] = pair.view_a;
+    batch["view_b"] = pair.view_b;
+    batch["warp_a_to_b"] = pair.warp_a_to_b;
+    batch["valid_mask"] = pair.valid_mask;
+    return batch;
+}
+
+class IndexedSyntheticPairCacheTensorDataset : public TensorDataset {
+public:
+    IndexedSyntheticPairCacheTensorDataset(std::string cache_dir, std::vector<std::size_t> indices)
+        : _cache(std::move(cache_dir)), _indices(std::move(indices)) {
+        if (_indices.empty()) {
+            throw std::invalid_argument("indexed synthetic pair cache must contain at least one index");
+        }
+        for (const auto index : _indices) {
+            if (index >= _cache.size()) {
+                throw std::invalid_argument("indexed synthetic pair cache index is out of range: " +
+                                            std::to_string(index));
+            }
+        }
+    }
+
+    size_t size() const override {
+        return _indices.size();
+    }
+
+    TensorBatch get(size_t index) override {
+        if (index >= _indices.size()) {
+            throw std::out_of_range("indexed synthetic pair cache tensor index out of range");
+        }
+        return cached_pair_to_tensor_batch(_cache.load(_indices[index]));
+    }
+
+private:
+    SyntheticPairCacheDataset _cache;
+    std::vector<std::size_t> _indices;
+};
+
 std::vector<SyntheticPair> load_cached_pairs(
-    const SyntheticPairCacheDataset& cache_dataset,
+    const CompositeSyntheticPairCacheDataset& cache_dataset,
     std::size_t offset,
     std::size_t end,
     torch::Device device
@@ -1917,6 +3556,23 @@ struct TrainingLossComponents {
     torch::Tensor offset;
     torch::Tensor confidence;
     torch::Tensor descriptor_accuracy;
+    torch::Tensor graph_matching_accuracy;
+    torch::Tensor graph_positive_fraction;
+    torch::Tensor graph_positive_count;
+    torch::Tensor graph_query_count;
+    torch::Tensor graph_features_a_count;
+    torch::Tensor graph_features_b_count;
+    torch::Tensor learned_graph_matching_accuracy;
+    torch::Tensor learned_graph_positive_fraction;
+    torch::Tensor learned_graph_positive_count;
+    torch::Tensor learned_graph_query_count;
+    torch::Tensor descriptor_positive_score;
+    torch::Tensor descriptor_hard_negative_score;
+    torch::Tensor descriptor_positive_margin;
+    torch::Tensor descriptor_positive_rank;
+    torch::Tensor keypoint_descriptor_accuracy;
+    torch::Tensor keypoint_descriptor_positive_margin;
+    torch::Tensor keypoint_descriptor_positive_rank;
     torch::Tensor descriptor_diversity;
     torch::Tensor offset_error;
     TrainingBatchForward forward;
@@ -1959,6 +3615,390 @@ torch::Tensor make_heatmap_selection_loss(const torch::Tensor& heatmap, const to
     return (mean_loss + binary_loss * HEATMAP_BINARY_WEIGHT) * HEATMAP_SELECTION_WEIGHT;
 }
 
+torch::Tensor make_texture_saliency_target(
+    const torch::Tensor& image,
+    int64_t target_height,
+    int64_t target_width
+) {
+    auto base = image;
+    if (base.size(1) != 1) {
+        base = base.mean(1, true);
+    }
+    auto blur = torch::avg_pool2d(base, {15, 15}, {1, 1}, {7, 7}, false, true);
+    auto contrast = (base - blur).abs();
+    auto dx = (base - torch::roll(base, {1}, {3})).abs();
+    auto dy = (base - torch::roll(base, {1}, {2})).abs();
+    auto saliency = torch::avg_pool2d(contrast + dx + dy, {5, 5}, {1, 1}, {2, 2}, false, true);
+    saliency = torch::nn::functional::interpolate(
+        saliency,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{target_height, target_width})
+            .mode(torch::kBilinear)
+            .align_corners(false));
+    auto flat = saliency.reshape({saliency.size(0), saliency.size(1), saliency.size(2) * saliency.size(3)});
+    auto min_value = std::get<0>(flat.min(2, true)).reshape({saliency.size(0), saliency.size(1), 1, 1});
+    auto max_value = std::get<0>(flat.max(2, true)).reshape({saliency.size(0), saliency.size(1), 1, 1});
+    return (saliency - min_value) / (max_value - min_value).clamp_min(1.0e-6);
+}
+
+torch::Tensor make_repeatable_saliency_target_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask
+) {
+    auto mask_float = resize_mask_for_heatmap(mask, heatmap_a).to(heatmap_a.dtype());
+    auto saliency_a = make_texture_saliency_target(view_a, heatmap_a.size(2), heatmap_a.size(3));
+    auto saliency_b = make_texture_saliency_target(view_b, heatmap_b.size(2), heatmap_b.size(3));
+    auto warped_saliency_b = warp_heatmap_for_repeatability(saliency_b, warp);
+    auto target = torch::sqrt((saliency_a * warped_saliency_b).clamp_min(0.0F));
+    target = target * mask_float;
+    auto denom = mask_float.sum().clamp_min(1.0F);
+    auto warped_heatmap_b = warp_heatmap_for_repeatability(heatmap_b, warp);
+    auto loss_a = ((heatmap_a - target).pow(2) * mask_float).sum() / denom;
+    auto loss_b = ((warped_heatmap_b - target).pow(2) * mask_float).sum() / denom;
+    return (loss_a + loss_b) * 0.5F;
+}
+
+torch::Tensor make_repeatable_keypoint_target(
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask,
+    int64_t target_height,
+    int64_t target_width,
+    bool dilate_targets = true,
+    bool enforce_min_count = true
+) {
+    auto mask_float = resize_mask_for_heatmap(mask, torch::zeros({mask.size(0), 1, target_height, target_width}, mask.options().dtype(torch::kFloat32)))
+                          .to(torch::kFloat32);
+    auto saliency_a = make_texture_saliency_target(view_a, target_height, target_width);
+    auto saliency_b = make_texture_saliency_target(view_b, target_height, target_width);
+    auto warped_saliency_b = warp_heatmap_for_repeatability(saliency_b, warp);
+    auto repeatable = torch::sqrt((saliency_a * warped_saliency_b).clamp_min(0.0F)) * mask_float;
+    if (!enforce_min_count) {
+        auto intensity_a = view_a.size(1) == 1 ? view_a : view_a.mean(1, true);
+        auto intensity_b = view_b.size(1) == 1 ? view_b : view_b.mean(1, true);
+        intensity_a = torch::nn::functional::interpolate(
+            intensity_a,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{target_height, target_width})
+                .mode(torch::kBilinear)
+                .align_corners(false));
+        intensity_b = torch::nn::functional::interpolate(
+            intensity_b,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{target_height, target_width})
+                .mode(torch::kBilinear)
+                .align_corners(false));
+        auto warped_intensity_b = warp_heatmap_for_repeatability(intensity_b, warp);
+        repeatable = repeatable + torch::sqrt((intensity_a * warped_intensity_b).clamp_min(0.0F)) * mask_float * 1.0e-3F;
+    }
+    auto target = torch::zeros_like(repeatable);
+    const auto spatial_count = target_height * target_width;
+    for (int64_t batch = 0; batch < repeatable.size(0); ++batch) {
+        auto flat_scores = repeatable.index({batch, 0}).reshape({spatial_count});
+        auto flat_mask = mask_float.index({batch, 0}).reshape({spatial_count}).gt(0.0);
+        const auto valid_count = flat_mask.sum().item<int64_t>();
+        if (valid_count <= 0) {
+            continue;
+        }
+        const auto requested = static_cast<int64_t>(
+            std::llround(static_cast<double>(valid_count) * REPEATABLE_KEYPOINT_TARGET_FRACTION));
+        const auto lower_bound = enforce_min_count ? REPEATABLE_KEYPOINT_TARGET_MIN_COUNT : 1;
+        const auto upper_bound = enforce_min_count ? REPEATABLE_KEYPOINT_TARGET_MAX_COUNT : std::max<int64_t>(1, requested);
+        const auto k = std::min<int64_t>(
+            valid_count,
+            std::max<int64_t>(1, std::min<int64_t>(upper_bound, std::max<int64_t>(lower_bound, requested))));
+        auto masked_scores = flat_scores.masked_fill(flat_mask.logical_not(), -std::numeric_limits<float>::infinity());
+        auto topk = masked_scores.topk(k);
+        auto indices = std::get<1>(topk).to(torch::kLong);
+        auto selected = torch::zeros({spatial_count}, repeatable.options());
+        selected.index_put_({indices}, 1.0F);
+        target.index_put_({batch, 0}, selected.reshape({target_height, target_width}));
+    }
+    if (dilate_targets && target_height >= 3 && target_width >= 3) {
+        target = torch::max_pool2d(target, {3, 3}, {1, 1}, {1, 1});
+    }
+    return target * mask_float;
+}
+
+torch::Tensor make_heatmap_correspondence_target_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b_at_a,
+    const torch::Tensor& target,
+    const torch::Tensor& mask
+) {
+    auto mask_float = mask.to(heatmap_a.dtype());
+    if (mask_float.sizes() != heatmap_a.sizes()) {
+        mask_float = mask_float.expand_as(heatmap_a);
+    }
+    auto target_float = target.to(heatmap_a.dtype());
+    if (target_float.sizes() != heatmap_a.sizes()) {
+        target_float = target_float.expand_as(heatmap_a);
+    }
+    auto denom = mask_float.sum().clamp_min(1.0F);
+    auto stable_a = heatmap_a.clamp(1.0e-4, 1.0F - 1.0e-4);
+    auto stable_b = heatmap_b_at_a.clamp(1.0e-4, 1.0F - 1.0e-4);
+    auto bce_a = -(target_float * stable_a.log() + (1.0F - target_float) * (1.0F - stable_a).log());
+    auto bce_b = -(target_float * stable_b.log() + (1.0F - target_float) * (1.0F - stable_b).log());
+    auto positive_weight = 1.0F + target_float * (HEATMAP_TARGET_POSITIVE_WEIGHT - 1.0F);
+    return ((bce_a + bce_b) * 0.5F * positive_weight * mask_float).sum() / denom;
+}
+
+torch::Tensor make_heatmap_positive_target_loss(
+    const torch::Tensor& heatmap,
+    const torch::Tensor& target,
+    const torch::Tensor& mask
+) {
+    auto mask_float = mask.to(heatmap.dtype());
+    if (mask_float.sizes() != heatmap.sizes()) {
+        mask_float = mask_float.expand_as(heatmap);
+    }
+    auto target_float = target.to(heatmap.dtype());
+    if (target_float.sizes() != heatmap.sizes()) {
+        target_float = target_float.expand_as(heatmap);
+    }
+    auto positive_mask = target_float.gt(0.0F).to(heatmap.dtype()) * mask_float;
+    auto positive_count = positive_mask.sum();
+    if (positive_count.item<float>() <= 0.0F) {
+        return torch::zeros({}, heatmap.options());
+    }
+    auto stable = heatmap.clamp(1.0e-4F, 1.0F - 1.0e-4F);
+    return -(stable.log() * positive_mask).sum() / positive_count.clamp_min(1.0F);
+}
+
+torch::Tensor make_repeatable_grid_keypoint_target(
+    const torch::Tensor& mask,
+    const torch::Tensor& heatmap
+) {
+    auto mask_float = resize_mask_for_heatmap(mask, heatmap).to(torch::kFloat32);
+    auto target = torch::zeros_like(mask_float);
+    const auto height = heatmap.size(2);
+    const auto width = heatmap.size(3);
+    for (int64_t batch = 0; batch < heatmap.size(0); ++batch) {
+        for (int64_t row = 0; row < REPEATABLE_GRID_KEYPOINT_TARGET_ROWS; ++row) {
+            const auto y0 = row * height / REPEATABLE_GRID_KEYPOINT_TARGET_ROWS;
+            const auto y1 = std::max<int64_t>(y0 + 1, (row + 1) * height / REPEATABLE_GRID_KEYPOINT_TARGET_ROWS);
+            for (int64_t col = 0; col < REPEATABLE_GRID_KEYPOINT_TARGET_COLS; ++col) {
+                const auto x0 = col * width / REPEATABLE_GRID_KEYPOINT_TARGET_COLS;
+                const auto x1 = std::max<int64_t>(x0 + 1, (col + 1) * width / REPEATABLE_GRID_KEYPOINT_TARGET_COLS);
+                auto cell_mask = mask_float.index({
+                    batch,
+                    0,
+                    torch::indexing::Slice(y0, std::min<int64_t>(y1, height)),
+                    torch::indexing::Slice(x0, std::min<int64_t>(x1, width))});
+                if (!cell_mask.any().item<bool>()) {
+                    continue;
+                }
+                const auto y = std::min<int64_t>(height - 1, (y0 + y1 - 1) / 2);
+                const auto x = std::min<int64_t>(width - 1, (x0 + x1 - 1) / 2);
+                if (mask_float.index({batch, 0, y, x}).item<float>() > 0.0F) {
+                    target.index_put_({batch, 0, y, x}, 1.0F);
+                } else {
+                    auto flat = cell_mask.reshape({cell_mask.numel()});
+                    auto best = std::get<1>(flat.max(0)).item<int64_t>();
+                    const auto cell_width = cell_mask.size(1);
+                    target.index_put_({batch, 0, y0 + best / cell_width, x0 + best % cell_width}, 1.0F);
+                }
+            }
+        }
+    }
+    if (height >= 3 && width >= 3) {
+        target = torch::max_pool2d(target, {3, 3}, {1, 1}, {1, 1});
+    }
+    return target * mask_float;
+}
+
+torch::Tensor make_repeatable_keypoint_target_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask
+) {
+    auto target = make_repeatable_keypoint_target(view_a, view_b, warp, mask, heatmap_a.size(2), heatmap_a.size(3)).detach();
+    auto mask_float = resize_mask_for_heatmap(mask, heatmap_a).to(heatmap_a.dtype());
+    auto warped_heatmap_b = warp_heatmap_for_repeatability(heatmap_b, warp);
+    return make_heatmap_correspondence_target_loss(heatmap_a, warped_heatmap_b, target, mask_float);
+}
+
+std::pair<torch::Tensor, torch::Tensor> make_warp_aligned_keypoint_targets(
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask,
+    int64_t target_height,
+    int64_t target_width
+) {
+    auto target_a = make_repeatable_keypoint_target(
+        view_a,
+        view_b,
+        warp,
+        mask,
+        target_height,
+        target_width,
+        false,
+        false);
+    auto target_b = torch::zeros_like(target_a);
+    const auto spatial_count = target_height * target_width;
+    for (int64_t batch = 0; batch < target_a.size(0); ++batch) {
+        auto selected = torch::nonzero(target_a.index({batch, 0}).reshape({spatial_count}).gt(0.0)).flatten();
+        if (selected.numel() == 0) {
+            continue;
+        }
+        auto coordinates = make_descriptor_target_coordinates(
+                               warp.index({batch}).unsqueeze(0),
+                               selected.to(torch::kLong),
+                               target_height,
+                               target_width)
+                               .squeeze(0);
+        auto target_x = coordinates.index({torch::indexing::Slice(), 0})
+                            .round()
+                            .to(torch::kLong)
+                            .clamp(0, target_width - 1);
+        auto target_y = coordinates.index({torch::indexing::Slice(), 1})
+                            .round()
+                            .to(torch::kLong)
+                            .clamp(0, target_height - 1);
+        auto target_indices = target_y * target_width + target_x;
+        auto flat = torch::zeros({spatial_count}, target_b.options());
+        flat.index_put_({target_indices}, 1.0F);
+        target_b.index_put_({batch, 0}, flat.reshape({target_height, target_width}));
+    }
+    return {target_a, target_b};
+}
+
+torch::Tensor make_warp_aligned_keypoint_target_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask
+) {
+    auto targets = make_warp_aligned_keypoint_targets(
+        view_a,
+        view_b,
+        warp,
+        mask,
+        heatmap_a.size(2),
+        heatmap_a.size(3));
+    auto mask_a = resize_mask_for_heatmap(mask, heatmap_a).to(heatmap_a.dtype());
+    auto mask_b = torch::ones_like(mask_a);
+    auto loss_a = make_heatmap_correspondence_target_loss(heatmap_a, heatmap_a, targets.first.detach(), mask_a);
+    auto loss_b = make_heatmap_correspondence_target_loss(heatmap_b, heatmap_b, targets.second.detach(), mask_b);
+    return (loss_a + loss_b) * 0.5F;
+}
+
+torch::Tensor make_warp_aligned_keypoint_peak_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask
+) {
+    auto targets = make_warp_aligned_keypoint_targets(
+        view_a,
+        view_b,
+        warp,
+        mask,
+        heatmap_a.size(2),
+        heatmap_a.size(3));
+    auto mask_a = resize_mask_for_heatmap(mask, heatmap_a).to(heatmap_a.dtype());
+    auto mask_b = torch::ones_like(mask_a);
+    auto loss_a = make_heatmap_positive_target_loss(heatmap_a, targets.first.detach(), mask_a);
+    auto loss_b = make_heatmap_positive_target_loss(heatmap_b, targets.second.detach(), mask_b);
+    return (loss_a + loss_b) * 0.5F;
+}
+
+torch::Tensor make_repeatable_grid_keypoint_target_loss(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask
+) {
+    auto target = make_repeatable_grid_keypoint_target(mask, heatmap_a).detach();
+    auto mask_float = resize_mask_for_heatmap(mask, heatmap_a).to(heatmap_a.dtype());
+    auto warped_heatmap_b = warp_heatmap_for_repeatability(heatmap_b, warp);
+    return make_heatmap_correspondence_target_loss(heatmap_a, warped_heatmap_b, target, mask_float);
+}
+
+torch::Tensor make_decoded_keypoint_repeatability_loss(
+    const FeatureSet& features_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto zero = torch::zeros({}, heatmap_b.options());
+    if (!features_a.keypoints.defined() || features_a.keypoints.size(0) == 0 ||
+        heatmap_b.size(2) == 0 || heatmap_b.size(3) == 0) {
+        return zero;
+    }
+
+    const auto image_width = warp.size(2);
+    const auto image_height = warp.size(1);
+    auto keypoints_a = features_a.keypoints.to(warp.device(), torch::kFloat32);
+    auto image_keypoints_a = scale_feature_keypoints_to_image(
+        keypoints_a,
+        features_a.feature_map_width,
+        features_a.feature_map_height,
+        image_width,
+        image_height);
+    auto source_x = image_keypoints_a.index({torch::indexing::Slice(), 0}).round().to(torch::kLong);
+    auto source_y = image_keypoints_a.index({torch::indexing::Slice(), 1}).round().to(torch::kLong);
+    auto source_in_bounds =
+        source_x.ge(0).logical_and(source_x.lt(image_width)).logical_and(source_y.ge(0)).logical_and(source_y.lt(image_height));
+    auto source_x_safe = source_x.clamp(0, image_width - 1);
+    auto source_y_safe = source_y.clamp(0, image_height - 1);
+    auto source_linear = source_y_safe * image_width + source_x_safe;
+    auto source_valid = valid_mask.reshape({image_height * image_width})
+                            .to(warp.device(), torch::kBool)
+                            .index_select(0, source_linear)
+                            .logical_and(source_in_bounds);
+    auto sampled_warp = warp.reshape({image_height * image_width, 2}).index_select(0, source_linear);
+    auto target_x_image = sampled_warp.index({torch::indexing::Slice(), 0});
+    auto target_y_image = sampled_warp.index({torch::indexing::Slice(), 1});
+    auto target_in_bounds = target_x_image.ge(0.0F)
+                                .logical_and(target_x_image.le(static_cast<float>(image_width - 1)))
+                                .logical_and(target_y_image.ge(0.0F))
+                                .logical_and(target_y_image.le(static_cast<float>(image_height - 1)));
+    auto positive_mask = source_valid.logical_and(target_in_bounds);
+    if (!positive_mask.any().item<bool>()) {
+        return zero;
+    }
+
+    auto target_x = (target_x_image.index({positive_mask}) + 0.5F) *
+                        static_cast<float>(heatmap_b.size(3)) / static_cast<float>(image_width) -
+                    0.5F;
+    auto target_y = (target_y_image.index({positive_mask}) + 0.5F) *
+                        static_cast<float>(heatmap_b.size(2)) / static_cast<float>(image_height) -
+                    0.5F;
+    auto grid_x = heatmap_b.size(3) > 1
+                      ? target_x / static_cast<float>(heatmap_b.size(3) - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(target_x);
+    auto grid_y = heatmap_b.size(2) > 1
+                      ? target_y / static_cast<float>(heatmap_b.size(2) - 1) * 2.0F - 1.0F
+                      : torch::zeros_like(target_y);
+    auto grid = torch::stack({grid_x, grid_y}, 1)
+                    .reshape({1, target_x.size(0), 1, 2})
+                    .to(heatmap_b.device(), heatmap_b.dtype())
+                    .contiguous();
+    auto sampled_heatmap = torch::nn::functional::grid_sample(
+                               heatmap_b,
+                               grid,
+                               torch::nn::functional::GridSampleFuncOptions()
+                                   .mode(torch::kBilinear)
+                                   .padding_mode(torch::kZeros)
+                                   .align_corners(true))
+                               .reshape({target_x.size(0)});
+    return -sampled_heatmap.clamp(1.0e-4F, 1.0F).log().mean();
+}
+
 torch::Tensor offset_pixel_error(const torch::Tensor& offsets, const torch::Tensor& target_offsets, const torch::Tensor& mask) {
     using torch::indexing::Slice;
 
@@ -1983,7 +4023,9 @@ DenseHeadOutput float_dense_output(DenseHeadOutput output);
 TrainingLossComponents training_loss_from_pairs(
     TrainModules& modules,
     const std::vector<SyntheticPair>& pairs,
-    const TrainConfig& config
+    const TrainConfig& config,
+    TrainModules* descriptor_anchor_modules = nullptr,
+    int64_t descriptor_broad_far_negative_count = DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT
 ) {
     std::vector<torch::Tensor> views_a;
     std::vector<torch::Tensor> views_b;
@@ -2034,14 +4076,88 @@ TrainingLossComponents training_loss_from_pairs(
     dense = float_dense_output(std::move(dense));
     sparse_a.descriptors = blend_rotation_invariant_texture_descriptor(sparse_a.descriptors, view_a);
     sparse_b.descriptors = blend_rotation_invariant_texture_descriptor(sparse_b.descriptors, view_b);
+    if (config.descriptor_orientation_canonicalization) {
+        sparse_a.descriptors = canonicalize_descriptor_map_by_orientation(sparse_a.descriptors, sparse_a.orientation);
+        sparse_b.descriptors = canonicalize_descriptor_map_by_orientation(sparse_b.descriptors, sparse_b.orientation);
+    }
     const auto sparse_mask = resize_mask_for_heatmap(valid_mask, sparse_a.heatmap);
     const auto dense_mask = resize_mask_for_heatmap(valid_mask, dense.confidence);
     const auto target_offsets = resize_offsets_for_dense_head(warp, dense.offsets);
+    auto descriptor_anchor = torch::zeros({}, sparse_a.descriptors.options());
+    if (descriptor_anchor_modules != nullptr) {
+        torch::NoGradGuard no_grad;
+        const auto use_amp = view_a.is_cuda();
+        SparseHeadOutput anchor_sparse_a;
+        SparseHeadOutput anchor_sparse_b;
+        {
+            AmpAutocastGuard autocast_guard(use_amp, c10::DeviceType::CUDA, at::kBFloat16);
+            auto anchor_pyramid_a = descriptor_anchor_modules->backbone->forward(view_a);
+            auto anchor_pyramid_b = descriptor_anchor_modules->backbone->forward(view_b);
+            anchor_sparse_a = descriptor_anchor_modules->sparse_head->forward(anchor_pyramid_a[1]);
+            anchor_sparse_b = descriptor_anchor_modules->sparse_head->forward(anchor_pyramid_b[1]);
+        }
+        anchor_sparse_a = float_sparse_output(std::move(anchor_sparse_a));
+        anchor_sparse_b = float_sparse_output(std::move(anchor_sparse_b));
+        anchor_sparse_a.descriptors = blend_rotation_invariant_texture_descriptor(anchor_sparse_a.descriptors, view_a);
+        anchor_sparse_b.descriptors = blend_rotation_invariant_texture_descriptor(anchor_sparse_b.descriptors, view_b);
+        if (config.descriptor_orientation_canonicalization) {
+            anchor_sparse_a.descriptors = canonicalize_descriptor_map_by_orientation(
+                anchor_sparse_a.descriptors,
+                anchor_sparse_a.orientation);
+            anchor_sparse_b.descriptors = canonicalize_descriptor_map_by_orientation(
+                anchor_sparse_b.descriptors,
+                anchor_sparse_b.orientation);
+        }
+        descriptor_anchor = make_descriptor_finetune_anchor_loss(
+            sparse_a.descriptors,
+            sparse_b.descriptors,
+            anchor_sparse_a.descriptors,
+            anchor_sparse_b.descriptors,
+            valid_mask);
+    }
 
     auto repeatability = repeatability_loss(sparse_a.heatmap, warp_heatmap_for_repeatability(sparse_b.heatmap, warp), sparse_mask) +
                          (make_heatmap_selection_loss(sparse_a.heatmap, sparse_mask) +
                           make_heatmap_selection_loss(sparse_b.heatmap, sparse_mask)) *
-                             0.5;
+                             0.5 +
+                         make_repeatable_saliency_target_loss(
+                             sparse_a.heatmap,
+                             sparse_b.heatmap,
+                             view_a,
+                             view_b,
+                             warp,
+                             valid_mask) *
+                             REPEATABLE_SALIENCY_TARGET_WEIGHT +
+                         make_repeatable_keypoint_target_loss(
+                             sparse_a.heatmap,
+                             sparse_b.heatmap,
+                             view_a,
+                             view_b,
+                             warp,
+                             valid_mask) *
+                             REPEATABLE_KEYPOINT_TARGET_WEIGHT +
+                         make_warp_aligned_keypoint_target_loss(
+                             sparse_a.heatmap,
+                             sparse_b.heatmap,
+                             view_a,
+                             view_b,
+                             warp,
+                             valid_mask) *
+                             WARP_ALIGNED_KEYPOINT_TARGET_WEIGHT +
+                         make_warp_aligned_keypoint_peak_loss(
+                             sparse_a.heatmap,
+                             sparse_b.heatmap,
+                             view_a,
+                             view_b,
+                             warp,
+                             valid_mask) *
+                             WARP_ALIGNED_KEYPOINT_PEAK_WEIGHT +
+                         make_repeatable_grid_keypoint_target_loss(
+                             sparse_a.heatmap,
+                             sparse_b.heatmap,
+                             warp,
+                             valid_mask) *
+                             REPEATABLE_GRID_KEYPOINT_TARGET_WEIGHT;
     auto orientation = make_orientation_supervision_loss(
         sparse_a,
         sparse_b,
@@ -2049,16 +4165,57 @@ TrainingLossComponents training_loss_from_pairs(
         view_b,
         warp,
         config.min_keypoint_intensity);
-    auto descriptor = make_sparse_descriptor_metrics(sparse_a.descriptors, sparse_b.descriptors, warp, valid_mask);
+    auto descriptor = make_sparse_descriptor_metrics(
+        sparse_a.descriptors,
+        sparse_b.descriptors,
+        warp,
+        valid_mask,
+        torch::Tensor(),
+        descriptor_broad_far_negative_count);
     auto texture_descriptor =
         (make_texture_target_descriptor_loss(sparse_a.descriptors, view_a, valid_mask) +
          make_texture_target_descriptor_loss(sparse_b.descriptors, view_b, valid_mask)) *
         0.5;
+    auto pairwise_texture_teacher = make_pairwise_texture_teacher_descriptor_loss(
+        sparse_a.descriptors,
+        sparse_b.descriptors,
+        view_a,
+        warp,
+        valid_mask);
     std::vector<torch::Tensor> graph_losses;
+    double graph_loss_weight_sum = 0.0;
+    std::vector<torch::Tensor> graph_accuracies;
+    std::vector<torch::Tensor> graph_positive_fractions;
+    std::vector<torch::Tensor> graph_positive_counts;
+    std::vector<torch::Tensor> graph_query_counts;
+    std::vector<torch::Tensor> graph_features_a_counts;
+    std::vector<torch::Tensor> graph_features_b_counts;
+    std::vector<torch::Tensor> learned_graph_accuracies;
+    std::vector<torch::Tensor> learned_graph_positive_fractions;
+    std::vector<torch::Tensor> learned_graph_positive_counts;
+    std::vector<torch::Tensor> learned_graph_query_counts;
     std::vector<torch::Tensor> sparse_keypoint_descriptor_losses;
+    std::vector<torch::Tensor> decoded_keypoint_repeatability_losses;
+    std::vector<torch::Tensor> keypoint_descriptor_accuracies;
+    std::vector<torch::Tensor> keypoint_descriptor_margins;
+    std::vector<torch::Tensor> keypoint_descriptor_ranks;
     const auto keypoint_loss_batch_items = std::min<int64_t>(view_a.size(0), TRAINING_KEYPOINT_LOSS_BATCH_ITEMS);
     graph_losses.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_accuracies.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_positive_fractions.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_positive_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_query_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_features_a_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    graph_features_b_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    learned_graph_accuracies.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    learned_graph_positive_fractions.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    learned_graph_positive_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    learned_graph_query_counts.reserve(static_cast<size_t>(keypoint_loss_batch_items));
     sparse_keypoint_descriptor_losses.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    decoded_keypoint_repeatability_losses.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    keypoint_descriptor_accuracies.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    keypoint_descriptor_margins.reserve(static_cast<size_t>(keypoint_loss_batch_items));
+    keypoint_descriptor_ranks.reserve(static_cast<size_t>(keypoint_loss_batch_items));
     auto decode_config = config;
     for (int64_t batch = 0; batch < keypoint_loss_batch_items; ++batch) {
         SparseHeadOutput sparse_a_item{
@@ -2073,22 +4230,34 @@ TrainingLossComponents training_loss_from_pairs(
             sparse_b.scale.index({batch}).unsqueeze(0),
             sparse_b.orientation.index({batch}).unsqueeze(0),
             sparse_b.affine.index({batch}).unsqueeze(0)};
-        auto features_a = decode_training_features(
-            view_a.index({batch}),
-            sparse_a_item,
-            resize_dense_confidence_for_sparse_decode(dense.confidence.index({batch}).unsqueeze(0), sparse_a_item.heatmap),
-            decode_config);
-        features_a = attach_differentiable_sparse_descriptors(features_a, sparse_a_item.descriptors);
-        auto features_b = decode_training_features(
-            view_b.index({batch}),
-            sparse_b_item,
-            resize_dense_confidence_for_sparse_decode(dense.confidence.index({batch}).unsqueeze(0), sparse_b_item.heatmap),
-            decode_config);
-        features_b = attach_differentiable_sparse_descriptors(features_b, sparse_b_item.descriptors);
+        auto features_a = decode_training_features_fast(view_a.index({batch}), sparse_a_item, decode_config);
+        auto features_b = decode_training_features_fast(view_b.index({batch}), sparse_b_item, decode_config);
         const auto keypoint_metrics = make_keypoint_graph_matching_metrics(
             *modules.graph_matcher,
             features_a,
             features_b,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        auto supervised_features = make_supervised_graph_feature_pair(
+            sparse_a_item,
+            sparse_b_item,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        const auto supervised_keypoint_metrics = make_keypoint_graph_matching_metrics(
+            *modules.graph_matcher,
+            supervised_features.first,
+            supervised_features.second,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        auto warp_completed_features = make_warp_completed_keypoint_feature_pair(
+            features_a,
+            sparse_b_item.descriptors,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        const auto warp_completed_keypoint_metrics = make_keypoint_graph_matching_metrics(
+            *modules.graph_matcher,
+            warp_completed_features.first,
+            warp_completed_features.second,
             warp.index({batch}).unsqueeze(0),
             valid_mask.index({batch}).unsqueeze(0));
         auto keypoint_dense_descriptor = make_keypoint_dense_descriptor_loss(
@@ -2096,33 +4265,170 @@ TrainingLossComponents training_loss_from_pairs(
             sparse_b_item.descriptors,
             warp.index({batch}).unsqueeze(0),
             valid_mask.index({batch}).unsqueeze(0));
-        graph_losses.push_back(keypoint_metrics.loss);
-        sparse_keypoint_descriptor_losses.push_back(keypoint_metrics.sparse_descriptor_loss + keypoint_dense_descriptor);
+        auto keypoint_patch_descriptor = make_keypoint_patch_descriptor_alignment_loss(
+            features_a,
+            sparse_b_item.descriptors,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        auto warped_keypoint_descriptor = make_warped_keypoint_descriptor_contrastive_loss(
+            features_a,
+            sparse_b_item.descriptors,
+            warp.index({batch}).unsqueeze(0),
+            valid_mask.index({batch}).unsqueeze(0));
+        decoded_keypoint_repeatability_losses.push_back(
+            make_decoded_keypoint_repeatability_loss(
+                features_a,
+                sparse_b_item.heatmap,
+                warp.index({batch}).unsqueeze(0),
+                valid_mask.index({batch}).unsqueeze(0)));
+        graph_losses.push_back(keypoint_metrics.loss * LEARNED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT);
+        graph_loss_weight_sum += LEARNED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
+        graph_losses.push_back(warp_completed_keypoint_metrics.loss * WARP_COMPLETED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT);
+        graph_loss_weight_sum += WARP_COMPLETED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
+        graph_losses.push_back(supervised_keypoint_metrics.loss * SUPERVISED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT);
+        graph_loss_weight_sum += SUPERVISED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
+        graph_accuracies.push_back(keypoint_metrics.accuracy);
+        graph_accuracies.push_back(supervised_keypoint_metrics.accuracy);
+        graph_accuracies.push_back(warp_completed_keypoint_metrics.accuracy);
+        const auto count_options = torch::TensorOptions().dtype(torch::kFloat32).device(sparse_a.descriptors.device());
+        auto make_fraction = [&](const GraphMatchingTrainingMetrics& metrics) {
+            return torch::full(
+                {},
+                metrics.query_count > 0
+                    ? static_cast<float>(metrics.positive_count) / static_cast<float>(metrics.query_count)
+                    : 0.0F,
+                count_options);
+        };
+        auto record_graph_counts = [&](const GraphMatchingTrainingMetrics& metrics) {
+            graph_positive_fractions.push_back(make_fraction(metrics));
+            graph_positive_counts.push_back(torch::full({}, static_cast<float>(metrics.positive_count), count_options));
+            graph_query_counts.push_back(torch::full({}, static_cast<float>(metrics.query_count), count_options));
+            graph_features_a_counts.push_back(torch::full({}, static_cast<float>(metrics.features_a_count), count_options));
+            graph_features_b_counts.push_back(torch::full({}, static_cast<float>(metrics.features_b_count), count_options));
+        };
+        record_graph_counts(keypoint_metrics);
+        record_graph_counts(supervised_keypoint_metrics);
+        record_graph_counts(warp_completed_keypoint_metrics);
+        learned_graph_accuracies.push_back(keypoint_metrics.accuracy);
+        learned_graph_positive_fractions.push_back(make_fraction(keypoint_metrics));
+        learned_graph_positive_counts.push_back(
+            torch::full({}, static_cast<float>(keypoint_metrics.positive_count), count_options));
+        learned_graph_query_counts.push_back(
+            torch::full({}, static_cast<float>(keypoint_metrics.query_count), count_options));
+        sparse_keypoint_descriptor_losses.push_back(
+            keypoint_metrics.sparse_descriptor.loss * LEARNED_KEYPOINT_DESCRIPTOR_LOSS_WEIGHT +
+            keypoint_dense_descriptor * LEARNED_KEYPOINT_DENSE_DESCRIPTOR_LOSS_WEIGHT +
+            keypoint_patch_descriptor * KEYPOINT_PATCH_DESCRIPTOR_ALIGNMENT_WEIGHT +
+            warped_keypoint_descriptor * WARPED_KEYPOINT_DESCRIPTOR_CONTRASTIVE_WEIGHT);
+        sparse_keypoint_descriptor_losses.push_back(
+            warp_completed_keypoint_metrics.sparse_descriptor.loss * LEARNED_KEYPOINT_DESCRIPTOR_LOSS_WEIGHT);
+        sparse_keypoint_descriptor_losses.push_back(
+            supervised_keypoint_metrics.sparse_descriptor.loss * SUPERVISED_KEYPOINT_DESCRIPTOR_LOSS_WEIGHT);
+        auto record_keypoint_descriptor_metrics = [&](const GraphMatchingTrainingMetrics& metrics) {
+            if (metrics.positive_count <= 0) {
+                return;
+            }
+            keypoint_descriptor_accuracies.push_back(metrics.sparse_descriptor.accuracy);
+            keypoint_descriptor_margins.push_back(metrics.sparse_descriptor.positive_margin);
+            keypoint_descriptor_ranks.push_back(metrics.sparse_descriptor.positive_rank);
+        };
+        record_keypoint_descriptor_metrics(keypoint_metrics);
+        record_keypoint_descriptor_metrics(warp_completed_keypoint_metrics);
     }
-    auto graph_matching = graph_losses.empty() ? torch::zeros({}, sparse_a.descriptors.options()) : torch::stack(graph_losses).mean();
+    auto dense_graph_matching = make_graph_matching_loss(
+        *modules.graph_matcher,
+        sparse_a.descriptors,
+        sparse_b.descriptors,
+        warp,
+        valid_mask);
+    auto keypoint_graph_matching = graph_losses.empty() || graph_loss_weight_sum <= 0.0
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_losses).sum() / graph_loss_weight_sum;
+    auto graph_matching_accuracy =
+        graph_accuracies.empty() ? torch::zeros({}, sparse_a.descriptors.options()) : torch::stack(graph_accuracies).mean();
+    auto graph_positive_fraction = graph_positive_fractions.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_positive_fractions).mean();
+    auto graph_positive_count = graph_positive_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_positive_counts).mean();
+    auto graph_query_count = graph_query_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_query_counts).mean();
+    auto graph_features_a_count = graph_features_a_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_features_a_counts).mean();
+    auto graph_features_b_count = graph_features_b_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(graph_features_b_counts).mean();
+    auto learned_graph_matching_accuracy = learned_graph_accuracies.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(learned_graph_accuracies).mean();
+    auto learned_graph_positive_fraction = learned_graph_positive_fractions.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(learned_graph_positive_fractions).mean();
+    auto learned_graph_positive_count = learned_graph_positive_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(learned_graph_positive_counts).mean();
+    auto learned_graph_query_count = learned_graph_query_counts.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(learned_graph_query_counts).mean();
+    auto graph_matching = dense_graph_matching + keypoint_graph_matching;
     auto sparse_keypoint_descriptor = sparse_keypoint_descriptor_losses.empty()
         ? torch::zeros({}, sparse_a.descriptors.options())
         : torch::stack(sparse_keypoint_descriptor_losses).mean();
+    auto keypoint_descriptor_accuracy = keypoint_descriptor_accuracies.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(keypoint_descriptor_accuracies).mean();
+    auto keypoint_descriptor_margin = keypoint_descriptor_margins.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(keypoint_descriptor_margins).mean();
+    auto keypoint_descriptor_rank = keypoint_descriptor_ranks.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(keypoint_descriptor_ranks).mean();
+    auto decoded_keypoint_repeatability = decoded_keypoint_repeatability_losses.empty()
+        ? torch::zeros({}, sparse_a.descriptors.options())
+        : torch::stack(decoded_keypoint_repeatability_losses).mean();
+    repeatability = repeatability + decoded_keypoint_repeatability * DECODED_KEYPOINT_REPEATABILITY_WEIGHT;
     auto offset = masked_smooth_l1_loss(dense.offsets, target_offsets, dense_mask);
     auto confidence = confidence_bce_loss(dense.confidence, dense_mask);
     auto offset_error = offset_pixel_error(dense.offsets, target_offsets, dense_mask);
+    auto descriptor_total = descriptor.loss + sparse_keypoint_descriptor +
+        texture_descriptor * ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT +
+        pairwise_texture_teacher * PAIRWISE_TEXTURE_TEACHER_WEIGHT +
+        descriptor_anchor * DESCRIPTOR_FINETUNE_ANCHOR_WEIGHT;
     return TrainingLossComponents{weighted_total_training_loss(
                                       repeatability,
-                                      descriptor.loss + sparse_keypoint_descriptor +
-                                          texture_descriptor * ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT,
+                                      descriptor_total,
                                       orientation,
                                       graph_matching,
                                       offset,
                                       confidence,
                                       descriptor.diversity),
                                   repeatability,
-                                  descriptor.loss + sparse_keypoint_descriptor +
-                                      texture_descriptor * ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT,
+                                  descriptor_total,
                                   orientation,
                                   graph_matching,
                                   offset,
                                   confidence,
                                   descriptor.accuracy,
+                                  graph_matching_accuracy,
+                                  graph_positive_fraction,
+                                  graph_positive_count,
+                                  graph_query_count,
+                                  graph_features_a_count,
+                                  graph_features_b_count,
+                                  learned_graph_matching_accuracy,
+                                  learned_graph_positive_fraction,
+                                  learned_graph_positive_count,
+                                  learned_graph_query_count,
+                                  descriptor.positive_score,
+                                  descriptor.hard_negative_score,
+                                  descriptor.positive_margin,
+                                  descriptor.positive_rank,
+                                  keypoint_descriptor_accuracy,
+                                  keypoint_descriptor_margin,
+                                  keypoint_descriptor_rank,
                                   descriptor.diversity,
                                   offset_error,
                                   TrainingBatchForward{
@@ -2141,7 +4447,9 @@ bool should_enqueue_training_visualization(std::size_t enqueued_count, std::size
 }
 
 bool should_use_online_dataloader(const TrainConfig& config) {
-    return config.dataloader_workers > 0 && config.synthetic_pair_cache_dir.empty();
+    return config.dataloader_workers > 0 && config.synthetic_pair_cache_dir.empty() &&
+           config.extra_synthetic_pair_cache_dirs.empty() && config.hard_synthetic_pair_cache_dirs.empty() &&
+           !config.augmentation_curriculum;
 }
 
 DatasetSplit make_training_dataset_split(std::size_t total_images, const TrainConfig& config) {
@@ -2313,13 +4621,55 @@ AugmentationProfile to_augmentation_profile(SyntheticPairAugmentationProfile pro
             return AugmentationProfile::Hard;
         case SyntheticPairAugmentationProfile::Extreme:
             return AugmentationProfile::Extreme;
+        case SyntheticPairAugmentationProfile::Viewpoint:
+            return AugmentationProfile::Viewpoint;
+        case SyntheticPairAugmentationProfile::CompoundViewpoint:
+            return AugmentationProfile::CompoundViewpoint;
     }
     return AugmentationProfile::Mixed;
 }
 
+SyntheticPairAugmentationProfile effective_augmentation_profile_for_epoch(const TrainConfig& config, int epoch) {
+    const auto requested = parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
+    if (!config.augmentation_curriculum) {
+        return requested;
+    }
+    const auto first_stage_epochs = std::max(1, config.epochs / 3);
+    const auto second_stage_end = std::max(first_stage_epochs + 1, (config.epochs * 2) / 3);
+    if (epoch < first_stage_epochs) {
+        return SyntheticPairAugmentationProfile::Mixed;
+    }
+    if (epoch < second_stage_end) {
+        return SyntheticPairAugmentationProfile::Viewpoint;
+    }
+    return requested;
+}
+
+std::string augmentation_profile_name(SyntheticPairAugmentationProfile profile) {
+    switch (profile) {
+        case SyntheticPairAugmentationProfile::Mixed:
+            return "mixed";
+        case SyntheticPairAugmentationProfile::RotationOnly:
+            return "rotation-only";
+        case SyntheticPairAugmentationProfile::Mild:
+            return "mild";
+        case SyntheticPairAugmentationProfile::Medium:
+            return "medium";
+        case SyntheticPairAugmentationProfile::Hard:
+            return "hard";
+        case SyntheticPairAugmentationProfile::Extreme:
+            return "extreme";
+        case SyntheticPairAugmentationProfile::Viewpoint:
+            return "viewpoint";
+        case SyntheticPairAugmentationProfile::CompoundViewpoint:
+            return "compound-viewpoint";
+    }
+    return "mixed";
+}
+
 ImagePairAugmentationConfig make_online_pair_config(const TrainConfig& config) {
     ImagePairAugmentationConfig pair_config;
-    pair_config.profile = to_augmentation_profile(parse_synthetic_pair_augmentation_profile(config.augmentation_profile));
+    pair_config.profile = to_augmentation_profile(effective_augmentation_profile_for_epoch(config, 0));
     pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
     pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     return pair_config;
@@ -2332,6 +4682,56 @@ DataLoaderOptions make_dataloader_options(const TrainConfig& config) {
     options.prefetch_batches = static_cast<size_t>(config.prefetch_batches);
     options.pin_memory = config.pin_memory;
     return options;
+}
+
+std::unique_ptr<Sampler> make_cache_training_sampler(std::size_t count, const TrainConfig& config) {
+    return std::make_unique<ShuffleSampler>(count, static_cast<uint64_t>(config.split_seed) ^ 0x9E3779B97F4A7C15ULL);
+}
+
+std::vector<std::string> make_training_cache_dirs(const TrainConfig& config) {
+    std::vector<std::string> cache_dirs;
+    if (!config.synthetic_pair_cache_dir.empty()) {
+        cache_dirs.push_back(config.synthetic_pair_cache_dir);
+    }
+    cache_dirs.insert(
+        cache_dirs.end(), config.extra_synthetic_pair_cache_dirs.begin(), config.extra_synthetic_pair_cache_dirs.end());
+    for (const auto& hard_cache_dir : config.hard_synthetic_pair_cache_dirs) {
+        for (int repeat = 0; repeat < config.hard_synthetic_pair_cache_repeats; ++repeat) {
+            cache_dirs.push_back(hard_cache_dir);
+        }
+    }
+    return cache_dirs;
+}
+
+std::vector<TrainingCacheSpec> make_training_cache_specs(const TrainConfig& config) {
+    std::vector<TrainingCacheSpec> cache_specs;
+    if (!config.synthetic_pair_cache_dir.empty()) {
+        cache_specs.push_back({config.synthetic_pair_cache_dir, std::nullopt});
+    }
+    for (const auto& cache_dir : config.extra_synthetic_pair_cache_dirs) {
+        cache_specs.push_back({cache_dir, std::nullopt});
+    }
+    for (const auto& hard_cache_dir : config.hard_synthetic_pair_cache_dirs) {
+        for (int repeat = 0; repeat < config.hard_synthetic_pair_cache_repeats; ++repeat) {
+            if (config.hard_synthetic_pair_cache_indices.empty()) {
+                cache_specs.push_back({hard_cache_dir, std::nullopt});
+            } else {
+                for (const auto index : config.hard_synthetic_pair_cache_indices) {
+                    cache_specs.push_back({hard_cache_dir, static_cast<std::size_t>(index)});
+                }
+            }
+        }
+    }
+    return cache_specs;
+}
+
+std::vector<std::string> describe_training_cache_specs(const TrainConfig& config) {
+    std::vector<std::string> entries;
+    for (const auto& spec : make_training_cache_specs(config)) {
+        entries.push_back(
+            spec.cache_dir + ":" + (spec.pair_index.has_value() ? std::to_string(*spec.pair_index) : "*"));
+    }
+    return entries;
 }
 
 TensorBatchCollator make_synthetic_pair_collator() {
@@ -2404,8 +4804,65 @@ void move_modules_to_device(TrainModules& modules, torch::Device device) {
     modules.graph_matcher->to(device);
 }
 
+int64_t read_checkpoint_config_int64(torch::serialize::InputArchive& config_archive, const char* name) {
+    torch::Tensor tensor;
+    config_archive.read(name, tensor);
+    if (!tensor.defined() || tensor.numel() != 1) {
+        throw std::invalid_argument(std::string("checkpoint config missing ") + name);
+    }
+    return tensor.to(torch::kCPU, torch::kInt64).reshape({1}).item<int64_t>();
+}
+
+int64_t read_checkpoint_config_int64_or(
+    torch::serialize::InputArchive& config_archive,
+    const char* name,
+    int64_t fallback
+) {
+    try {
+        return read_checkpoint_config_int64(config_archive, name);
+    } catch (const c10::Error&) {
+        return fallback;
+    }
+}
+
+void load_checkpoint_into_modules(const std::string& checkpoint, const TrainConfig& config, TrainModules& modules) {
+    torch::serialize::InputArchive archive;
+    archive.load_from(checkpoint);
+    torch::serialize::InputArchive config_archive;
+    archive.read("config", config_archive);
+
+    const auto input_channels = read_checkpoint_config_int64(config_archive, "input_channels");
+    const auto base_channels = read_checkpoint_config_int64(config_archive, "base_channels");
+    const auto descriptor_dim = read_checkpoint_config_int64(config_archive, "descriptor_dim");
+    const auto graph_hidden_dim = read_checkpoint_config_int64_or(
+        config_archive,
+        "graph_hidden_dim",
+        std::max<int64_t>(32, descriptor_dim));
+    const auto graph_attention_layers = read_checkpoint_config_int64_or(config_archive, "graph_attention_layers", 1);
+    if (input_channels != INPUT_CHANNELS || base_channels != config.base_channels ||
+        descriptor_dim != config.descriptor_dim || graph_hidden_dim != config.graph_hidden_dim ||
+        graph_attention_layers != config.graph_attention_layers) {
+        throw std::invalid_argument("init_checkpoint architecture does not match training config");
+    }
+
+    torch::serialize::InputArchive backbone_archive;
+    torch::serialize::InputArchive sparse_head_archive;
+    torch::serialize::InputArchive dense_head_archive;
+    torch::serialize::InputArchive graph_matcher_archive;
+    archive.read("backbone", backbone_archive);
+    archive.read("sparse_head", sparse_head_archive);
+    archive.read("dense_head", dense_head_archive);
+    archive.read("graph_matcher", graph_matcher_archive);
+    modules.backbone->load(backbone_archive);
+    modules.backbone->sanitize_nonfinite_state();
+    modules.sparse_head->load_compatible(sparse_head_archive);
+    modules.dense_head->load(dense_head_archive);
+    modules.graph_matcher->load(graph_matcher_archive);
+}
+
 void save_checkpoint(const TrainConfig& config, TrainModules& modules) {
     move_modules_to_device(modules, torch::Device(torch::kCPU));
+    modules.backbone->sanitize_nonfinite_state();
     torch::serialize::OutputArchive archive;
     torch::serialize::OutputArchive config_archive;
     config_archive.write("checkpoint_version", torch::tensor({2}, torch::kInt64));
@@ -2460,6 +4917,35 @@ torch::Tensor make_dense_descriptor_hard_negative_loss_for_test(
         descriptors_a.size(3));
     auto target_indices = make_descriptor_target_indices(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
     return make_dense_descriptor_hard_negative_loss(descriptors_a, descriptors_b, sample_indices, target_indices);
+}
+
+torch::Tensor make_bidirectional_dense_descriptor_hard_negative_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    auto sample_indices = filter_descriptor_sample_indices(
+        make_descriptor_sample_indices(descriptors_a),
+        valid_mask,
+        descriptors_a.size(2),
+        descriptors_a.size(3));
+    auto target_indices = make_descriptor_target_indices(warp, sample_indices, descriptors_b.size(2), descriptors_b.size(3));
+    return make_bidirectional_dense_descriptor_hard_negative_loss(
+        descriptors_a,
+        descriptors_b,
+        sample_indices,
+        target_indices);
+}
+
+torch::Tensor make_descriptor_finetune_anchor_loss_for_test(
+    const torch::Tensor& current_a,
+    const torch::Tensor& current_b,
+    const torch::Tensor& anchor_a,
+    const torch::Tensor& anchor_b,
+    const torch::Tensor& valid_mask
+) {
+    return make_descriptor_finetune_anchor_loss(current_a, current_b, anchor_a, anchor_b, valid_mask);
 }
 
 torch::Tensor make_warp_descriptor_contrastive_loss_for_test(
@@ -2529,6 +5015,14 @@ torch::Tensor make_graph_candidate_indices_for_test(
     return make_graph_candidate_indices(target_indices, keypoint_count_b, max_candidates);
 }
 
+torch::Tensor make_graph_training_query_indices_for_test(
+    const torch::Tensor& target_indices,
+    int64_t keypoint_count_b,
+    int64_t max_queries
+) {
+    return make_graph_training_query_indices(target_indices, keypoint_count_b, max_queries);
+}
+
 torch::Tensor make_keypoint_graph_matching_loss_for_test(
     PlanetaryGraphMatcherImpl& graph_matcher,
     const FeatureSet& features_a,
@@ -2548,6 +5042,23 @@ torch::Tensor make_keypoint_descriptor_loss_for_test(
     return make_keypoint_descriptor_loss(features_a, features_b, warp, valid_mask);
 }
 
+torch::Tensor make_keypoint_descriptor_metric_tensor_for_test(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    const auto metrics = make_keypoint_descriptor_metrics(features_a, features_b, warp, valid_mask);
+    return torch::stack({
+        metrics.loss,
+        metrics.accuracy,
+        metrics.positive_score,
+        metrics.hard_negative_score,
+        metrics.positive_margin,
+        metrics.positive_rank,
+        metrics.diversity});
+}
+
 torch::Tensor make_keypoint_dense_descriptor_loss_for_test(
     const FeatureSet& features_a,
     const torch::Tensor& descriptors_b,
@@ -2555,6 +5066,52 @@ torch::Tensor make_keypoint_dense_descriptor_loss_for_test(
     const torch::Tensor& valid_mask
 ) {
     return make_keypoint_dense_descriptor_loss(features_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor make_keypoint_patch_descriptor_alignment_loss_for_test(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_keypoint_patch_descriptor_alignment_loss(features_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor make_warped_keypoint_descriptor_contrastive_loss_for_test(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_warped_keypoint_descriptor_contrastive_loss(features_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor make_decoded_keypoint_repeatability_loss_for_test(
+    const FeatureSet& features_a,
+    const torch::Tensor& heatmap_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_decoded_keypoint_repeatability_loss(features_a, heatmap_b, warp, valid_mask);
+}
+
+std::pair<FeatureSet, FeatureSet> make_warp_completed_keypoint_feature_pair_for_test(
+    const FeatureSet& features_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_warp_completed_keypoint_feature_pair(features_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor scale_feature_keypoints_to_image_for_test(
+    const torch::Tensor& keypoints,
+    int64_t feature_width,
+    int64_t feature_height,
+    int64_t image_width,
+    int64_t image_height
+) {
+    return scale_feature_keypoints_to_image(keypoints, feature_width, feature_height, image_width, image_height);
 }
 
 torch::Tensor make_orientation_supervision_loss_for_test(
@@ -2573,7 +5130,146 @@ torch::Tensor make_descriptor_sample_indices_for_test(const torch::Tensor& descr
 }
 
 torch::Tensor make_descriptor_candidate_indices_for_test(const torch::Tensor& target_indices, int64_t spatial_count) {
-    return make_descriptor_candidate_indices(target_indices, spatial_count);
+    const auto root = static_cast<int64_t>(std::llround(std::sqrt(static_cast<double>(spatial_count))));
+    const auto inferred_width = root * root == spatial_count ? root : spatial_count;
+    return make_descriptor_candidate_indices(target_indices, spatial_count, inferred_width);
+}
+
+torch::Tensor make_descriptor_candidate_indices_for_test(
+    const torch::Tensor& target_indices,
+    int64_t spatial_count,
+    int64_t broad_far_negative_count
+) {
+    const auto root = static_cast<int64_t>(std::llround(std::sqrt(static_cast<double>(spatial_count))));
+    const auto inferred_width = root * root == spatial_count ? root : spatial_count;
+    return make_descriptor_candidate_indices(
+        target_indices,
+        spatial_count,
+        inferred_width,
+        torch::Tensor(),
+        broad_far_negative_count);
+}
+
+torch::Tensor make_descriptor_candidate_indices_for_test(
+    const torch::Tensor& target_indices,
+    int64_t spatial_count,
+    const torch::Tensor& candidate_valid_mask
+) {
+    const auto root = static_cast<int64_t>(std::llround(std::sqrt(static_cast<double>(spatial_count))));
+    const auto inferred_width = root * root == spatial_count ? root : spatial_count;
+    return make_descriptor_candidate_indices(target_indices, spatial_count, inferred_width, candidate_valid_mask);
+}
+
+int64_t descriptor_broad_far_negative_count_for_progress_for_test(double progress) {
+    return descriptor_broad_far_negative_count_for_progress(progress);
+}
+
+torch::Tensor make_supervised_descriptor_ranking_loss_for_test(
+    const torch::Tensor& sampled_a,
+    const torch::Tensor& candidate_b
+) {
+    return make_supervised_descriptor_ranking_loss(sampled_a, candidate_b);
+}
+
+torch::Tensor make_sampled_descriptor_decorrelation_loss_for_test(
+    const torch::Tensor& sampled_descriptors,
+    const torch::Tensor& sample_indices,
+    int64_t descriptor_width
+) {
+    return make_sampled_descriptor_decorrelation_loss(sampled_descriptors, sample_indices, descriptor_width);
+}
+
+torch::Tensor make_positive_descriptor_alignment_loss_for_test(
+    const torch::Tensor& sampled_a,
+    const torch::Tensor& positive_b
+) {
+    return make_positive_descriptor_alignment_loss(sampled_a, positive_b);
+}
+
+torch::Tensor make_patch_descriptor_alignment_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& valid_mask
+) {
+    return make_patch_descriptor_alignment_loss(descriptors_a, descriptors_b, warp, valid_mask);
+}
+
+torch::Tensor descriptor_candidate_similarity_scores_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& candidate_descriptors
+) {
+    return descriptor_candidate_similarity_scores(descriptors_a, candidate_descriptors);
+}
+
+torch::Tensor make_strict_descriptor_cross_entropy_loss_for_test(
+    const torch::Tensor& descriptors_a,
+    const torch::Tensor& descriptors_b,
+    const torch::Tensor& target_indices
+) {
+    return make_strict_descriptor_cross_entropy_loss(descriptors_a, descriptors_b, target_indices);
+}
+
+torch::Tensor blend_rotation_invariant_texture_descriptor_for_test(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& image
+) {
+    return blend_rotation_invariant_texture_descriptor(descriptors, image);
+}
+
+torch::Tensor canonicalize_descriptor_map_by_orientation_for_test(
+    const torch::Tensor& descriptors,
+    const torch::Tensor& orientation
+) {
+    return canonicalize_descriptor_map_by_orientation(descriptors, orientation);
+}
+
+double descriptor_texture_teacher_weight_for_test() {
+    return PAIRWISE_TEXTURE_TEACHER_WEIGHT;
+}
+
+double descriptor_texture_target_weight_for_test() {
+    return ROTATION_INVARIANT_TEXTURE_TARGET_WEIGHT;
+}
+
+double descriptor_texture_blend_weight_for_test() {
+    return ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
+}
+
+double descriptor_finetune_anchor_weight_for_test() {
+    return DESCRIPTOR_FINETUNE_ANCHOR_WEIGHT;
+}
+
+int64_t descriptor_negative_sample_count_for_test() {
+    return DESCRIPTOR_NEGATIVE_SAMPLE_COUNT;
+}
+
+double descriptor_global_ce_weight_for_test() {
+    return DESCRIPTOR_GLOBAL_CE_WEIGHT;
+}
+
+int64_t supervised_descriptor_topk_negatives_for_test() {
+    return SUPERVISED_DESCRIPTOR_TOPK_NEGATIVES;
+}
+
+double supervised_descriptor_soft_rank_weight_for_test() {
+    return SUPERVISED_DESCRIPTOR_SOFT_RANK_WEIGHT;
+}
+
+double supervised_descriptor_tail_rank_weight_for_test() {
+    return SUPERVISED_DESCRIPTOR_TAIL_RANK_WEIGHT;
+}
+
+double learned_keypoint_graph_loss_weight_for_test() {
+    return LEARNED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
+}
+
+double warp_completed_keypoint_graph_loss_weight_for_test() {
+    return WARP_COMPLETED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
+}
+
+double supervised_keypoint_graph_loss_weight_for_test() {
+    return SUPERVISED_KEYPOINT_GRAPH_MATCHING_LOSS_WEIGHT;
 }
 
 int64_t training_variant_index_for_pair_for_test(
@@ -2601,6 +5297,22 @@ torch::Tensor stack_hwc_batch_for_test(const std::vector<torch::Tensor>& tensors
     return stack_batch(tensors, BatchTensorLayout::Hwc);
 }
 
+torch::Tensor make_cache_training_sample_indices_for_test(std::size_t count, const TrainConfig& config) {
+    auto sampler = make_cache_training_sampler(count, config);
+    auto indices = sampler->indices();
+    return torch::tensor(
+        std::vector<int64_t>(indices.begin(), indices.end()),
+        torch::TensorOptions().dtype(torch::kLong));
+}
+
+std::vector<std::string> make_training_cache_dirs_for_test(const TrainConfig& config) {
+    return make_training_cache_dirs(config);
+}
+
+std::vector<std::string> make_training_cache_entries_for_test(const TrainConfig& config) {
+    return describe_training_cache_specs(config);
+}
+
 torch::Tensor weighted_total_training_loss_for_test(
     const torch::Tensor& repeatability,
     const torch::Tensor& descriptor,
@@ -2622,6 +5334,23 @@ torch::Tensor warp_heatmap_for_repeatability_for_test(const torch::Tensor& heatm
     return warp_heatmap_for_repeatability(heatmap, warp);
 }
 
+torch::Tensor make_heatmap_correspondence_target_loss_for_test(
+    const torch::Tensor& heatmap_a,
+    const torch::Tensor& heatmap_b_at_a,
+    const torch::Tensor& target,
+    const torch::Tensor& mask
+) {
+    return make_heatmap_correspondence_target_loss(heatmap_a, heatmap_b_at_a, target, mask);
+}
+
+torch::Tensor make_heatmap_positive_target_loss_for_test(
+    const torch::Tensor& heatmap,
+    const torch::Tensor& target,
+    const torch::Tensor& mask
+) {
+    return make_heatmap_positive_target_loss(heatmap, target, mask);
+}
+
 torch::Tensor make_training_valid_mask_for_test(
     const torch::Tensor& view_a,
     const torch::Tensor& view_b,
@@ -2630,6 +5359,26 @@ torch::Tensor make_training_valid_mask_for_test(
     double min_keypoint_intensity
 ) {
     return make_training_valid_mask(view_a, view_b, warp, valid_mask, min_keypoint_intensity);
+}
+
+torch::Tensor make_warp_aligned_keypoint_targets_for_test(
+    const torch::Tensor& view_a,
+    const torch::Tensor& view_b,
+    const torch::Tensor& warp,
+    const torch::Tensor& mask,
+    int64_t target_height,
+    int64_t target_width
+) {
+    auto targets = make_warp_aligned_keypoint_targets(view_a, view_b, warp, mask, target_height, target_width);
+    return torch::cat({targets.first, targets.second}, 0);
+}
+
+FeatureSet decode_training_features_fast_for_test(
+    const torch::Tensor& view,
+    const SparseHeadOutput& sparse,
+    const TrainConfig& config
+) {
+    return decode_training_features_fast(view, sparse, config);
 }
 
 torch::Tensor training_warp_overlay_image_for_test(const SyntheticPair& pair) {
@@ -2685,6 +5434,10 @@ bool should_use_online_dataloader_for_test(const TrainConfig& config) {
     return should_use_online_dataloader(config);
 }
 
+std::string effective_augmentation_profile_for_epoch_for_test(const TrainConfig& config, int epoch) {
+    return augmentation_profile_name(effective_augmentation_profile_for_epoch(config, epoch));
+}
+
 std::vector<std::size_t> make_training_image_indices_for_test(
     std::size_t total_images,
     const TrainConfig& config
@@ -2709,7 +5462,32 @@ TrainResult train_model(const TrainConfig& config) {
     const auto device = resolve_compute_device(config.device);
     ImageDataset dataset(config.image_dir);
     auto modules = make_modules(config, device);
+    if (!config.init_checkpoint.empty()) {
+        load_checkpoint_into_modules(config.init_checkpoint, config, modules);
+        move_modules_to_device(modules, device);
+        modules.backbone->train();
+        modules.sparse_head->train();
+        modules.dense_head->train();
+        modules.graph_matcher->train();
+    }
+    apply_descriptor_only_finetune(modules, config);
+    apply_viewpoint_head_only_finetune(modules, config);
+    apply_graph_only_finetune(modules, config);
+    keep_descriptor_only_frozen_modules_eval(modules, config);
+    keep_graph_only_frozen_modules_eval(modules, config);
+    std::unique_ptr<TrainModules> descriptor_anchor_modules;
+    if (should_use_descriptor_finetune_anchor(config)) {
+        auto anchor_modules = make_modules(config, device);
+        load_checkpoint_into_modules(config.init_checkpoint, config, anchor_modules);
+        move_modules_to_device(anchor_modules, device);
+        set_all_modules_trainable(anchor_modules, false);
+        set_all_modules_eval(anchor_modules);
+        descriptor_anchor_modules = std::make_unique<TrainModules>(std::move(anchor_modules));
+    }
     auto parameters = module_parameters(modules);
+    if (parameters.empty()) {
+        throw std::invalid_argument("no trainable parameters selected");
+    }
     auto optimizer_options = torch::optim::AdamWOptions(config.learning_rate).weight_decay(config.weight_decay);
     auto optimizer = torch::optim::AdamW(parameters, optimizer_options);
     std::unique_ptr<CsvMetricLogger> csv_logger;
@@ -2733,46 +5511,63 @@ TrainResult train_model(const TrainConfig& config) {
     const auto train_images = train_indices.size();
     const auto val_images = validation_indices.size();
     const auto train_epoch_size = train_images * static_cast<std::size_t>(config.pairs_per_image);
-    const auto epoch_size = train_epoch_size;
+    std::size_t epoch_size = train_epoch_size;
     const auto lr_max = config.learning_rate;
     const auto lr_min = lr_max * 0.01;
-    const auto total_iterations = static_cast<double>(config.epochs) *
-        static_cast<double>(train_epoch_size) / static_cast<double>(config.batch_size);
     int64_t global_step = 0;
     std::unique_ptr<AsyncVisualizationWriter> visualization_writer;
-    const std::size_t visualization_limit = config.visualization_samples_all
-        ? epoch_size
-        : std::min<std::size_t>(static_cast<std::size_t>(config.visualization_samples), epoch_size);
-    if (!config.visualization_dir.empty() && visualization_limit > 0) {
-        std::cout << "training visualization: dir=" << config.visualization_dir
-                  << " samples=" << (config.visualization_samples_all ? "all" : std::to_string(config.visualization_samples))
-                  << " max_keypoints=" << config.max_keypoints
-                  << " min_keypoints=" << config.min_keypoints
-                  << " keypoint_grid=" << config.keypoint_grid_rows << 'x' << config.keypoint_grid_cols
-                  << " keypoints_per_cell=" << config.keypoints_per_cell
-                  << " nms_radius=" << config.nms_radius
-                  << " async_queue=" << TRAINING_VISUALIZATION_QUEUE_CAPACITY
-                  << " async_workers=" << TRAINING_VISUALIZATION_WORKER_COUNT << '\n';
-        visualization_writer = std::make_unique<AsyncVisualizationWriter>(
-            TRAINING_VISUALIZATION_QUEUE_CAPACITY, TRAINING_VISUALIZATION_WORKER_COUNT);
-    }
-        auto pair_config = make_default_pair_config();
-        pair_config.augmentation_profile = parse_synthetic_pair_augmentation_profile(config.augmentation_profile);
-        pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
-        pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
+    auto pair_config = make_default_pair_config();
+    pair_config.augmentation_profile = effective_augmentation_profile_for_epoch(config, 0);
+    pair_config.extreme_pair_ratio = config.extreme_pair_ratio;
+    pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     if (!config.synthetic_pair_cache_dir.empty()) {
-        prepare_synthetic_pair_cache(dataset, make_cache_config(config, epoch_size));
+        prepare_synthetic_pair_cache(
+            dataset,
+            make_cache_config(config, dataset.size() * static_cast<std::size_t>(config.pairs_per_image)));
     }
-    std::unique_ptr<SyntheticPairCacheDataset> cache_dataset;
-    if (!config.synthetic_pair_cache_dir.empty()) {
-        cache_dataset = std::make_unique<SyntheticPairCacheDataset>(config.synthetic_pair_cache_dir);
+    if (config.cache_only) {
+        result.total_time_seconds = total_timer.elapsedSeconds();
+        std::cout << "cache generation complete: dir=" << config.synthetic_pair_cache_dir
+                  << " pairs=" << dataset.size() * static_cast<std::size_t>(config.pairs_per_image)
+                  << " elapsed=" << formatSeconds(result.total_time_seconds) << '\n';
+        return result;
+    }
+    const auto cache_specs = make_training_cache_specs(config);
+
+    std::unique_ptr<CompositeSyntheticPairCacheDataset> cache_dataset;
+    if (!cache_specs.empty()) {
+        cache_dataset = std::make_unique<CompositeSyntheticPairCacheDataset>(cache_specs);
+        epoch_size = cache_dataset->size();
+    }
+    std::cout << "training data: raw_images=" << total_images
+              << " train_images=" << train_images
+              << " validation_images=" << val_images
+              << " cache_entries=" << cache_specs.size()
+              << " pairs_per_epoch=" << epoch_size
+              << " pairs_per_image=" << config.pairs_per_image << '\n';
+    if (config.max_train_batches > 0) {
+        epoch_size = std::min<std::size_t>(
+            epoch_size,
+            static_cast<std::size_t>(config.max_train_batches) * static_cast<std::size_t>(config.batch_size));
+        std::cout << "training data limited: max_train_batches=" << config.max_train_batches
+                  << " effective_pairs_per_epoch=" << epoch_size << '\n';
     }
     std::unique_ptr<AsyncDataLoader> cache_loader;
     if (cache_dataset && config.dataloader_workers > 0) {
-        auto tensor_dataset = std::make_shared<SyntheticPairCacheTensorDataset>(config.synthetic_pair_cache_dir);
+        std::vector<std::shared_ptr<TensorDataset>> tensor_datasets;
+        tensor_datasets.reserve(cache_specs.size());
+        for (const auto& cache_spec : cache_specs) {
+            if (cache_spec.pair_index.has_value()) {
+                tensor_datasets.push_back(std::make_shared<IndexedSyntheticPairCacheTensorDataset>(
+                    cache_spec.cache_dir, std::vector<std::size_t>{*cache_spec.pair_index}));
+            } else {
+                tensor_datasets.push_back(std::make_shared<SyntheticPairCacheTensorDataset>(cache_spec.cache_dir));
+            }
+        }
+        auto tensor_dataset = std::make_shared<CompositeTensorDataset>(std::move(tensor_datasets));
         cache_loader = std::make_unique<AsyncDataLoader>(
             tensor_dataset,
-            std::make_unique<SequentialSampler>(tensor_dataset->size()),
+            make_cache_training_sampler(tensor_dataset->size(), config),
             make_synthetic_pair_collator(),
             make_dataloader_options(config));
     }
@@ -2791,9 +5586,28 @@ TrainResult train_model(const TrainConfig& config) {
             make_synthetic_pair_collator(),
             make_dataloader_options(config));
     }
+    const auto total_iterations = static_cast<double>(config.epochs) *
+        static_cast<double>(epoch_size) / static_cast<double>(config.batch_size);
+    const std::size_t visualization_limit = config.visualization_samples_all
+        ? epoch_size
+        : std::min<std::size_t>(static_cast<std::size_t>(config.visualization_samples), epoch_size);
+    if (!config.visualization_dir.empty() && visualization_limit > 0) {
+        std::cout << "training visualization: dir=" << config.visualization_dir
+                  << " samples=" << (config.visualization_samples_all ? "all" : std::to_string(config.visualization_samples))
+                  << " max_keypoints=" << config.max_keypoints
+                  << " min_keypoints=" << config.min_keypoints
+                  << " keypoint_grid=" << config.keypoint_grid_rows << 'x' << config.keypoint_grid_cols
+                  << " keypoints_per_cell=" << config.keypoints_per_cell
+                  << " nms_radius=" << config.nms_radius
+                  << " async_queue=" << TRAINING_VISUALIZATION_QUEUE_CAPACITY
+                  << " async_workers=" << TRAINING_VISUALIZATION_WORKER_COUNT << '\n';
+        visualization_writer = std::make_unique<AsyncVisualizationWriter>(
+            TRAINING_VISUALIZATION_QUEUE_CAPACITY, TRAINING_VISUALIZATION_WORKER_COUNT);
+    }
 
     for (int epoch = 0; epoch < config.epochs; ++epoch) {
         Timer epoch_timer;
+        pair_config.augmentation_profile = effective_augmentation_profile_for_epoch(config, epoch);
         if (online_loader) {
             online_loader->reset();
         }
@@ -2842,7 +5656,21 @@ TrainResult train_model(const TrainConfig& config) {
                     stack_batch(images, BatchTensorLayout::Chw).to(device), source_indices, variant_indices, pair_config);
             }
 
-            auto loss = training_loss_from_pairs(modules, pairs, config);
+            const auto curriculum_progress = total_iterations > 1.0
+                ? static_cast<double>(global_step) / std::max(1.0, total_iterations - 1.0)
+                : 1.0;
+            const auto descriptor_broad_far_negative_count =
+                descriptor_broad_far_negative_count_for_progress(curriculum_progress);
+            auto loss = training_loss_from_pairs(
+                modules,
+                pairs,
+                config,
+                descriptor_anchor_modules.get(),
+                descriptor_broad_far_negative_count);
+            if (!torch::isfinite(loss.total.detach()).item<bool>()) {
+                optimizer.zero_grad();
+                continue;
+            }
             if (visualization_writer && offset < visualization_limit) {
                 for (std::size_t pair_offset = 0; pair_offset < pairs.size(); ++pair_offset) {
                     const auto pair_index = offset + pair_offset;
@@ -2886,6 +5714,31 @@ TrainResult train_model(const TrainConfig& config) {
                 const auto orientation_loss_value = loss.orientation.detach().item<double>();
                 const auto graph_matching_loss_value = loss.graph_matching.detach().item<double>();
                 const auto descriptor_accuracy_value = loss.descriptor_accuracy.detach().item<double>();
+                const auto graph_matching_accuracy_value = loss.graph_matching_accuracy.detach().item<double>();
+                const auto graph_positive_fraction_value = loss.graph_positive_fraction.detach().item<double>();
+                const auto graph_positive_count_value = loss.graph_positive_count.detach().item<double>();
+                const auto graph_query_count_value = loss.graph_query_count.detach().item<double>();
+                const auto graph_features_a_count_value = loss.graph_features_a_count.detach().item<double>();
+                const auto graph_features_b_count_value = loss.graph_features_b_count.detach().item<double>();
+                const auto learned_graph_matching_accuracy_value =
+                    loss.learned_graph_matching_accuracy.detach().item<double>();
+                const auto learned_graph_positive_fraction_value =
+                    loss.learned_graph_positive_fraction.detach().item<double>();
+                const auto learned_graph_positive_count_value =
+                    loss.learned_graph_positive_count.detach().item<double>();
+                const auto learned_graph_query_count_value =
+                    loss.learned_graph_query_count.detach().item<double>();
+                const auto descriptor_positive_score_value = loss.descriptor_positive_score.detach().item<double>();
+                const auto descriptor_hard_negative_score_value =
+                    loss.descriptor_hard_negative_score.detach().item<double>();
+                const auto descriptor_positive_margin_value = loss.descriptor_positive_margin.detach().item<double>();
+                const auto descriptor_positive_rank_value = loss.descriptor_positive_rank.detach().item<double>();
+                const auto keypoint_descriptor_accuracy_value =
+                    loss.keypoint_descriptor_accuracy.detach().item<double>();
+                const auto keypoint_descriptor_positive_margin_value =
+                    loss.keypoint_descriptor_positive_margin.detach().item<double>();
+                const auto keypoint_descriptor_positive_rank_value =
+                    loss.keypoint_descriptor_positive_rank.detach().item<double>();
                 const auto descriptor_diversity_value = loss.descriptor_diversity.detach().item<double>();
                 const auto offset_loss_value = loss.offset.detach().item<double>();
                 const auto offset_error_value = loss.offset_error.detach().item<double>();
@@ -2901,10 +5754,27 @@ TrainResult train_model(const TrainConfig& config) {
                     {"orientation_loss", orientation_loss_value},
                     {"matcher_loss", graph_matching_loss_value},
                     {"graph_matching_loss", graph_matching_loss_value},
+                    {"graph_matching_accuracy", graph_matching_accuracy_value},
+                    {"graph_positive_fraction", graph_positive_fraction_value},
+                    {"graph_positive_count", graph_positive_count_value},
+                    {"graph_query_count", graph_query_count_value},
+                    {"graph_features_a", graph_features_a_count_value},
+                    {"graph_features_b", graph_features_b_count_value},
+                    {"learned_graph_matching_accuracy", learned_graph_matching_accuracy_value},
+                    {"learned_graph_positive_fraction", learned_graph_positive_fraction_value},
+                    {"learned_graph_positive_count", learned_graph_positive_count_value},
+                    {"learned_graph_query_count", learned_graph_query_count_value},
                     {"dense_loss", dense_loss_value},
                     {"offset_loss", offset_loss_value},
                     {"confidence_loss", confidence_loss_value},
                     {"descriptor_accuracy", descriptor_accuracy_value},
+                    {"descriptor_positive_score", descriptor_positive_score_value},
+                    {"descriptor_hard_negative_score", descriptor_hard_negative_score_value},
+                    {"descriptor_positive_margin", descriptor_positive_margin_value},
+                    {"descriptor_positive_rank", descriptor_positive_rank_value},
+                    {"keypoint_descriptor_accuracy", keypoint_descriptor_accuracy_value},
+                    {"keypoint_descriptor_positive_margin", keypoint_descriptor_positive_margin_value},
+                    {"keypoint_descriptor_positive_rank", keypoint_descriptor_positive_rank_value},
                     {"descriptor_diversity", descriptor_diversity_value},
                     {"offset_error_px", offset_error_value},
                 };
@@ -2932,9 +5802,26 @@ TrainResult train_model(const TrainConfig& config) {
                 iter_metric.elapsed_seconds = total_timer.elapsedSeconds();
                 iter_metric.values["loss_total"] = last_loss;
                 iter_metric.values["matcher_loss"] = graph_matching_loss_value;
+                iter_metric.values["graph_matching_accuracy"] = graph_matching_accuracy_value;
+                iter_metric.values["graph_positive_fraction"] = graph_positive_fraction_value;
+                iter_metric.values["graph_positive_count"] = graph_positive_count_value;
+                iter_metric.values["graph_query_count"] = graph_query_count_value;
+                iter_metric.values["graph_features_a"] = graph_features_a_count_value;
+                iter_metric.values["graph_features_b"] = graph_features_b_count_value;
+                iter_metric.values["learned_graph_matching_accuracy"] = learned_graph_matching_accuracy_value;
+                iter_metric.values["learned_graph_positive_fraction"] = learned_graph_positive_fraction_value;
+                iter_metric.values["learned_graph_positive_count"] = learned_graph_positive_count_value;
+                iter_metric.values["learned_graph_query_count"] = learned_graph_query_count_value;
                 iter_metric.values["dense_loss"] = dense_loss_value;
                 iter_metric.values["offset_error_px"] = offset_error_value;
                 iter_metric.values["descriptor_accuracy"] = descriptor_accuracy_value;
+                iter_metric.values["descriptor_positive_score"] = descriptor_positive_score_value;
+                iter_metric.values["descriptor_hard_negative_score"] = descriptor_hard_negative_score_value;
+                iter_metric.values["descriptor_positive_margin"] = descriptor_positive_margin_value;
+                iter_metric.values["descriptor_positive_rank"] = descriptor_positive_rank_value;
+                iter_metric.values["keypoint_descriptor_accuracy"] = keypoint_descriptor_accuracy_value;
+                iter_metric.values["keypoint_descriptor_positive_margin"] = keypoint_descriptor_positive_margin_value;
+                iter_metric.values["keypoint_descriptor_positive_rank"] = keypoint_descriptor_positive_rank_value;
                 iter_metric.values["descriptor_diversity"] = descriptor_diversity_value;
                 iter_metric.values["feature_loss"] = feature_loss_value;
                 iter_metric.values["repeatability_loss"] = repeatability_loss_value;
@@ -2990,7 +5877,10 @@ TrainResult train_model(const TrainConfig& config) {
                 auto val_pairs = make_synthetic_pairs_from_batch(
                     stack_batch(val_img_batch, BatchTensorLayout::Chw).to(device),
                     val_src_indices, val_var_indices, pair_config);
-                auto val_loss = training_loss_from_pairs(modules, val_pairs, config);
+                auto val_loss = training_loss_from_pairs(modules, val_pairs, config, descriptor_anchor_modules.get());
+                if (!torch::isfinite(val_loss.total.detach()).item<bool>()) {
+                    continue;
+                }
                 val_total += val_loss.total.detach().item<double>();
                 ++val_batches;
             }
@@ -3003,6 +5893,8 @@ TrainResult train_model(const TrainConfig& config) {
             modules.sparse_head->train();
             modules.backbone->train();
             modules.graph_matcher->train();
+            keep_descriptor_only_frozen_modules_eval(modules, config);
+            keep_graph_only_frozen_modules_eval(modules, config);
         }
         ++result.epochs_completed;
         save_checkpoint(config, modules);

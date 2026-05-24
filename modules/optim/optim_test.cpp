@@ -39,6 +39,16 @@ void descriptor_similarity_matches_cosine_for_non_c4_descriptors() {
     PFM_REQUIRE(torch::allclose(actual, expected, 1.0e-5, 1.0e-5));
 }
 
+void descriptor_similarity_rejects_arbitrary_cyclic_quarter_shift() {
+    auto descriptors_a = torch::tensor({{{1.0F, 0.0F, 0.0F, 0.0F}}}, torch::kFloat32);
+    auto descriptors_b = torch::tensor({{{0.0F, 1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F, 0.0F}}}, torch::kFloat32);
+
+    auto actual = pfm::cyclicDescriptorSimilarityScores(descriptors_a, descriptors_b);
+
+    PFM_REQUIRE_CLOSE(actual.index({0, 0, 0}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(actual.index({0, 0, 1}).item<float>(), 0.0F, 1.0e-6F);
+}
+
 void chunked_descriptor_similarity_matches_unchunked() {
     torch::manual_seed(19);
     auto descriptors_a = torch::randn({2, 17, 16}, torch::kFloat32);
@@ -57,6 +67,9 @@ void register_optim_tests() {
     register_test(
         "descriptor similarity matches cosine for non c4 descriptors",
         descriptor_similarity_matches_cosine_for_non_c4_descriptors);
+    register_test(
+        "descriptor similarity rejects arbitrary cyclic quarter shift",
+        descriptor_similarity_rejects_arbitrary_cyclic_quarter_shift);
     register_test(
         "chunked descriptor similarity matches unchunked",
         chunked_descriptor_similarity_matches_unchunked);

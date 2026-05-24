@@ -103,6 +103,31 @@ static void transformSamplerMixedIncludesCleanThirtyDegreeAnchors() {
     PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
 }
 
+static void transformSamplerViewpointAddsProjectiveTermsWithoutFullRotationAnchor() {
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::Viewpoint;
+    config.source_index = 2;
+    config.variant_index = 13;
+
+    const auto params = pfm::sampleImagePairTransform(config);
+
+    PFM_REQUIRE(std::abs(params.shear_x) > 1.0e-4F || std::abs(params.shear_y) > 1.0e-4F);
+    PFM_REQUIRE(std::abs(params.perspective_x) > 1.0e-7F || std::abs(params.perspective_y) > 1.0e-7F);
+    PFM_REQUIRE(std::abs(params.rotation_degrees) < 75.0F);
+}
+
+static void transformSamplerCompoundViewpointKeepsFullRotationBase() {
+    pfm::ImagePairAugmentationConfig config;
+    config.profile = pfm::AugmentationProfile::CompoundViewpoint;
+    config.source_index = 2;
+    config.variant_index = 12;
+
+    const auto params = pfm::sampleImagePairTransform(config);
+
+    PFM_REQUIRE(std::abs(params.rotation_degrees) > 160.0F);
+    PFM_REQUIRE(std::abs(params.perspective_x) > 1.0e-7F || std::abs(params.perspective_y) > 1.0e-7F);
+}
+
 static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
@@ -148,6 +173,10 @@ void register_augment_tests() {
                   transformSamplerMixedQuarterTurnIsCleanRotationAnchor);
     register_test("transform sampler mixed includes clean thirty degree anchors",
                   transformSamplerMixedIncludesCleanThirtyDegreeAnchors);
+    register_test("transform sampler viewpoint adds projective terms without full rotation anchor",
+                  transformSamplerViewpointAddsProjectiveTermsWithoutFullRotationAnchor);
+    register_test("transform sampler compound viewpoint keeps full rotation base",
+                  transformSamplerCompoundViewpointKeepsFullRotationBase);
     register_test("image pair augmentor returns current training keys", imagePairAugmentorReturnsCurrentTrainingKeys);
     register_test("image pair augmentor mixed half turn warp crosses image",
                   imagePairAugmentorMixedHalfTurnWarpCrossesImage);

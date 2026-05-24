@@ -69,13 +69,18 @@ static void parse_extract_keypoint_distribution_options() {
         "--min-keypoints",
         "32",
         "--nms-radius",
-        "2"});
+        "2",
+        "--descriptor-pool-radius",
+        "2",
+        "--disable-descriptor-orientation-canonicalization"});
 
     PFM_REQUIRE(options.keypoint_grid_rows == 4);
     PFM_REQUIRE(options.keypoint_grid_cols == 6);
     PFM_REQUIRE(options.keypoints_per_cell == 3);
     PFM_REQUIRE(options.min_keypoints == 32);
     PFM_REQUIRE(options.nms_radius == 2);
+    PFM_REQUIRE(options.descriptor_pool_radius == 2);
+    PFM_REQUIRE(options.disable_descriptor_orientation_canonicalization);
 }
 
 static void parse_invalid_keypoint_distribution_options_throw() {
@@ -107,6 +112,19 @@ static void parse_invalid_keypoint_distribution_options_throw() {
             "--nms-radius",
             "-1"}),
         CLI::ParseError);
+    PFM_REQUIRE_THROWS_AS(
+        pfm::parse_cli({
+            "pfm",
+            "eval",
+            "--pairs",
+            "pairs.txt",
+            "--checkpoint",
+            "model.pt",
+            "--output",
+            "report.pt",
+            "--descriptor-pool-radius",
+            "-1"}),
+        CLI::ParseError);
 }
 
 static void parse_train_defaults_to_bounded_resize() {
@@ -121,6 +139,9 @@ static void parse_train_defaults_to_bounded_resize() {
 
     PFM_REQUIRE(parsed.command == pfm::Command::Train);
     PFM_REQUIRE(parsed.resize == 512);
+    PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
+    PFM_REQUIRE_CLOSE(parsed.train_ratio, 1.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.val_ratio, 0.0, 1.0e-12);
 }
 
 static void parse_train_command() {
@@ -131,6 +152,8 @@ static void parse_train_command() {
         "images",
         "--checkpoint",
         "model.pt",
+        "--init-checkpoint",
+        "base.pt",
         "--epochs",
         "7",
         "--batch-size",
@@ -141,14 +164,32 @@ static void parse_train_command() {
         "512",
         "--pairs-per-image",
         "3",
+        "--max-train-batches",
+        "5",
         "--augmentation-profile",
         "rotation-only",
+        "--augmentation-curriculum",
         "--rotation-step-degrees",
         "30",
         "--extreme-pair-ratio",
         "0.35",
         "--synthetic-pair-cache-dir",
         "pair_cache",
+        "--cache-only",
+        "--extra-synthetic-pair-cache-dir",
+        "rotate_cache",
+        "--extra-synthetic-pair-cache-dir",
+        "compound_cache",
+        "--hard-synthetic-pair-cache-dir",
+        "compound_hard_cache",
+        "--hard-synthetic-pair-cache-dir",
+        "compound_extreme_cache",
+        "--hard-synthetic-pair-cache-repeats",
+        "4",
+        "--hard-synthetic-pair-cache-index",
+        "3",
+        "--hard-synthetic-pair-cache-index",
+        "8",
         "--synthetic-pair-cache-rebuild",
         "--log-csv",
         "metrics.csv",
@@ -157,6 +198,10 @@ static void parse_train_command() {
         "--prefetch-batches",
         "3",
         "--pin-memory",
+        "--descriptor-only-finetune",
+        "--viewpoint-head-only-finetune",
+        "--graph-only-finetune",
+        "--disable-descriptor-orientation-canonicalization",
         "--visualization-dir",
         "train_vis",
         "--visualization-samples",
@@ -180,21 +225,37 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.command == pfm::Command::Train);
     PFM_REQUIRE(parsed.image_dir == "images");
     PFM_REQUIRE(parsed.checkpoint == "model.pt");
+    PFM_REQUIRE(parsed.init_checkpoint == "base.pt");
     PFM_REQUIRE(parsed.epochs == 7);
     PFM_REQUIRE(parsed.batch_size == 4);
     PFM_REQUIRE(parsed.device == "cuda:0");
     PFM_REQUIRE(parsed.resize == 512);
     PFM_REQUIRE(parsed.pairs_per_image == 3);
+    PFM_REQUIRE(parsed.max_train_batches == 5);
     PFM_REQUIRE(parsed.augmentation_profile == "rotation-only");
+    PFM_REQUIRE(parsed.augmentation_curriculum);
     PFM_REQUIRE_CLOSE(parsed.rotation_step_degrees, 30.0, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.extreme_pair_ratio, 0.35, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
+    PFM_REQUIRE(parsed.cache_only);
+    PFM_REQUIRE(parsed.extra_synthetic_pair_cache_dirs.size() == 2);
+    PFM_REQUIRE(parsed.extra_synthetic_pair_cache_dirs[0] == "rotate_cache");
+    PFM_REQUIRE(parsed.extra_synthetic_pair_cache_dirs[1] == "compound_cache");
+    PFM_REQUIRE(parsed.hard_synthetic_pair_cache_dirs.size() == 2);
+    PFM_REQUIRE(parsed.hard_synthetic_pair_cache_dirs[0] == "compound_hard_cache");
+    PFM_REQUIRE(parsed.hard_synthetic_pair_cache_dirs[1] == "compound_extreme_cache");
+    PFM_REQUIRE(parsed.hard_synthetic_pair_cache_repeats == 4);
+    PFM_REQUIRE(parsed.hard_synthetic_pair_cache_indices == std::vector<int64_t>({3, 8}));
     PFM_REQUIRE(parsed.synthetic_pair_cache_rebuild);
     PFM_REQUIRE(parsed.log_csv == "metrics.csv");
     PFM_REQUIRE(parsed.dataloader_workers == 2);
     PFM_REQUIRE(parsed.prefetch_batches == 3);
     PFM_REQUIRE(parsed.pin_memory);
+    PFM_REQUIRE(parsed.descriptor_only_finetune);
+    PFM_REQUIRE(parsed.viewpoint_head_only_finetune);
+    PFM_REQUIRE(parsed.graph_only_finetune);
+    PFM_REQUIRE(parsed.disable_descriptor_orientation_canonicalization);
     PFM_REQUIRE(parsed.visualization_dir == "train_vis");
     PFM_REQUIRE(parsed.visualization_samples == 6);
     PFM_REQUIRE(!parsed.visualization_samples_all);
@@ -288,6 +349,10 @@ static void parse_match_command() {
         "model.pt",
         "--output",
         "matches.json",
+        "--warp-a-to-b",
+        "pair_000000.pt",
+        "--match-correct-threshold-pixels",
+        "3.5",
         "--max-keypoints",
         "2048",
         "--min-keypoints",
@@ -306,11 +371,29 @@ static void parse_match_command() {
     PFM_REQUIRE(parsed.feature_a == "a_features.pt");
     PFM_REQUIRE(parsed.feature_b == "b_features.pt");
     PFM_REQUIRE(parsed.match_mode == "sparse");
+    PFM_REQUIRE(parsed.warp_a_to_b == "pair_000000.pt");
+    PFM_REQUIRE_CLOSE(parsed.match_correct_threshold_pixels, 3.5, 1.0e-6);
     PFM_REQUIRE(parsed.max_keypoints == 2048);
     PFM_REQUIRE(parsed.min_keypoints == 512);
     PFM_REQUIRE_CLOSE(parsed.semi_dense_threshold, 0.5, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.visualization_dir == "vis");
+}
+
+static void parse_match_defaults_to_sparse_mode() {
+    const auto parsed = pfm::parse_cli({
+        "pfm",
+        "match",
+        "--image-a",
+        "a.png",
+        "--image-b",
+        "b.png",
+        "--checkpoint",
+        "model.pt",
+        "--output",
+        "matches.pt"});
+
+    PFM_REQUIRE(parsed.match_mode == "sparse");
 }
 
 static void parse_eval_command() {
@@ -432,6 +515,7 @@ static void top_level_help_lists_subcommand_options() {
     PFM_REQUIRE(help.find("--resize") != std::string::npos);
     PFM_REQUIRE(help.find("--pairs-per-image") != std::string::npos);
     PFM_REQUIRE(help.find("--augmentation-profile") != std::string::npos);
+    PFM_REQUIRE(help.find("--augmentation-curriculum") != std::string::npos);
     PFM_REQUIRE(help.find("--extreme-pair-ratio") != std::string::npos);
     PFM_REQUIRE(help.find("--max-training-images-per-epoch") == std::string::npos);
     PFM_REQUIRE(help.find("--synthetic-pair-cache-dir") != std::string::npos);
@@ -538,6 +622,7 @@ void register_cli_tests() {
                   parse_train_visualization_samples_zero_disables_output);
     register_test("parse_train_visualization_invalid_samples_throw", parse_train_visualization_invalid_samples_throw);
     register_test("parse_match_command", parse_match_command);
+    register_test("parse_match_defaults_to_sparse_mode", parse_match_defaults_to_sparse_mode);
     register_test("parse_eval_command", parse_eval_command);
     register_test("parse_export_command", parse_export_command);
     register_test("parse_min_keypoint_intensity_out_of_range_throws", parse_min_keypoint_intensity_out_of_range_throws);

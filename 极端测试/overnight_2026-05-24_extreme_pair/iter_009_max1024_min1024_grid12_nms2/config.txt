@@ -1,0 +1,2 @@
+name=max1024_min1024_grid12_nms2
+args=--max-keypoints 1024 --min-keypoints 1024 --keypoint-grid-rows 12 --keypoint-grid-cols 12 --nms-radius 2

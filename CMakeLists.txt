@@ -136,9 +136,11 @@ add_library(pfm STATIC
     src/data/synthetic_pair_cache.cpp
     src/data/synthetic_pair_dataset.cpp
     src/infer/eval_pipeline.cpp
+    src/infer/checkpoint_gate.cpp
     src/infer/feature_codec.cpp
     src/infer/feature_extractor.cpp
     src/infer/match_codec.cpp
+    src/infer/match_metrics.cpp
     src/infer/matching_pipeline.cpp
     src/infer/pipeline.cpp
     src/infer/visualization.cpp
@@ -167,6 +169,24 @@ target_link_libraries(pfm_cli PRIVATE pfm)
 add_executable(pfm_rotation_sweep_eval tools/rotation_sweep_eval.cpp)
 target_link_libraries(pfm_rotation_sweep_eval PRIVATE pfm ${OpenCV_LIBS})
 
+add_executable(pfm_feature_pair_diagnostics tools/feature_pair_diagnostics.cpp)
+target_link_libraries(pfm_feature_pair_diagnostics PRIVATE pfm)
+
+add_executable(pfm_warp_image_diagnostics tools/warp_image_diagnostics.cpp)
+target_link_libraries(pfm_warp_image_diagnostics PRIVATE pfm)
+
+add_executable(pfm_match_residual_diagnostics tools/match_residual_diagnostics.cpp)
+target_link_libraries(pfm_match_residual_diagnostics PRIVATE pfm)
+
+add_executable(pfm_checkpoint_gate tools/checkpoint_gate.cpp)
+target_link_libraries(pfm_checkpoint_gate PRIVATE pfm)
+
+add_executable(pfm_interpolate_checkpoints tools/interpolate_checkpoints.cpp)
+target_link_libraries(pfm_interpolate_checkpoints PRIVATE pfm)
+
+add_executable(pfm_print_checkpoint_config tools/print_checkpoint_config.cpp)
+target_link_libraries(pfm_print_checkpoint_config PRIVATE pfm)
+
 add_executable(pfm_tests
     tests/test_main.cpp
     src/cli/commands_test.cpp
@@ -181,6 +201,8 @@ add_executable(pfm_tests
     src/infer/feature_codec_test.cpp
     src/infer/feature_extractor_test.cpp
     src/infer/match_codec_test.cpp
+    src/infer/match_metrics_test.cpp
+    src/infer/checkpoint_gate_test.cpp
     src/infer/matching_pipeline_test.cpp
     src/infer/pipeline_test.cpp
     src/infer/visualization_test.cpp

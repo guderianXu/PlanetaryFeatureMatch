@@ -14,6 +14,10 @@ struct ImagePairTransformParameters {
     float noise_sigma = 0.0F;
     float gamma = 1.0F;
     float shadow_strength = 0.0F;
+    float shear_x = 0.0F;
+    float shear_y = 0.0F;
+    float perspective_x = 0.0F;
+    float perspective_y = 0.0F;
 };
 
 /// Samples deterministic image-pair transform parameters.

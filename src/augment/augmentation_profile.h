@@ -9,6 +9,8 @@ enum class AugmentationProfile {
     Medium,
     Hard,
     Extreme,
+    Viewpoint,
+    CompoundViewpoint,
 };
 
 }  // namespace pfm

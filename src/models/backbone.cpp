@@ -52,4 +52,22 @@ std::vector<torch::Tensor> BackboneImpl::forward(const torch::Tensor& x) {
     return {y1, y2, y3, y4};
 }
 
+void BackboneImpl::sanitize_nonfinite_state() {
+    for (auto& item : named_buffers(/*recurse=*/true)) {
+        auto tensor = item.value();
+        if (!tensor.defined() || !tensor.is_floating_point()) {
+            continue;
+        }
+        auto finite = torch::isfinite(tensor);
+        if (finite.all().item<bool>()) {
+            continue;
+        }
+        if (item.key().find("running_var") != std::string::npos) {
+            tensor.masked_fill_(finite.logical_not(), 1.0);
+        } else {
+            tensor.masked_fill_(finite.logical_not(), 0.0);
+        }
+    }
+}
+
 }  // namespace pfm

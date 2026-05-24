@@ -14,10 +14,12 @@ enum class SyntheticPairAugmentationProfile {
     Medium,
     Hard,
     Extreme,
+    Viewpoint,
+    CompoundViewpoint,
 };
 
 /// Parses a synthetic pair augmentation profile name.
-/// @param value Profile name: mixed, mild, medium, hard, or extreme.
+/// @param value Profile name: mixed, rotation-only, mild, medium, hard, extreme, viewpoint, or compound-viewpoint.
 /// @return Parsed profile enum.
 /// @throws std::invalid_argument if the profile name is unsupported.
 SyntheticPairAugmentationProfile parse_synthetic_pair_augmentation_profile(const std::string& value);
