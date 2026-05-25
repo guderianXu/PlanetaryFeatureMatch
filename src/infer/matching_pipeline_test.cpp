@@ -15,9 +15,11 @@ int64_t descriptor_topk_candidates_per_source_for_test();
 int64_t descriptor_topk_candidates_per_source_for_test_env();
 bool descriptor_topk_projective_before_rotation_for_test();
 bool descriptor_reciprocal_topk_fallback_for_test();
+bool sparse_geometry_filter_adaptive_for_test();
 bool sparse_geometry_filter_rotation_only_for_test();
 bool sparse_geometry_filter_local_for_test();
 bool should_return_rotation_only_matches_for_test(int64_t rotation_matches);
+bool should_prefer_local_displacement_geometry_for_test(int64_t projective_matches, int64_t local_matches);
 std::pair<torch::Tensor, torch::Tensor> merge_sparse_match_candidates_for_test(
     const torch::Tensor& primary_matches,
     const torch::Tensor& primary_scores,
@@ -559,25 +561,38 @@ static void matching_pipeline_allows_reciprocal_topk_fallback_env() {
 
 static void matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint() {
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
+    PFM_REQUIRE(pfm::testing::sparse_geometry_filter_adaptive_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(129));
 
     setenv("PFM_SPARSE_GEOMETRY_FILTER", "rotation-only", 1);
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_adaptive_for_test());
     PFM_REQUIRE(pfm::testing::sparse_geometry_filter_rotation_only_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(31));
     PFM_REQUIRE(pfm::testing::should_return_rotation_only_matches_for_test(32));
 
     setenv("PFM_SPARSE_GEOMETRY_FILTER", "local", 1);
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_adaptive_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
     PFM_REQUIRE(pfm::testing::sparse_geometry_filter_local_for_test());
 
     setenv("PFM_SPARSE_GEOMETRY_FILTER", "projective", 1);
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_adaptive_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(129));
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
+}
+
+static void matching_pipeline_prefers_local_geometry_only_for_substantial_match_gain() {
+    PFM_REQUIRE(pfm::testing::should_prefer_local_displacement_geometry_for_test(0, 4));
+    PFM_REQUIRE(!pfm::testing::should_prefer_local_displacement_geometry_for_test(0, 3));
+    PFM_REQUIRE(pfm::testing::should_prefer_local_displacement_geometry_for_test(87, 121));
+    PFM_REQUIRE(pfm::testing::should_prefer_local_displacement_geometry_for_test(320, 945));
+    PFM_REQUIRE(!pfm::testing::should_prefer_local_displacement_geometry_for_test(87, 95));
+    PFM_REQUIRE(!pfm::testing::should_prefer_local_displacement_geometry_for_test(150, 165));
 }
 
 static void matching_pipeline_rotation_filter_rejects_near_angle_position_outliers() {
@@ -1246,6 +1261,8 @@ void register_matching_pipeline_tests() {
                   matching_pipeline_allows_reciprocal_topk_fallback_env);
     register_test("matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint",
                   matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint);
+    register_test("matching_pipeline_prefers_local_geometry_only_for_substantial_match_gain",
+                  matching_pipeline_prefers_local_geometry_only_for_substantial_match_gain);
     register_test("matching_pipeline_rotation_filter_rejects_near_angle_position_outliers",
                   matching_pipeline_rotation_filter_rejects_near_angle_position_outliers);
     register_test("matching_pipeline_skips_graph_matcher_for_dense_sparse_feature_sets",

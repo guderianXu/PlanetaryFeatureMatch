@@ -42,6 +42,8 @@ constexpr double GEOMETRIC_RESIDUAL_CLEANUP_LOW_COUNT_THRESHOLD = 0.5;
 constexpr double LOCAL_DISPLACEMENT_CONSISTENCY_THRESHOLD = 3.0;
 constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_NEIGHBORS = 12;
 constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_MIN_INLIERS = 4;
+constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_MAX_ADAPTIVE_CANDIDATES = 8192;
+constexpr int64_t LOCAL_DISPLACEMENT_ADAPTIVE_MIN_GAIN = 8;
 constexpr int64_t DESCRIPTOR_TOPK_CANDIDATES_PER_SOURCE = 4;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE = 2;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES = 64;
@@ -73,6 +75,7 @@ constexpr bool DESCRIPTOR_RECIPROCAL_TOPK_FALLBACK = false;
 constexpr bool DESCRIPTOR_TOPK_PROJECTIVE_BEFORE_ROTATION = false;
 
 enum class SparseGeometryFilter {
+    Adaptive,
     Projective,
     RotationOnly,
     Local,
@@ -197,9 +200,12 @@ double rotationConsistencyMaxPositionError() {
 SparseGeometryFilter sparseGeometryFilter() {
     const char* value = std::getenv("PFM_SPARSE_GEOMETRY_FILTER");
     if (value == nullptr) {
-        return SparseGeometryFilter::Projective;
+        return SparseGeometryFilter::Adaptive;
     }
     const std::string mode(value);
+    if (mode == "adaptive" || mode == "auto") {
+        return SparseGeometryFilter::Adaptive;
+    }
     if (mode == "rotation" || mode == "rotation-only") {
         return SparseGeometryFilter::RotationOnly;
     }
@@ -212,6 +218,19 @@ SparseGeometryFilter sparseGeometryFilter() {
 bool shouldReturnRotationOnlyMatches(int64_t rotation_matches) {
     return sparseGeometryFilter() == SparseGeometryFilter::RotationOnly &&
            rotation_matches >= ROTATION_CONSISTENCY_MIN_MATCHES;
+}
+
+bool shouldPreferLocalDisplacementGeometry(int64_t projective_matches, int64_t local_matches) {
+    if (local_matches < LOCAL_DISPLACEMENT_CONSISTENCY_MIN_INLIERS) {
+        return false;
+    }
+    if (projective_matches < GEOMETRIC_CONSISTENCY_MIN_INLIERS) {
+        return true;
+    }
+    const auto required_gain = std::max<int64_t>(
+        LOCAL_DISPLACEMENT_ADAPTIVE_MIN_GAIN,
+        projective_matches / 4);
+    return local_matches >= projective_matches + required_gain;
 }
 
 torch::Tensor descriptorSimilarityScores(
@@ -1053,10 +1072,21 @@ std::pair<torch::Tensor, torch::Tensor> filterSparseGeometryConsistentMatches(
     const torch::Tensor& matches,
     const torch::Tensor& scores
 ) {
-    if (sparseGeometryFilter() == SparseGeometryFilter::Local) {
+    const auto filter_mode = sparseGeometryFilter();
+    if (filter_mode == SparseGeometryFilter::Local) {
         return filterLocalDisplacementConsistentMatches(features_a, features_b, matches, scores);
     }
-    return filterProjectiveConsistentMatches(features_a, features_b, matches, scores);
+    auto projective = filterProjectiveConsistentMatches(features_a, features_b, matches, scores);
+    if (filter_mode != SparseGeometryFilter::Adaptive ||
+        !matches.defined() ||
+        matches.size(0) > LOCAL_DISPLACEMENT_CONSISTENCY_MAX_ADAPTIVE_CANDIDATES) {
+        return projective;
+    }
+    auto local = filterLocalDisplacementConsistentMatches(features_a, features_b, matches, scores);
+    if (shouldPreferLocalDisplacementGeometry(projective.first.size(0), local.first.size(0))) {
+        return local;
+    }
+    return projective;
 }
 
 std::pair<torch::Tensor, torch::Tensor> mutualGraphLogitMatches(
@@ -1677,6 +1707,10 @@ bool descriptor_reciprocal_topk_fallback_for_test() {
     return descriptorReciprocalTopKFallback();
 }
 
+bool sparse_geometry_filter_adaptive_for_test() {
+    return sparseGeometryFilter() == SparseGeometryFilter::Adaptive;
+}
+
 bool sparse_geometry_filter_rotation_only_for_test() {
     return sparseGeometryFilter() == SparseGeometryFilter::RotationOnly;
 }
@@ -1687,6 +1721,10 @@ bool sparse_geometry_filter_local_for_test() {
 
 bool should_return_rotation_only_matches_for_test(int64_t rotation_matches) {
     return shouldReturnRotationOnlyMatches(rotation_matches);
+}
+
+bool should_prefer_local_displacement_geometry_for_test(int64_t projective_matches, int64_t local_matches) {
+    return shouldPreferLocalDisplacementGeometry(projective_matches, local_matches);
 }
 
 std::pair<torch::Tensor, torch::Tensor> merge_sparse_match_candidates_for_test(
