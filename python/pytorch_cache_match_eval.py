@@ -319,6 +319,41 @@ def filter_affine_consistent_matches(
     return kept_matches.index_select(0, order.to(kept_matches.device)), kept_scores.index_select(0, order)
 
 
+def filter_local_displacement_consistent_matches(
+    points_a: torch.Tensor,
+    points_b: torch.Tensor,
+    matches: torch.Tensor,
+    scores: torch.Tensor,
+    *,
+    threshold_px: float,
+    neighbors: int = 12,
+    min_inliers: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if matches.size(0) < min_inliers:
+        return matches, scores
+    matched_a = points_a.index_select(0, matches[:, 0].to(points_a.device)).to(torch.float32)
+    matched_b = points_b.index_select(0, matches[:, 1].to(points_b.device)).to(torch.float32)
+    displacement = matched_b - matched_a
+    neighbor_count = min(max(2, int(neighbors)), matches.size(0))
+    distances = torch.cdist(matched_a, matched_a)
+    nearest = distances.argsort(dim=1)[:, :neighbor_count]
+    local_displacement = displacement.index_select(0, nearest.reshape(-1))
+    local_displacement = local_displacement.reshape(matches.size(0), neighbor_count, 2)
+    median = local_displacement.median(dim=1).values
+    residual = (displacement - median).norm(dim=1)
+    keep = residual <= threshold_px
+    if int(keep.sum()) < min_inliers:
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=matches.device),
+            torch.empty(0, dtype=torch.float32, device=scores.device),
+        )
+    keep_indices = torch.nonzero(keep.detach().cpu(), as_tuple=False).reshape(-1).to(matches.device)
+    kept_matches = matches.index_select(0, keep_indices)
+    kept_scores = scores.index_select(0, keep_indices.to(scores.device))
+    order = kept_scores.detach().cpu().argsort(descending=True).to(kept_scores.device)
+    return kept_matches.index_select(0, order.to(kept_matches.device)), kept_scores.index_select(0, order)
+
+
 def _normalize_xy(points_xy: torch.Tensor, height: int, width: int) -> torch.Tensor:
     x = points_xy[:, 0] * (2.0 / float(max(1, width - 1))) - 1.0
     y = points_xy[:, 1] * (2.0 / float(max(1, height - 1))) - 1.0
@@ -402,6 +437,24 @@ def match_pair_descriptor_maps(
         local_matches = torch.stack([local_indices, local_indices], dim=1)
         local_scores = torch.arange(matches.size(0), 0, -1, dtype=torch.float32, device=matches.device)
         kept_local, _ = filter_affine_consistent_matches(
+            points_a,
+            points_b,
+            local_matches,
+            local_scores,
+            threshold_px=threshold_px,
+            min_inliers=4,
+        )
+        if kept_local.numel() == 0:
+            return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
+        keep = kept_local[:, 0].to(points_a.device)
+        matches = matches.index_select(0, keep.to(matches.device))
+        points_a = points_a.index_select(0, keep)
+        points_b = points_b.index_select(0, keep.to(points_b.device))
+    elif geometry_filter == "local":
+        local_indices = torch.arange(matches.size(0), dtype=torch.long, device=matches.device)
+        local_matches = torch.stack([local_indices, local_indices], dim=1)
+        local_scores = torch.arange(matches.size(0), 0, -1, dtype=torch.float32, device=matches.device)
+        kept_local, _ = filter_local_displacement_consistent_matches(
             points_a,
             points_b,
             local_matches,
@@ -514,7 +567,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--mutual", action="store_true")
-    parser.add_argument("--geometry-filter", choices=["none", "affine"], default="none")
+    parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
     parser.add_argument("--hard-summary", action="append", type=Path, default=[])

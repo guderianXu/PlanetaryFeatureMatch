@@ -168,6 +168,30 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(kept_scores.size(0), 6)
         self.assertNotIn([6, 6], kept_matches.tolist())
 
+    def test_local_displacement_filter_removes_outlier_without_global_affine_assumption(self):
+        points_a = torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [8.0, 8.0]],
+            dtype=torch.float32,
+        )
+        points_b = points_a + torch.tensor([3.0, 4.0])
+        points_b[-1] = torch.tensor([50.0, -20.0])
+        matches = torch.stack([torch.arange(points_a.size(0)), torch.arange(points_a.size(0))], dim=1)
+        scores = torch.linspace(1.0, 0.5, points_a.size(0))
+
+        kept_matches, kept_scores = eval_py.filter_local_displacement_consistent_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            threshold_px=1.0,
+            neighbors=4,
+            min_inliers=3,
+        )
+
+        self.assertEqual(kept_matches.size(0), 4)
+        self.assertEqual(kept_scores.size(0), 4)
+        self.assertNotIn([4, 4], kept_matches.tolist())
+
 
 if __name__ == "__main__":
     unittest.main()
