@@ -50,8 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-mode", default="sparse", choices=["sparse", "dense", "both"])
     parser.add_argument(
         "--sparse-geometry-filter",
-        default="rotation-only",
-        choices=["projective", "rotation-only"],
+        default="adaptive",
+        choices=["adaptive", "projective", "local", "rotation-only"],
         help="Geometry filter passed to pfm_cli match",
     )
     parser.add_argument("--threshold-px", type=float, default=5.0, help="Warp correctness threshold")
