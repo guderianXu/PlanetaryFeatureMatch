@@ -5,6 +5,7 @@
 #include <string>
 
 #include <torch/torch.h>
+#include <torch/serialize.h>
 
 #include "data/image_io.h"
 #include "infer/match_metrics.h"
@@ -63,6 +64,26 @@ torch::Tensor grayscale(const torch::Tensor& image) {
     return image.mean(0).contiguous();
 }
 
+torch::Tensor read_archive_tensor(const std::string& path, const char* name) {
+    torch::serialize::InputArchive archive;
+    archive.load_from(path);
+    torch::Tensor tensor;
+    archive.read(name, tensor);
+    if (!tensor.defined()) {
+        throw std::invalid_argument(std::string("archive tensor is missing: ") + name);
+    }
+    return tensor.to(torch::kCPU, torch::kFloat32).contiguous();
+}
+
+double mean_abs_diff_or_negative_one(const torch::Tensor& lhs, const torch::Tensor& rhs) {
+    auto left = lhs.to(torch::kCPU, torch::kFloat32).contiguous();
+    auto right = rhs.to(torch::kCPU, torch::kFloat32).contiguous();
+    if (left.sizes() != right.sizes()) {
+        return -1.0;
+    }
+    return (left - right).abs().mean().item<double>();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -71,6 +92,8 @@ int main(int argc, char** argv) {
         auto image_a = grayscale(pfm::load_image_tensor(options.image_a)).to(torch::kCPU, torch::kFloat32).contiguous();
         auto image_b = grayscale(pfm::load_image_tensor(options.image_b)).to(torch::kCPU, torch::kFloat32).contiguous();
         auto warp = pfm::load_warp_a_to_b_tensor(options.warp).to(torch::kCPU, torch::kFloat32).contiguous();
+        auto archive_a = grayscale(read_archive_tensor(options.warp, "view_a"));
+        auto archive_b = grayscale(read_archive_tensor(options.warp, "view_b"));
         if (warp.size(0) != image_a.size(0) || warp.size(1) != image_a.size(1) ||
             image_b.size(0) != image_a.size(0) || image_b.size(1) != image_a.size(1)) {
             throw std::invalid_argument("image and warp sizes must match");
@@ -128,6 +151,8 @@ int main(int argc, char** argv) {
                   << " bright_transfer_fraction=" << ratio(bright_source_to_bright_target, bright_source_in_bounds)
                   << " mean_bright_abs_diff="
                   << (bright_source_in_bounds == 0 ? 0.0 : abs_diff_sum / static_cast<double>(bright_source_in_bounds))
+                  << " archive_view_a_png_abs_diff=" << mean_abs_diff_or_negative_one(archive_a, image_a)
+                  << " archive_view_b_png_abs_diff=" << mean_abs_diff_or_negative_one(archive_b, image_b)
                   << '\n';
         return 0;
     } catch (const std::exception& e) {

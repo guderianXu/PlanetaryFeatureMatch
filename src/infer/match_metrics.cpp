@@ -221,9 +221,6 @@ WarpFeatureCoverageMetrics compute_warp_feature_coverage_metrics(
     WarpFeatureCoverageMetrics metrics;
     metrics.source_total = points_a.size(0);
     double nearest_distance_sum = 0.0;
-    double rank_sum = 0.0;
-    int64_t ranked_count = 0;
-    int64_t top1_count = 0;
     for (int64_t index_a = 0; index_a < points_a.size(0); ++index_a) {
         const auto [x_a_float, y_a_float] = map_feature_point_to_image_float(
             points_a[index_a],
@@ -283,10 +280,10 @@ WarpFeatureCoverageMetrics compute_warp_feature_coverage_metrics(
                 ++rank;
             }
         }
-        rank_sum += static_cast<double>(rank);
-        ++ranked_count;
+        metrics.descriptor_rank_sum += rank;
+        ++metrics.descriptor_rank_observed;
         if (std::find(positive_indices.begin(), positive_indices.end(), best_index) != positive_indices.end()) {
-            ++top1_count;
+            ++metrics.descriptor_top1_count;
         }
     }
 
@@ -295,9 +292,11 @@ WarpFeatureCoverageMetrics compute_warp_feature_coverage_metrics(
                                     static_cast<double>(metrics.valid_warp_total);
         metrics.mean_nearest_target_distance_pixels = nearest_distance_sum / static_cast<double>(metrics.valid_warp_total);
     }
-    if (ranked_count > 0) {
-        metrics.mean_descriptor_positive_rank = rank_sum / static_cast<double>(ranked_count);
-        metrics.descriptor_top1_accuracy = static_cast<double>(top1_count) / static_cast<double>(ranked_count);
+    if (metrics.descriptor_rank_observed > 0) {
+        metrics.mean_descriptor_positive_rank = static_cast<double>(metrics.descriptor_rank_sum) /
+                                                static_cast<double>(metrics.descriptor_rank_observed);
+        metrics.descriptor_top1_accuracy = static_cast<double>(metrics.descriptor_top1_count) /
+                                           static_cast<double>(metrics.descriptor_rank_observed);
     }
     return metrics;
 }

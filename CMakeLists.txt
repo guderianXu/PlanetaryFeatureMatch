@@ -69,6 +69,45 @@ target_include_directories(pfm_optim PUBLIC
 target_link_libraries(pfm_optim PUBLIC ${TORCH_LIBRARIES})
 target_compile_options(pfm_optim PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(pfm_cache_eval STATIC
+    modules/cache_eval/cache_eval_manifest.cpp
+    modules/cache_eval/cache_eval_metrics.cpp
+    modules/cache_eval/cache_eval_quality.cpp
+    modules/cache_eval/cache_eval_training.cpp
+)
+target_include_directories(pfm_cache_eval PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_compile_options(pfm_cache_eval PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(pfm_match_quality STATIC
+    modules/match_quality/spatial_match_quality.cpp
+)
+target_include_directories(pfm_match_quality PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_compile_options(pfm_match_quality PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(pfm_training_schedule STATIC
+    modules/training_schedule/training_schedule.cpp
+)
+target_include_directories(pfm_training_schedule PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_compile_options(pfm_training_schedule PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(pfm_adaptive_match_policy STATIC
+    modules/adaptive_match_policy/adaptive_match_policy.cpp
+)
+target_include_directories(pfm_adaptive_match_policy PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_compile_options(pfm_adaptive_match_policy PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(pfm_core STATIC
     src/core/device.cpp
     src/core/tensor_utils.cpp
@@ -178,6 +217,9 @@ target_link_libraries(pfm_warp_image_diagnostics PRIVATE pfm)
 add_executable(pfm_match_residual_diagnostics tools/match_residual_diagnostics.cpp)
 target_link_libraries(pfm_match_residual_diagnostics PRIVATE pfm)
 
+add_executable(pfm_cache_eval_report tools/cache_eval_report.cpp)
+target_link_libraries(pfm_cache_eval_report PRIVATE pfm pfm_cache_eval)
+
 add_executable(pfm_checkpoint_gate tools/checkpoint_gate.cpp)
 target_link_libraries(pfm_checkpoint_gate PRIVATE pfm)
 
@@ -197,6 +239,10 @@ add_executable(pfm_tests
     modules/dataloader/dataloader_test.cpp
     modules/logging/logging_test.cpp
     modules/optim/optim_test.cpp
+    modules/cache_eval/cache_eval_metrics_test.cpp
+    modules/match_quality/spatial_match_quality_test.cpp
+    modules/training_schedule/training_schedule_test.cpp
+    modules/adaptive_match_policy/adaptive_match_policy.test.cpp
     src/infer/eval_pipeline_test.cpp
     src/infer/feature_codec_test.cpp
     src/infer/feature_extractor_test.cpp
@@ -227,5 +273,5 @@ add_executable(pfm_tests
 target_include_directories(pfm_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging pfm_optim)
+target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging pfm_optim pfm_cache_eval pfm_match_quality pfm_training_schedule pfm_adaptive_match_policy)
 add_test(NAME pfm_tests COMMAND pfm_tests)

@@ -173,6 +173,14 @@ static void parse_train_command() {
         "30",
         "--extreme-pair-ratio",
         "0.35",
+        "--learning-rate",
+        "0.00003",
+        "--lr-warmup-steps",
+        "12",
+        "--min-learning-rate-ratio",
+        "0.05",
+        "--weight-decay",
+        "0.08",
         "--synthetic-pair-cache-dir",
         "pair_cache",
         "--cache-only",
@@ -236,6 +244,10 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.augmentation_curriculum);
     PFM_REQUIRE_CLOSE(parsed.rotation_step_degrees, 30.0, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.extreme_pair_ratio, 0.35, 1.0e-6);
+    PFM_REQUIRE_CLOSE(parsed.learning_rate, 3.0e-5, 1.0e-12);
+    PFM_REQUIRE(parsed.lr_warmup_steps == 12);
+    PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 0.05, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.weight_decay, 0.08, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
     PFM_REQUIRE(parsed.cache_only);

@@ -45,7 +45,8 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
         "  train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu] "
         "[--init-checkpoint base.pt] [--resize 512] [--pairs-per-image 1] [--max-train-batches 0] [--augmentation-profile mixed] "
         "[--augmentation-curriculum] [--rotation-step-degrees 15] "
-        "[--extreme-pair-ratio 0.2] [--synthetic-pair-cache-dir build/pair_cache] [--cache-only] "
+        "[--extreme-pair-ratio 0.2] [--learning-rate 0.0003] [--lr-warmup-steps 0] "
+        "[--min-learning-rate-ratio 0.01] [--synthetic-pair-cache-dir build/pair_cache] [--cache-only] "
         "[--extra-synthetic-pair-cache-dir img/Rotate] [--log-csv metrics.csv] "
         "[--dataloader-workers 0] [--prefetch-batches 2] [--pin-memory] "
         "[--descriptor-only-finetune] [--viewpoint-head-only-finetune] [--graph-only-finetune] "
@@ -92,6 +93,14 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
     train->add_option("--graph-hidden-dim", options.graph_hidden_dim, "Graph matcher hidden dimension")
         ->check(CLI::PositiveNumber);
     train->add_option("--learning-rate", options.learning_rate, "Initial learning rate");
+    train->add_option("--lr-warmup-steps",
+                      options.lr_warmup_steps,
+                      "Linear learning-rate warmup steps before cosine decay")
+        ->check(CLI::NonNegativeNumber);
+    train->add_option("--min-learning-rate-ratio",
+                      options.min_learning_rate_ratio,
+                      "Cosine decay floor as a ratio of --learning-rate")
+        ->check(CLI::Range(0.0, 1.0));
     train->add_option("--weight-decay", options.weight_decay, "AdamW weight decay");
     train->add_option("--graph-attention-layers", options.graph_attention_layers, "Graph matcher attention layer count")
         ->check(CLI::PositiveNumber);

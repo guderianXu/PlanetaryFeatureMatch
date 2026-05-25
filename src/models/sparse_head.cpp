@@ -15,7 +15,10 @@ void require_positive_channels(int64_t channels, const char* name) {
 }
 
 torch::Tensor normalize_channels(const torch::Tensor& tensor) {
-    return tensor / tensor.norm(2, 1, true).clamp_min(1.0e-12);
+    const auto finite = torch::where(torch::isfinite(tensor), tensor, torch::zeros_like(tensor));
+    auto scale = std::get<0>(finite.detach().abs().max(1, true)).clamp_min(1.0e-12);
+    auto scaled = finite / scale;
+    return scaled / scaled.norm(2, 1, true).clamp_min(1.0e-12);
 }
 
 torch::Tensor rotate_feature_map(const torch::Tensor& tensor, int64_t turns) {
@@ -327,5 +330,13 @@ void SparseHeadImpl::load_compatible(torch::serialize::InputArchive& archive) {
     load_child_archive(archive, *_orientation, "orientation");
     load_child_archive(archive, *_affine, "affine");
 }
+
+namespace testing {
+
+torch::Tensor normalize_sparse_head_channels_for_test(const torch::Tensor& tensor) {
+    return normalize_channels(tensor);
+}
+
+}  // namespace testing
 
 }  // namespace pfm

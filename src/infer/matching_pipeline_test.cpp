@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdlib>
 
 #include <torch/torch.h>
@@ -31,6 +32,7 @@ bool should_use_graph_matcher_for_sparse_count_for_test(int64_t keypoint_count_a
 bool should_use_wide_topk_fallback_for_test(int64_t base_matches, int64_t wide_matches, double wide_mean_score);
 bool should_use_projective_topk_rescue_for_test(int64_t base_matches, int64_t projective_matches);
 bool should_prefer_mutual_descriptor_geometry_for_test(int64_t mutual_matches, int64_t topk_matches);
+bool should_use_conservative_topk_fallback_for_test(int64_t base_matches, int64_t conservative_matches);
 std::pair<torch::Tensor, torch::Tensor> trim_low_confidence_topk_tail_for_test(
     const torch::Tensor& matches,
     const torch::Tensor& scores);
@@ -43,6 +45,16 @@ torch::Device descriptor_similarity_compute_device_for_test(
     const torch::Tensor& descriptors_b,
     const torch::Device& compute_device);
 std::pair<torch::Tensor, torch::Tensor> affine_residual_cleanup_matches_for_test(
+    const pfm::FeatureSet& features_a,
+    const pfm::FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores);
+std::pair<torch::Tensor, torch::Tensor> projective_consistent_matches_for_test(
+    const pfm::FeatureSet& features_a,
+    const pfm::FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores);
+std::pair<torch::Tensor, torch::Tensor> rotation_consistent_matches_for_test(
     const pfm::FeatureSet& features_a,
     const pfm::FeatureSet& features_b,
     const torch::Tensor& matches,
@@ -338,6 +350,64 @@ static void matching_pipeline_geometric_quality_penalizes_local_projective_clust
     PFM_REQUIRE(spread_smaller_cluster > local_large_cluster);
 }
 
+static void matching_pipeline_projective_candidate_selection_can_use_spatial_spread_weight() {
+    std::vector<float> a_xy;
+    std::vector<float> b_xy;
+    std::vector<int64_t> match_indices;
+    std::vector<float> scores;
+    a_xy.reserve(36 * 2);
+    b_xy.reserve(36 * 2);
+    match_indices.reserve(36 * 2);
+    scores.reserve(36);
+
+    const std::array<std::pair<float, float>, 12> broad_points{{
+        {0.0F, 0.0F}, {64.0F, 0.0F}, {128.0F, 0.0F}, {192.0F, 0.0F},
+        {0.0F, 96.0F}, {64.0F, 96.0F}, {128.0F, 96.0F}, {192.0F, 96.0F},
+        {0.0F, 192.0F}, {64.0F, 192.0F}, {128.0F, 192.0F}, {192.0F, 192.0F},
+    }};
+
+    auto append_match = [&](float ax, float ay, float bx, float by, float score) {
+        const auto index = static_cast<int64_t>(scores.size());
+        a_xy.push_back(ax);
+        a_xy.push_back(ay);
+        b_xy.push_back(bx);
+        b_xy.push_back(by);
+        match_indices.push_back(index);
+        match_indices.push_back(index);
+        scores.push_back(score);
+    };
+
+    for (const auto& point : broad_points) {
+        append_match(point.first, point.second, point.first + 5.0F, point.second + 7.0F, 0.99F);
+    }
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 6; ++col) {
+            const auto ax = 80.0F + static_cast<float>(col) * 1.2F;
+            const auto ay = 80.0F + static_cast<float>(row) * 1.2F;
+            append_match(ax, ay, ax + 40.0F, ay - 25.0F, 0.95F);
+        }
+    }
+
+    const auto keypoints_a = torch::from_blob(a_xy.data(), {36, 2}, torch::kFloat32).clone();
+    const auto keypoints_b = torch::from_blob(b_xy.data(), {36, 2}, torch::kFloat32).clone();
+    const auto descriptors = torch::zeros({36, 4}, torch::kFloat32);
+    const auto confidence = torch::ones({36}, torch::kFloat32);
+    const auto features_a = makeFeatureSet(keypoints_a, descriptors, keypoints_a, confidence);
+    const auto features_b = makeFeatureSet(keypoints_b, descriptors, keypoints_b, confidence);
+    const auto matches = torch::from_blob(match_indices.data(), {36, 2}, torch::kInt64).clone();
+    const auto score_tensor = torch::from_blob(scores.data(), {36}, torch::kFloat32).clone();
+
+    setenv("PFM_GEOMETRIC_SPREAD_QUALITY_WEIGHT", "40", 1);
+    const auto filtered = pfm::testing::projective_consistent_matches_for_test(
+        features_a,
+        features_b,
+        matches,
+        score_tensor);
+    unsetenv("PFM_GEOMETRIC_SPREAD_QUALITY_WEIGHT");
+
+    PFM_REQUIRE(filtered.first.size(0) == 12);
+}
+
 static void matching_pipeline_uses_requested_device_for_descriptor_similarity_when_available() {
     if (!torch::cuda::is_available()) {
         return;
@@ -353,8 +423,8 @@ static void matching_pipeline_uses_requested_device_for_descriptor_similarity_wh
     PFM_REQUIRE(device.is_cuda());
 }
 
-static void matching_pipeline_keeps_enough_descriptor_topk_candidates_for_extreme_rotation() {
-    PFM_REQUIRE(pfm::testing::descriptor_topk_candidates_per_source_for_test() >= 16);
+static void matching_pipeline_uses_conservative_descriptor_topk_by_default() {
+    PFM_REQUIRE(pfm::testing::descriptor_topk_candidates_per_source_for_test() == 4);
 }
 
 static void matching_pipeline_allows_descriptor_topk_override_for_hard_viewpoint_pairs() {
@@ -402,6 +472,14 @@ static void matching_pipeline_projective_rescue_requires_large_safe_gain() {
     PFM_REQUIRE(!pfm::testing::should_use_projective_topk_rescue_for_test(220, 332));
     PFM_REQUIRE(!pfm::testing::should_use_projective_topk_rescue_for_test(44, 88));
     PFM_REQUIRE(!pfm::testing::should_use_projective_topk_rescue_for_test(44, 99));
+}
+
+static void matching_pipeline_conservative_topk_fallback_targets_low_count_results() {
+    PFM_REQUIRE(pfm::testing::should_use_conservative_topk_fallback_for_test(16, 8));
+    PFM_REQUIRE(pfm::testing::should_use_conservative_topk_fallback_for_test(64, 32));
+    PFM_REQUIRE(!pfm::testing::should_use_conservative_topk_fallback_for_test(65, 64));
+    PFM_REQUIRE(!pfm::testing::should_use_conservative_topk_fallback_for_test(16, 7));
+    PFM_REQUIRE(!pfm::testing::should_use_conservative_topk_fallback_for_test(32, 15));
 }
 
 static void matching_pipeline_prefers_mutual_geometry_when_topk_cluster_expands_too_much() {
@@ -484,6 +562,81 @@ static void matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_v
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(129));
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
+}
+
+static void matching_pipeline_rotation_filter_rejects_near_angle_position_outliers() {
+    std::vector<float> keypoint_values_a;
+    std::vector<float> keypoint_values_b;
+    std::vector<int64_t> match_values;
+    std::vector<float> score_values;
+    constexpr int64_t good_count = 32;
+    constexpr int64_t outlier_count = 8;
+    keypoint_values_a.reserve((good_count + outlier_count) * 2);
+    keypoint_values_b.reserve((good_count + outlier_count) * 2);
+    match_values.reserve((good_count + outlier_count) * 2);
+    score_values.reserve(good_count + outlier_count);
+    const float center = 50.0F;
+    const float radius = 24.0F;
+    const float right_angle = 1.57079632679F;
+    const float near_outlier_angle = right_angle + 0.075F;
+    for (int64_t index = 0; index < good_count + outlier_count; ++index) {
+        const float theta = static_cast<float>(index) * 0.16F;
+        const float source_x = center + std::cos(theta) * radius;
+        const float source_y = center + std::sin(theta) * radius;
+        const float delta = index < good_count ? right_angle : near_outlier_angle;
+        const float target_x = center + std::cos(theta + delta) * radius;
+        const float target_y = center + std::sin(theta + delta) * radius;
+        keypoint_values_a.push_back(source_x);
+        keypoint_values_a.push_back(source_y);
+        keypoint_values_b.push_back(target_x);
+        keypoint_values_b.push_back(target_y);
+        match_values.push_back(index);
+        match_values.push_back(index);
+        score_values.push_back(1.0F - static_cast<float>(index) * 0.001F);
+    }
+    const auto keypoints_a = torch::from_blob(
+                                 keypoint_values_a.data(),
+                                 {good_count + outlier_count, 2},
+                                 torch::kFloat32)
+                                 .clone();
+    const auto keypoints_b = torch::from_blob(
+                                 keypoint_values_b.data(),
+                                 {good_count + outlier_count, 2},
+                                 torch::kFloat32)
+                                 .clone();
+    const auto descriptors = torch::eye(good_count + outlier_count, torch::kFloat32);
+    auto features_a = makeFeatureSet(
+        keypoints_a,
+        descriptors,
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32));
+    auto features_b = makeFeatureSet(
+        keypoints_b,
+        descriptors,
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32));
+    features_a.feature_map_width = 101;
+    features_a.feature_map_height = 101;
+    features_b.feature_map_width = 101;
+    features_b.feature_map_height = 101;
+    const auto matches = torch::from_blob(
+                             match_values.data(),
+                             {good_count + outlier_count, 2},
+                             torch::kInt64)
+                             .clone();
+    const auto scores = torch::from_blob(
+                            score_values.data(),
+                            {good_count + outlier_count},
+                            torch::kFloat32)
+                            .clone();
+
+    const auto filtered = pfm::testing::rotation_consistent_matches_for_test(
+        features_a,
+        features_b,
+        matches,
+        scores);
+
+    PFM_REQUIRE(filtered.first.size(0) == good_count);
 }
 
 static void matching_pipeline_skips_graph_matcher_for_dense_sparse_feature_sets() {
@@ -962,10 +1115,13 @@ void register_matching_pipeline_tests() {
     register_test(
         "matching_pipeline_geometric_quality_penalizes_local_projective_clusters",
         matching_pipeline_geometric_quality_penalizes_local_projective_clusters);
+    register_test(
+        "matching_pipeline_projective_candidate_selection_can_use_spatial_spread_weight",
+        matching_pipeline_projective_candidate_selection_can_use_spatial_spread_weight);
     register_test("matching_pipeline_uses_requested_device_for_descriptor_similarity_when_available",
                   matching_pipeline_uses_requested_device_for_descriptor_similarity_when_available);
-    register_test("matching_pipeline_keeps_enough_descriptor_topk_candidates_for_extreme_rotation",
-                  matching_pipeline_keeps_enough_descriptor_topk_candidates_for_extreme_rotation);
+    register_test("matching_pipeline_uses_conservative_descriptor_topk_by_default",
+                  matching_pipeline_uses_conservative_descriptor_topk_by_default);
     register_test("matching_pipeline_allows_descriptor_topk_override_for_hard_viewpoint_pairs",
                   matching_pipeline_allows_descriptor_topk_override_for_hard_viewpoint_pairs);
     register_test("matching_pipeline_wide_topk_fallback_requires_low_count_gain",
@@ -976,6 +1132,8 @@ void register_matching_pipeline_tests() {
                   matching_pipeline_projective_before_rotation_uses_unique_topk_pairs);
     register_test("matching_pipeline_projective_rescue_requires_large_safe_gain",
                   matching_pipeline_projective_rescue_requires_large_safe_gain);
+    register_test("matching_pipeline_conservative_topk_fallback_targets_low_count_results",
+                  matching_pipeline_conservative_topk_fallback_targets_low_count_results);
     register_test("matching_pipeline_prefers_mutual_geometry_when_topk_cluster_expands_too_much",
                   matching_pipeline_prefers_mutual_geometry_when_topk_cluster_expands_too_much);
     register_test("matching_pipeline_trims_low_confidence_tail_for_medium_topk_geometry",
@@ -988,6 +1146,8 @@ void register_matching_pipeline_tests() {
                   matching_pipeline_allows_reciprocal_topk_fallback_env);
     register_test("matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint",
                   matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint);
+    register_test("matching_pipeline_rotation_filter_rejects_near_angle_position_outliers",
+                  matching_pipeline_rotation_filter_rejects_near_angle_position_outliers);
     register_test("matching_pipeline_skips_graph_matcher_for_dense_sparse_feature_sets",
                   matching_pipeline_skips_graph_matcher_for_dense_sparse_feature_sets);
     register_test("matching_pipeline_relaxed_graph_candidates_ignore_overconfident_dustbin",

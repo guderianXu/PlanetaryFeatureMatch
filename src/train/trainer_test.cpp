@@ -272,6 +272,7 @@ std::vector<std::size_t> make_training_image_indices_for_test(
 std::vector<std::size_t> make_validation_image_indices_for_test(
     std::size_t total_images,
     const pfm::TrainConfig& config);
+double training_learning_rate_for_step_for_test(const pfm::TrainConfig& config, int64_t step, int64_t total_steps);
 
 }  // namespace pfm::testing
 
@@ -429,6 +430,8 @@ static void trainer_default_config_uses_larger_model_settings() {
     PFM_REQUIRE(config.graph_hidden_dim == 256);
     PFM_REQUIRE(config.graph_attention_layers == 6);
     PFM_REQUIRE_CLOSE(config.learning_rate, 3.0e-4, 1.0e-9);
+    PFM_REQUIRE(config.lr_warmup_steps == 0);
+    PFM_REQUIRE_CLOSE(config.min_learning_rate_ratio, 0.01, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.weight_decay, 5.0e-4, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.gradient_clip_norm, 1.0, 1.0e-12);
     PFM_REQUIRE(config.dataloader_workers == 0);
@@ -439,6 +442,25 @@ static void trainer_default_config_uses_larger_model_settings() {
     PFM_REQUIRE_CLOSE(config.min_keypoint_intensity, 0.08, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.train_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.val_ratio, 0.0, 1.0e-12);
+}
+
+static void trainer_learning_rate_schedule_warms_up_then_decays_to_floor() {
+    pfm::TrainConfig config;
+    config.learning_rate = 1.0e-4;
+    config.lr_warmup_steps = 4;
+    config.min_learning_rate_ratio = 0.1;
+
+    const auto first = pfm::testing::training_learning_rate_for_step_for_test(config, 0, 12);
+    const auto second = pfm::testing::training_learning_rate_for_step_for_test(config, 1, 12);
+    const auto warm = pfm::testing::training_learning_rate_for_step_for_test(config, 3, 12);
+    const auto decay_start = pfm::testing::training_learning_rate_for_step_for_test(config, 4, 12);
+    const auto final = pfm::testing::training_learning_rate_for_step_for_test(config, 11, 12);
+
+    PFM_REQUIRE_CLOSE(first, 2.5e-5, 1.0e-12);
+    PFM_REQUIRE(second > first);
+    PFM_REQUIRE_CLOSE(warm, config.learning_rate, 1.0e-12);
+    PFM_REQUIRE_CLOSE(decay_start, config.learning_rate, 1.0e-12);
+    PFM_REQUIRE_CLOSE(final, 1.0e-5, 1.0e-12);
 }
 
 static void trainer_checkpoint_saves_graph_matcher_architecture_config() {
@@ -624,6 +646,14 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument() {
     auto invalid_learning_rate = config;
     invalid_learning_rate.learning_rate = 0.0;
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_learning_rate));
+
+    auto invalid_warmup = config;
+    invalid_warmup.lr_warmup_steps = -1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_warmup));
+
+    auto invalid_min_lr_ratio = config;
+    invalid_min_lr_ratio.min_learning_rate_ratio = 1.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_min_lr_ratio));
 
     auto invalid_resize = config;
     invalid_resize.resize = -1;
@@ -2876,6 +2906,8 @@ void register_trainer_tests() {
     register_test("trainer_one_epoch_saves_loadable_checkpoint", trainer_one_epoch_saves_loadable_checkpoint);
     register_test("trainer_default_config_uses_larger_model_settings",
                   trainer_default_config_uses_larger_model_settings);
+    register_test("trainer_learning_rate_schedule_warms_up_then_decays_to_floor",
+                  trainer_learning_rate_schedule_warms_up_then_decays_to_floor);
     register_test("trainer_checkpoint_saves_graph_matcher_architecture_config",
                   trainer_checkpoint_saves_graph_matcher_architecture_config);
     register_test("trainer_descriptor_only_finetune_freezes_backbone_but_updates_descriptor_head",

@@ -6,6 +6,10 @@
 
 #include "models/sparse_head.h"
 
+namespace pfm::testing {
+torch::Tensor normalize_sparse_head_channels_for_test(const torch::Tensor& tensor);
+}
+
 namespace {
 
 class LegacySparseHeadImpl : public torch::nn::Module {
@@ -144,6 +148,35 @@ static void sparse_head_descriptors_stay_normalized() {
     auto norms = descriptors.norm(2, 1);
 
     PFM_REQUIRE(torch::isfinite(descriptors).all().item<bool>());
+    PFM_REQUIRE(torch::allclose(norms, torch::ones_like(norms), 1.0e-5, 1.0e-5));
+}
+
+static void sparse_head_descriptors_remain_nonzero_for_large_finite_activations() {
+    pfm::SparseHead head(4, 8);
+    {
+        torch::NoGradGuard no_grad;
+        for (auto& parameter : head->parameters()) {
+            parameter.fill_(0.25F);
+        }
+    }
+    auto feature = torch::ones({1, 4, 8, 8}, torch::kFloat32) * 1.0e6F;
+
+    const auto descriptors = head->forward(feature).descriptors;
+    const auto norms = descriptors.norm(2, 1);
+
+    PFM_REQUIRE(torch::isfinite(descriptors).all().item<bool>());
+    PFM_REQUIRE(descriptors.abs().max().item<float>() > 0.0F);
+    PFM_REQUIRE(torch::allclose(norms, torch::ones_like(norms), 1.0e-4, 1.0e-4));
+}
+
+static void sparse_head_channel_normalization_handles_large_finite_values() {
+    auto tensor = torch::tensor({{{{1.0e30F}}, {{2.0e30F}}, {{-3.0e30F}}}}, torch::kFloat32);
+
+    const auto normalized = pfm::testing::normalize_sparse_head_channels_for_test(tensor);
+    const auto norms = normalized.norm(2, 1);
+
+    PFM_REQUIRE(torch::isfinite(normalized).all().item<bool>());
+    PFM_REQUIRE(normalized.abs().max().item<float>() > 0.0F);
     PFM_REQUIRE(torch::allclose(norms, torch::ones_like(norms), 1.0e-5, 1.0e-5));
 }
 
@@ -425,6 +458,10 @@ void register_sparse_head_tests() {
                   sparse_head_descriptors_use_four_residual_blocks);
     register_test("sparse head uses shared context tower", sparse_head_uses_shared_context_tower);
     register_test("sparse head descriptors stay normalized", sparse_head_descriptors_stay_normalized);
+    register_test("sparse head descriptors remain nonzero for large finite activations",
+                  sparse_head_descriptors_remain_nonzero_for_large_finite_activations);
+    register_test("sparse head channel normalization handles large finite values",
+                  sparse_head_channel_normalization_handles_large_finite_values);
     register_test("sparse head descriptor projection has requested channels",
                   sparse_head_descriptor_projection_has_requested_channels);
     register_test("sparse head descriptors use multiscale projection",

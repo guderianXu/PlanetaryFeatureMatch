@@ -24,12 +24,14 @@ constexpr int64_t ROTATION_CONSISTENCY_MIN_MATCHES = 32;
 constexpr int64_t ROTATION_CONSISTENCY_BINS = 72;
 constexpr double ROTATION_CONSISTENCY_MAX_ANGLE_ERROR = PI / 36.0;
 constexpr double ROTATION_CONSISTENCY_MAX_RADIUS_ERROR = 2.0;
+constexpr double ROTATION_CONSISTENCY_MAX_POSITION_ERROR = 0.5;
 constexpr int64_t GRAPH_GREEDY_MAX_MATCHES = 256;
 constexpr int64_t GRAPH_MATCHER_MAX_SPARSE_KEYPOINTS = 1024;
 constexpr int64_t GEOMETRIC_CONSISTENCY_MIN_MATCHES = 8;
 constexpr int64_t GEOMETRIC_CONSISTENCY_MIN_INLIERS = 4;
 constexpr double GEOMETRIC_CONSISTENCY_RANSAC_THRESHOLD = 0.75;
 constexpr int64_t GEOMETRIC_CONSISTENCY_MAX_OUTPUT_MATCHES = 512;
+constexpr double GEOMETRIC_SPREAD_QUALITY_WEIGHT = 40.0;
 constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_MIN_MATCHES = 32;
 constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_LOW_COUNT_MIN_MATCHES = 8;
 constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_LOW_COUNT_MIN_KEEP = 4;
@@ -37,7 +39,12 @@ constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_PROJECTIVE_MIN_GAIN = 2;
 constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_HIGH_COUNT_FLOOR = 150;
 constexpr double GEOMETRIC_RESIDUAL_CLEANUP_THRESHOLD = 0.5;
 constexpr double GEOMETRIC_RESIDUAL_CLEANUP_LOW_COUNT_THRESHOLD = 0.5;
-constexpr int64_t DESCRIPTOR_TOPK_CANDIDATES_PER_SOURCE = 16;
+constexpr int64_t DESCRIPTOR_TOPK_CANDIDATES_PER_SOURCE = 4;
+constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE = 2;
+constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES = 64;
+constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_MATCHES = 8;
+constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_RATIO_NUMERATOR = 1;
+constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_RATIO_DENOMINATOR = 2;
 constexpr int64_t DESCRIPTOR_WIDE_TOPK_CANDIDATES_PER_SOURCE = 24;
 constexpr int64_t DESCRIPTOR_WIDE_TOPK_FALLBACK_MAX_BASE_MATCHES = 6;
 constexpr int64_t DESCRIPTOR_WIDE_TOPK_FALLBACK_MIN_GAIN = 2;
@@ -115,6 +122,13 @@ bool shouldPreferMutualDescriptorGeometry(int64_t mutual_matches, int64_t topk_m
                mutual_matches * DESCRIPTOR_TOPK_GEOMETRY_MAX_SAFE_GAIN_NUMERATOR;
 }
 
+bool shouldUseConservativeTopKFallback(int64_t base_matches, int64_t conservative_matches) {
+    return base_matches <= DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES &&
+           conservative_matches >= DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_MATCHES &&
+           conservative_matches * DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_RATIO_DENOMINATOR >=
+               base_matches * DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MIN_RATIO_NUMERATOR;
+}
+
 double geometricSpreadQualityWeight() {
     const char* value = std::getenv("PFM_GEOMETRIC_SPREAD_QUALITY_WEIGHT");
     if (value == nullptr) {
@@ -122,7 +136,7 @@ double geometricSpreadQualityWeight() {
     }
     try {
         const auto parsed = std::stod(value);
-        if (std::isfinite(parsed) && parsed > 0.0) {
+        if (std::isfinite(parsed) && parsed >= 0.0) {
             return parsed;
         }
     } catch (const std::exception&) {
@@ -159,6 +173,21 @@ bool descriptorReciprocalTopKFallback() {
         return DESCRIPTOR_RECIPROCAL_TOPK_FALLBACK;
     }
     return std::string(value) != "0";
+}
+
+double rotationConsistencyMaxPositionError() {
+    const char* value = std::getenv("PFM_ROTATION_CONSISTENCY_MAX_POSITION_ERROR");
+    if (value == nullptr) {
+        return ROTATION_CONSISTENCY_MAX_POSITION_ERROR;
+    }
+    try {
+        const auto parsed = std::stod(value);
+        if (std::isfinite(parsed) && parsed > 0.0) {
+            return parsed;
+        }
+    } catch (const std::exception&) {
+    }
+    return ROTATION_CONSISTENCY_MAX_POSITION_ERROR;
 }
 
 SparseGeometryFilter sparseGeometryFilter() {
@@ -253,13 +282,39 @@ std::pair<torch::Tensor, torch::Tensor> filterRotationConsistentMatches(
     }
     const int64_t best_bin = static_cast<int64_t>(std::distance(bins.begin(), best_it));
     const double bin_center = (static_cast<double>(best_bin) + 0.5) / ROTATION_CONSISTENCY_BINS * 2.0 * PI - PI;
-    const double dominant_angle = bin_center;
+    double sin_sum = 0.0;
+    double cos_sum = 0.0;
+    for (const auto delta : deltas) {
+        if (angleBin(delta) == best_bin) {
+            sin_sum += std::sin(delta);
+            cos_sum += std::cos(delta);
+        }
+    }
+    const double dominant_angle = std::hypot(sin_sum, cos_sum) > 1.0e-9
+        ? std::atan2(sin_sum, cos_sum)
+        : bin_center;
+    const double dominant_cos = std::cos(dominant_angle);
+    const double dominant_sin = std::sin(dominant_angle);
+    const double max_position_error = rotationConsistencyMaxPositionError();
+    const bool can_check_position = features_a.feature_map_width > 0 && features_a.feature_map_height > 0 &&
+                                    features_b.feature_map_width > 0 && features_b.feature_map_height > 0;
 
     std::vector<int64_t> keep_indices;
     keep_indices.reserve(static_cast<size_t>(*best_it));
     for (int64_t index = 0; index < cpu_matches.size(0); ++index) {
+        const auto ia = match_data[index * 2];
+        const auto ib = match_data[index * 2 + 1];
+        const double ax = static_cast<double>(points_a_data[ia * 2]) - center_ax;
+        const double ay = static_cast<double>(points_a_data[ia * 2 + 1]) - center_ay;
+        const double bx = static_cast<double>(points_b_data[ib * 2]) - center_bx;
+        const double by = static_cast<double>(points_b_data[ib * 2 + 1]) - center_by;
+        const double predicted_bx = dominant_cos * ax - dominant_sin * ay;
+        const double predicted_by = dominant_sin * ax + dominant_cos * ay;
+        const double position_error = std::hypot(predicted_bx - bx, predicted_by - by);
+        const bool position_ok = !can_check_position || position_error <= max_position_error;
         if (angleDistance(deltas[static_cast<size_t>(index)], dominant_angle) <= ROTATION_CONSISTENCY_MAX_ANGLE_ERROR &&
-            radius_errors[static_cast<size_t>(index)] <= ROTATION_CONSISTENCY_MAX_RADIUS_ERROR) {
+            radius_errors[static_cast<size_t>(index)] <= ROTATION_CONSISTENCY_MAX_RADIUS_ERROR &&
+            position_ok) {
             keep_indices.push_back(index);
         }
     }
@@ -716,7 +771,7 @@ struct GeometricCandidate {
 double geometricCandidateQuality(double score_mean, int64_t inlier_count, double source_spread, double target_spread) {
     const auto capped_inliers = std::min<int64_t>(inlier_count, GEOMETRIC_CONSISTENCY_MAX_OUTPUT_MATCHES);
     const auto spread = std::clamp(std::min(source_spread, target_spread), 0.0, 1.0);
-    return static_cast<double>(capped_inliers) + score_mean * 0.25 + spread * 40.0;
+    return static_cast<double>(capped_inliers) + score_mean * 0.25 + spread * GEOMETRIC_SPREAD_QUALITY_WEIGHT;
 }
 
 double geometricCandidateQuality(double score_mean, int64_t inlier_count) {
@@ -796,13 +851,13 @@ GeometricCandidate estimateBestGeometricCandidate(
         const auto score_mean = meanScoreForIndices(scores, indices);
         const auto source_spread = pointSpreadRatio(source_points, indices, source_reference_area);
         const auto target_spread = pointSpreadRatio(target_points, indices, target_reference_area);
-        const auto spread_weight = geometricSpreadQualityWeight();
-        const auto quality = spread_weight > 0.0
-            ? static_cast<double>(std::min<int64_t>(
-                  static_cast<int64_t>(indices.size()), GEOMETRIC_CONSISTENCY_MAX_OUTPUT_MATCHES)) +
-                  score_mean * 0.25 +
-                  std::clamp(std::min(source_spread, target_spread), 0.0, 1.0) * spread_weight
-            : geometricCandidateQuality(score_mean, static_cast<int64_t>(indices.size()));
+        const auto capped_inliers = std::min<int64_t>(
+            static_cast<int64_t>(indices.size()),
+            GEOMETRIC_CONSISTENCY_MAX_OUTPUT_MATCHES);
+        const auto spread = std::clamp(std::min(source_spread, target_spread), 0.0, 1.0);
+        const auto quality = static_cast<double>(capped_inliers) +
+                             score_mean * 0.25 +
+                             spread * geometricSpreadQualityWeight();
         if (quality > best.quality) {
             best.indices = std::move(indices);
             best.quality = quality;
@@ -1189,6 +1244,28 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                       << " descriptor_topk_rotation_matches="
                       << unique_rotation.first.size(0) << '\n';
         }
+        if (sparseGeometryFilter() == SparseGeometryFilter::RotationOnly &&
+            unique_rotation.first.size(0) < DESCRIPTOR_PROJECTIVE_RESCUE_MAX_BASE_MATCHES) {
+            auto unique_projective_topk = mergeSparseMatchCandidates(
+                descriptor_topk.first,
+                descriptor_topk.second,
+                torch::empty({0, 2}, long_options),
+                torch::empty({0}, float_options));
+            auto projective_rescue = filterProjectiveConsistentMatches(
+                features_a,
+                features_b,
+                unique_projective_topk.first,
+                unique_projective_topk.second);
+            if (debug) {
+                std::cerr << "match debug: rotation_only_projective_rescue_matches="
+                          << projective_rescue.first.size(0) << '\n';
+            }
+            if (shouldUseProjectiveTopKRescue(
+                    unique_rotation.first.size(0),
+                    projective_rescue.first.size(0))) {
+                return projective_rescue;
+            }
+        }
         if (shouldReturnRotationOnlyMatches(unique_rotation.first.size(0))) {
             if (debug) {
                 std::cerr << "match debug: returning rotation-only descriptor matches before projective filter\n";
@@ -1247,6 +1324,42 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                             topk_consistent.first.size(0),
                             projective_rescue.first.size(0))) {
                         return projective_rescue;
+                    }
+                }
+                if (descriptorTopKCandidatesPerSource() > DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE &&
+                    topk_consistent.first.size(0) <= DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES) {
+                    auto conservative_topk = matchDescriptorTopKFeatures(
+                        features_a,
+                        features_b,
+                        DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE,
+                        matcher_device);
+                    auto conservative_rotation = filterRotationConsistentMatches(
+                        features_a,
+                        features_b,
+                        conservative_topk.first,
+                        conservative_topk.second);
+                    auto unique_conservative_rotation = mergeSparseMatchCandidates(
+                        conservative_rotation.first,
+                        conservative_rotation.second,
+                        torch::empty({0, 2}, long_options),
+                        torch::empty({0}, float_options));
+                    if (unique_conservative_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
+                        auto conservative_consistent = filterProjectiveConsistentMatches(
+                            features_a,
+                            features_b,
+                            unique_conservative_rotation.first,
+                            unique_conservative_rotation.second);
+                        if (debug) {
+                            std::cerr << "match debug: descriptor_conservative_topk_geometric_matches="
+                                      << conservative_consistent.first.size(0) << '\n';
+                        }
+                        if (shouldUseConservativeTopKFallback(
+                                topk_consistent.first.size(0),
+                                conservative_consistent.first.size(0))) {
+                            return trimLowConfidenceTopKTail(
+                                conservative_consistent.first,
+                                conservative_consistent.second);
+                        }
                     }
                 }
                 if (topk_consistent.first.size(0) <= DESCRIPTOR_WIDE_TOPK_FALLBACK_MAX_BASE_MATCHES) {
@@ -1492,6 +1605,10 @@ bool should_prefer_mutual_descriptor_geometry_for_test(int64_t mutual_matches, i
     return shouldPreferMutualDescriptorGeometry(mutual_matches, topk_matches);
 }
 
+bool should_use_conservative_topk_fallback_for_test(int64_t base_matches, int64_t conservative_matches) {
+    return shouldUseConservativeTopKFallback(base_matches, conservative_matches);
+}
+
 std::pair<torch::Tensor, torch::Tensor> trim_low_confidence_topk_tail_for_test(
     const torch::Tensor& matches,
     const torch::Tensor& scores
@@ -1526,6 +1643,24 @@ std::pair<torch::Tensor, torch::Tensor> affine_residual_cleanup_matches_for_test
     const torch::Tensor& scores
 ) {
     return cleanupAffineResidualMatches(features_a, features_b, matches, scores);
+}
+
+std::pair<torch::Tensor, torch::Tensor> projective_consistent_matches_for_test(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores
+) {
+    return filterProjectiveConsistentMatches(features_a, features_b, matches, scores);
+}
+
+std::pair<torch::Tensor, torch::Tensor> rotation_consistent_matches_for_test(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores
+) {
+    return filterRotationConsistentMatches(features_a, features_b, matches, scores);
 }
 
 std::pair<torch::Tensor, torch::Tensor> relaxed_graph_logit_matches_for_test(

@@ -29,6 +29,7 @@ bool should_use_descriptor_grid_fallback_for_test(int64_t base_sparse_matches, i
 bool should_use_high_density_sparse_matches_for_test(int64_t base_sparse_matches, int64_t high_density_sparse_matches);
 bool should_use_alternate_texture_blend_matches_for_test(int64_t base_sparse_matches, int64_t alternate_sparse_matches);
 bool should_use_balanced_texture_blend_matches_for_test(int64_t base_sparse_matches, int64_t alternate_sparse_matches);
+double rotation_invariant_texture_blend_weight_for_test();
 bool sparse_geometry_filter_rotation_only_requested_for_test();
 bool should_skip_expensive_sparse_alternates_for_test(int64_t sparse_matches);
 FeatureSet make_descriptor_grid_feature_set_for_test(
@@ -731,6 +732,18 @@ static void pipeline_balanced_texture_blend_requires_stable_base_and_small_gain(
     PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(40, 36));
 }
 
+static void pipeline_default_texture_blend_uses_empirical_rotation_setting() {
+    unsetenv("PFM_TEXTURE_BLEND_WEIGHT");
+    PFM_REQUIRE(pfm::testing::rotation_invariant_texture_blend_weight_for_test() == 1.0);
+
+    setenv("PFM_TEXTURE_BLEND_WEIGHT", "0.25", 1);
+    PFM_REQUIRE(pfm::testing::rotation_invariant_texture_blend_weight_for_test() == 0.25);
+
+    setenv("PFM_TEXTURE_BLEND_WEIGHT", "invalid", 1);
+    PFM_REQUIRE(pfm::testing::rotation_invariant_texture_blend_weight_for_test() == 1.0);
+    unsetenv("PFM_TEXTURE_BLEND_WEIGHT");
+}
+
 static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base() {
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_requested_for_test());
@@ -983,6 +996,8 @@ void register_pipeline_tests() {
                   pipeline_alternate_texture_blend_requires_decisive_match_gain);
     register_test("pipeline_balanced_texture_blend_requires_stable_base_and_small_gain",
                   pipeline_balanced_texture_blend_requires_stable_base_and_small_gain);
+    register_test("pipeline_default_texture_blend_uses_empirical_rotation_setting",
+                  pipeline_default_texture_blend_uses_empirical_rotation_setting);
     register_test("pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base",
                   pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);

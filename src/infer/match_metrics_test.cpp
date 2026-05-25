@@ -147,6 +147,9 @@ static void match_metrics_reports_keypoint_coverage_and_descriptor_rank() {
     PFM_REQUIRE(metrics.valid_warp_total == 2);
     PFM_REQUIRE(metrics.covered_by_target_keypoint == 2);
     PFM_REQUIRE_CLOSE(metrics.coverage_fraction, 1.0, 1.0e-6);
+    PFM_REQUIRE(metrics.descriptor_rank_observed == 2);
+    PFM_REQUIRE(metrics.descriptor_top1_count == 2);
+    PFM_REQUIRE(metrics.descriptor_rank_sum == 2);
     PFM_REQUIRE_CLOSE(metrics.mean_descriptor_positive_rank, 1.0, 1.0e-6);
     PFM_REQUIRE_CLOSE(metrics.descriptor_top1_accuracy, 1.0, 1.0e-6);
 }

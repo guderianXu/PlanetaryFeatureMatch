@@ -24,6 +24,9 @@ struct WarpFeatureCoverageMetrics {
     int64_t source_total = 0;
     int64_t valid_warp_total = 0;
     int64_t covered_by_target_keypoint = 0;
+    int64_t descriptor_rank_observed = 0;
+    int64_t descriptor_top1_count = 0;
+    int64_t descriptor_rank_sum = 0;
     double coverage_fraction = 0.0;
     double mean_nearest_target_distance_pixels = 0.0;
     double mean_descriptor_positive_rank = 0.0;

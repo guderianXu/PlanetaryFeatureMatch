@@ -259,6 +259,14 @@ void validate_config(const TrainConfig& config) {
     if (!std::isfinite(config.learning_rate) || config.learning_rate <= 0.0) {
         throw std::invalid_argument("learning_rate must be positive and finite");
     }
+    if (config.lr_warmup_steps < 0) {
+        throw std::invalid_argument("lr_warmup_steps must be non-negative");
+    }
+    if (!std::isfinite(config.min_learning_rate_ratio) ||
+        config.min_learning_rate_ratio < 0.0 ||
+        config.min_learning_rate_ratio > 1.0) {
+        throw std::invalid_argument("min_learning_rate_ratio must be finite and between 0 and 1");
+    }
     if (!std::isfinite(config.weight_decay) || config.weight_decay < 0.0) {
         throw std::invalid_argument("weight_decay must be non-negative and finite");
     }
@@ -319,6 +327,37 @@ void validate_config(const TrainConfig& config) {
     validate_min_keypoint_intensity(config.min_keypoint_intensity);
 }
 
+double training_learning_rate_for_step(const TrainConfig& config, int64_t step, int64_t total_steps) {
+    if (total_steps <= 0) {
+        return config.learning_rate;
+    }
+    step = std::max<int64_t>(0, std::min<int64_t>(step, total_steps - 1));
+    if (config.lr_warmup_steps > 0 && step < config.lr_warmup_steps) {
+        const double warmup_progress = static_cast<double>(step + 1) /
+                                       static_cast<double>(config.lr_warmup_steps);
+        return config.learning_rate * std::min(1.0, warmup_progress);
+    }
+
+    const auto warmup_steps = std::min<int64_t>(
+        static_cast<int64_t>(config.lr_warmup_steps),
+        total_steps);
+    const auto decay_steps = std::max<int64_t>(1, total_steps - warmup_steps);
+    const auto decay_step = std::max<int64_t>(0, step - warmup_steps);
+    const double progress = decay_steps <= 1
+        ? 0.0
+        : static_cast<double>(std::min<int64_t>(decay_step, decay_steps - 1)) /
+              static_cast<double>(decay_steps - 1);
+    const double lr_max = config.learning_rate;
+    const double lr_min = lr_max * config.min_learning_rate_ratio;
+    return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + std::cos(PI * progress));
+}
+
+void set_optimizer_learning_rate(torch::optim::Optimizer& optimizer, double learning_rate) {
+    for (auto& group : optimizer.param_groups()) {
+        group.options().set_lr(learning_rate);
+    }
+}
+
 TrainingMetric make_iteration_metric(
     const TrainConfig& config,
     int epoch,
@@ -326,6 +365,7 @@ TrainingMetric make_iteration_metric(
     int total_iterations,
     int images_seen,
     int total_images,
+    double learning_rate,
     double elapsed_seconds,
     const GpuMetrics& gpu_metrics,
     const std::unordered_map<std::string, double>& values
@@ -337,7 +377,7 @@ TrainingMetric make_iteration_metric(
     metric.total_iterations = total_iterations;
     metric.images_seen = images_seen;
     metric.total_images = total_images;
-    metric.learning_rate = config.learning_rate;
+    metric.learning_rate = learning_rate;
     metric.elapsed_seconds = elapsed_seconds;
     metric.values = values;
     if (gpu_metrics.utilization_percent.has_value()) {
@@ -5452,6 +5492,10 @@ std::vector<std::size_t> make_validation_image_indices_for_test(
     return make_training_dataset_split(total_images, config).validation;
 }
 
+double training_learning_rate_for_step_for_test(const TrainConfig& config, int64_t step, int64_t total_steps) {
+    return training_learning_rate_for_step(config, step, total_steps);
+}
+
 }  // namespace testing
 
 TrainResult train_model(const TrainConfig& config) {
@@ -5512,8 +5556,6 @@ TrainResult train_model(const TrainConfig& config) {
     const auto val_images = validation_indices.size();
     const auto train_epoch_size = train_images * static_cast<std::size_t>(config.pairs_per_image);
     std::size_t epoch_size = train_epoch_size;
-    const auto lr_max = config.learning_rate;
-    const auto lr_min = lr_max * 0.01;
     int64_t global_step = 0;
     std::unique_ptr<AsyncVisualizationWriter> visualization_writer;
     auto pair_config = make_default_pair_config();
@@ -5586,8 +5628,11 @@ TrainResult train_model(const TrainConfig& config) {
             make_synthetic_pair_collator(),
             make_dataloader_options(config));
     }
-    const auto total_iterations = static_cast<double>(config.epochs) *
-        static_cast<double>(epoch_size) / static_cast<double>(config.batch_size);
+    const auto epoch_iterations = static_cast<int64_t>(
+        (epoch_size + static_cast<std::size_t>(config.batch_size) - 1) /
+        static_cast<std::size_t>(config.batch_size));
+    const auto total_steps = static_cast<int64_t>(config.epochs) * epoch_iterations;
+    const auto total_iterations = static_cast<double>(std::max<int64_t>(1, total_steps));
     const std::size_t visualization_limit = config.visualization_samples_all
         ? epoch_size
         : std::min<std::size_t>(static_cast<std::size_t>(config.visualization_samples), epoch_size);
@@ -5661,6 +5706,9 @@ TrainResult train_model(const TrainConfig& config) {
                 : 1.0;
             const auto descriptor_broad_far_negative_count =
                 descriptor_broad_far_negative_count_for_progress(curriculum_progress);
+            const auto current_learning_rate =
+                training_learning_rate_for_step(config, global_step, total_steps);
+            set_optimizer_learning_rate(optimizer, current_learning_rate);
             auto loss = training_loss_from_pairs(
                 modules,
                 pairs,
@@ -5690,22 +5738,14 @@ TrainResult train_model(const TrainConfig& config) {
             optimizer.step();
 
             ++global_step;
-            const auto progress = static_cast<double>(global_step) / total_iterations;
-            const auto cos_lr = lr_min + 0.5 * (lr_max - lr_min) * (1.0 + std::cos(3.14159265358979323846 * progress));
-            for (auto& group : optimizer.param_groups()) {
-                group.options().set_lr(cos_lr);
-            }
 
             const double batch_seconds = batch_timer.elapsedSeconds();
             accumulated_batch_seconds += batch_seconds;
             ++completed_batches;
             const auto iteration = static_cast<int>((offset / static_cast<std::size_t>(config.batch_size)) + 1);
-            const auto epoch_iterations = static_cast<int>(
-                (epoch_size + static_cast<std::size_t>(config.batch_size) - 1) /
-                static_cast<std::size_t>(config.batch_size));
             const auto should_report =
                 iteration == 1 ||
-                iteration == epoch_iterations ||
+                iteration == static_cast<int>(epoch_iterations) ||
                 iteration % TRAINING_METRIC_LOG_INTERVAL == 0;
             if (should_report) {
                 last_loss = loss.total.detach().item<double>();
@@ -5784,9 +5824,10 @@ TrainResult train_model(const TrainConfig& config) {
                         config,
                         epoch + 1,
                         iteration,
-                        epoch_iterations,
+                        static_cast<int>(epoch_iterations),
                         static_cast<int>(end),
                         static_cast<int>(epoch_size),
+                        current_learning_rate,
                         total_timer.elapsedSeconds(),
                         gpu_metrics,
                         metric_values));
@@ -5795,10 +5836,10 @@ TrainResult train_model(const TrainConfig& config) {
                 iter_metric.epoch = static_cast<int>(epoch + 1);
                 iter_metric.total_epochs = static_cast<int>(config.epochs);
                 iter_metric.iteration = iteration;
-                iter_metric.total_iterations = epoch_iterations;
+                iter_metric.total_iterations = static_cast<int>(epoch_iterations);
                 iter_metric.images_seen = static_cast<int>(end);
                 iter_metric.total_images = static_cast<int>(epoch_size);
-                iter_metric.learning_rate = cos_lr;
+                iter_metric.learning_rate = current_learning_rate;
                 iter_metric.elapsed_seconds = total_timer.elapsedSeconds();
                 iter_metric.values["loss_total"] = last_loss;
                 iter_metric.values["matcher_loss"] = graph_matching_loss_value;

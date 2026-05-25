@@ -35,7 +35,7 @@ namespace pfm {
 namespace {
 
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
-constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 0.5;
+constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 1.0;
 constexpr int64_t DESCRIPTOR_GRID_FALLBACK_MIN_SPARSE_MATCHES = 16;
 constexpr int64_t DESCRIPTOR_GRID_FALLBACK_MAX_BASE_MATCHES = 7;
 constexpr int64_t ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS = 1500;
@@ -771,6 +771,8 @@ int run_train_command(const CliOptions& options) {
         config.pairs_per_image = options.pairs_per_image;
         config.max_train_batches = options.max_train_batches;
         config.learning_rate = options.learning_rate;
+        config.lr_warmup_steps = options.lr_warmup_steps;
+        config.min_learning_rate_ratio = options.min_learning_rate_ratio;
         config.weight_decay = options.weight_decay;
         config.augmentation_profile = options.augmentation_profile;
         config.augmentation_curriculum = options.augmentation_curriculum;
@@ -1279,6 +1281,10 @@ bool should_use_balanced_texture_blend_matches_for_test(
     int64_t alternate_sparse_matches
 ) {
     return shouldUseBalancedTextureBlendMatches(base_sparse_matches, alternate_sparse_matches);
+}
+
+double rotation_invariant_texture_blend_weight_for_test() {
+    return rotationInvariantTextureBlendWeight();
 }
 
 bool sparse_geometry_filter_rotation_only_requested_for_test() {
