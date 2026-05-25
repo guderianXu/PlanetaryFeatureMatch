@@ -39,6 +39,9 @@ constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_PROJECTIVE_MIN_GAIN = 2;
 constexpr int64_t GEOMETRIC_RESIDUAL_CLEANUP_HIGH_COUNT_FLOOR = 150;
 constexpr double GEOMETRIC_RESIDUAL_CLEANUP_THRESHOLD = 0.5;
 constexpr double GEOMETRIC_RESIDUAL_CLEANUP_LOW_COUNT_THRESHOLD = 0.5;
+constexpr double LOCAL_DISPLACEMENT_CONSISTENCY_THRESHOLD = 3.0;
+constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_NEIGHBORS = 12;
+constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_MIN_INLIERS = 4;
 constexpr int64_t DESCRIPTOR_TOPK_CANDIDATES_PER_SOURCE = 4;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE = 2;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES = 64;
@@ -72,6 +75,7 @@ constexpr bool DESCRIPTOR_TOPK_PROJECTIVE_BEFORE_ROTATION = false;
 enum class SparseGeometryFilter {
     Projective,
     RotationOnly,
+    Local,
 };
 
 bool matchDebugEnabled() {
@@ -198,6 +202,9 @@ SparseGeometryFilter sparseGeometryFilter() {
     const std::string mode(value);
     if (mode == "rotation" || mode == "rotation-only") {
         return SparseGeometryFilter::RotationOnly;
+    }
+    if (mode == "local" || mode == "local-displacement") {
+        return SparseGeometryFilter::Local;
     }
     return SparseGeometryFilter::Projective;
 }
@@ -684,6 +691,105 @@ std::pair<torch::Tensor, torch::Tensor> cleanupAffineResidualMatches(
     return selectMatches(cpu_matches, scores, keep_indices);
 }
 
+double lowerMedian(std::vector<double> values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    const auto median_index = (values.size() - 1) / 2;
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(median_index), values.end());
+    return values[median_index];
+}
+
+std::pair<torch::Tensor, torch::Tensor> filterLocalDisplacementConsistentMatches(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores,
+    double threshold_px = LOCAL_DISPLACEMENT_CONSISTENCY_THRESHOLD,
+    int64_t neighbors = LOCAL_DISPLACEMENT_CONSISTENCY_NEIGHBORS,
+    int64_t min_inliers = LOCAL_DISPLACEMENT_CONSISTENCY_MIN_INLIERS
+) {
+    if (!matches.defined() || matches.size(0) < min_inliers) {
+        return {matches, scores};
+    }
+
+    const auto cpu_matches = matches.to(torch::kCPU, torch::kInt64).contiguous();
+    const auto cpu_scores = scores.to(torch::kCPU, torch::kFloat32).contiguous();
+    const auto points_a = features_a.keypoints.to(torch::kCPU, torch::kFloat32).contiguous();
+    const auto points_b = features_b.keypoints.to(torch::kCPU, torch::kFloat32).contiguous();
+    const auto count = cpu_matches.size(0);
+    const auto neighbor_count = std::min<int64_t>(std::max<int64_t>(2, neighbors), count);
+    const auto* match_data = cpu_matches.data_ptr<int64_t>();
+    const auto* score_data = cpu_scores.data_ptr<float>();
+    const auto* points_a_data = points_a.data_ptr<float>();
+    const auto* points_b_data = points_b.data_ptr<float>();
+
+    std::vector<cv::Point2d> source_points;
+    std::vector<cv::Point2d> displacements;
+    source_points.reserve(static_cast<std::size_t>(count));
+    displacements.reserve(static_cast<std::size_t>(count));
+    for (int64_t row = 0; row < count; ++row) {
+        const auto source = match_data[row * 2];
+        const auto target = match_data[row * 2 + 1];
+        const double ax = static_cast<double>(points_a_data[source * 2]);
+        const double ay = static_cast<double>(points_a_data[source * 2 + 1]);
+        const double bx = static_cast<double>(points_b_data[target * 2]);
+        const double by = static_cast<double>(points_b_data[target * 2 + 1]);
+        source_points.emplace_back(ax, ay);
+        displacements.emplace_back(bx - ax, by - ay);
+    }
+
+    std::vector<int64_t> keep_indices;
+    keep_indices.reserve(static_cast<std::size_t>(count));
+    for (int64_t row = 0; row < count; ++row) {
+        std::vector<std::pair<double, int64_t>> distances;
+        distances.reserve(static_cast<std::size_t>(count));
+        for (int64_t candidate = 0; candidate < count; ++candidate) {
+            const double dx = source_points[static_cast<std::size_t>(row)].x -
+                              source_points[static_cast<std::size_t>(candidate)].x;
+            const double dy = source_points[static_cast<std::size_t>(row)].y -
+                              source_points[static_cast<std::size_t>(candidate)].y;
+            distances.emplace_back(dx * dx + dy * dy, candidate);
+        }
+        std::partial_sort(
+            distances.begin(),
+            distances.begin() + static_cast<std::ptrdiff_t>(neighbor_count),
+            distances.end(),
+            [](const auto& lhs, const auto& rhs) {
+                if (lhs.first == rhs.first) {
+                    return lhs.second < rhs.second;
+                }
+                return lhs.first < rhs.first;
+            });
+        std::vector<double> local_dx;
+        std::vector<double> local_dy;
+        local_dx.reserve(static_cast<std::size_t>(neighbor_count));
+        local_dy.reserve(static_cast<std::size_t>(neighbor_count));
+        for (int64_t index = 0; index < neighbor_count; ++index) {
+            const auto neighbor = distances[static_cast<std::size_t>(index)].second;
+            local_dx.push_back(displacements[static_cast<std::size_t>(neighbor)].x);
+            local_dy.push_back(displacements[static_cast<std::size_t>(neighbor)].y);
+        }
+        const double median_dx = lowerMedian(std::move(local_dx));
+        const double median_dy = lowerMedian(std::move(local_dy));
+        const double residual = std::hypot(
+            displacements[static_cast<std::size_t>(row)].x - median_dx,
+            displacements[static_cast<std::size_t>(row)].y - median_dy);
+        if (residual <= threshold_px) {
+            keep_indices.push_back(row);
+        }
+    }
+    if (static_cast<int64_t>(keep_indices.size()) < min_inliers) {
+        const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+        const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+        return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
+    }
+    std::sort(keep_indices.begin(), keep_indices.end(), [&](int64_t lhs, int64_t rhs) {
+        return score_data[lhs] > score_data[rhs];
+    });
+    return selectMatches(cpu_matches, cpu_scores, keep_indices);
+}
+
 std::vector<int64_t> maskToIndices(const cv::Mat& mask) {
     std::vector<int64_t> indices;
     if (mask.empty()) {
@@ -939,6 +1045,18 @@ std::pair<torch::Tensor, torch::Tensor> filterProjectiveConsistentMatches(
     }
     auto selected = selectMatches(cpu_matches, scores, best.indices);
     return cleanupAffineResidualMatches(features_a, features_b, selected.first, selected.second);
+}
+
+std::pair<torch::Tensor, torch::Tensor> filterSparseGeometryConsistentMatches(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores
+) {
+    if (sparseGeometryFilter() == SparseGeometryFilter::Local) {
+        return filterLocalDisplacementConsistentMatches(features_a, features_b, matches, scores);
+    }
+    return filterProjectiveConsistentMatches(features_a, features_b, matches, scores);
 }
 
 std::pair<torch::Tensor, torch::Tensor> mutualGraphLogitMatches(
@@ -1208,7 +1326,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                 descriptor_topk.second,
                 torch::empty({0, 2}, long_options),
                 torch::empty({0}, float_options));
-            auto topk_projective = filterProjectiveConsistentMatches(
+            auto topk_projective = filterSparseGeometryConsistentMatches(
                 features_a,
                 features_b,
                 unique_projective_topk.first,
@@ -1251,7 +1369,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                 descriptor_topk.second,
                 torch::empty({0, 2}, long_options),
                 torch::empty({0}, float_options));
-            auto projective_rescue = filterProjectiveConsistentMatches(
+            auto projective_rescue = filterSparseGeometryConsistentMatches(
                 features_a,
                 features_b,
                 unique_projective_topk.first,
@@ -1273,7 +1391,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
             return unique_rotation;
         }
         if (unique_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-            auto topk_consistent = filterProjectiveConsistentMatches(
+            auto topk_consistent = filterSparseGeometryConsistentMatches(
                 features_a,
                 features_b,
                 unique_rotation.first,
@@ -1289,7 +1407,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
             }
             if (topk_consistent.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_INLIERS) {
                 if (descriptor_matches.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-                    auto descriptor_consistent = filterProjectiveConsistentMatches(
+                    auto descriptor_consistent = filterSparseGeometryConsistentMatches(
                         features_a,
                         features_b,
                         descriptor_matches.first,
@@ -1311,7 +1429,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                         descriptor_topk.second,
                         torch::empty({0, 2}, long_options),
                         torch::empty({0}, float_options));
-                    auto projective_rescue = filterProjectiveConsistentMatches(
+                    auto projective_rescue = filterSparseGeometryConsistentMatches(
                         features_a,
                         features_b,
                         unique_projective_topk.first,
@@ -1344,7 +1462,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                         torch::empty({0, 2}, long_options),
                         torch::empty({0}, float_options));
                     if (unique_conservative_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-                        auto conservative_consistent = filterProjectiveConsistentMatches(
+                        auto conservative_consistent = filterSparseGeometryConsistentMatches(
                             features_a,
                             features_b,
                             unique_conservative_rotation.first,
@@ -1379,7 +1497,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                         torch::empty({0, 2}, long_options),
                         torch::empty({0}, float_options));
                     if (unique_wide_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-                        auto wide_consistent = filterProjectiveConsistentMatches(
+                        auto wide_consistent = filterSparseGeometryConsistentMatches(
                             features_a,
                             features_b,
                             unique_wide_rotation.first,
@@ -1422,7 +1540,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
                 torch::empty({0, 2}, long_options),
                 torch::empty({0}, float_options));
             if (unique_reciprocal_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-                auto reciprocal_consistent = filterProjectiveConsistentMatches(
+                auto reciprocal_consistent = filterSparseGeometryConsistentMatches(
                     features_a,
                     features_b,
                     unique_reciprocal_rotation.first,
@@ -1438,7 +1556,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
         }
     }
     if (descriptor_matches.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES) {
-        auto descriptor_consistent = filterProjectiveConsistentMatches(
+        auto descriptor_consistent = filterSparseGeometryConsistentMatches(
             features_a,
             features_b,
             descriptor_matches.first,
@@ -1455,7 +1573,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(
         return descriptor_matches;
     }
     auto merged = mergeSparseMatchCandidates(matches, scores, descriptor_matches.first, descriptor_matches.second);
-    auto geometric = filterProjectiveConsistentMatches(features_a, features_b, merged.first, merged.second);
+    auto geometric = filterSparseGeometryConsistentMatches(features_a, features_b, merged.first, merged.second);
     if (debug) {
         std::cerr << "match debug: merged_matches=" << merged.first.size(0)
                   << " geometric_matches=" << geometric.first.size(0) << '\n';
@@ -1563,6 +1681,10 @@ bool sparse_geometry_filter_rotation_only_for_test() {
     return sparseGeometryFilter() == SparseGeometryFilter::RotationOnly;
 }
 
+bool sparse_geometry_filter_local_for_test() {
+    return sparseGeometryFilter() == SparseGeometryFilter::Local;
+}
+
 bool should_return_rotation_only_matches_for_test(int64_t rotation_matches) {
     return shouldReturnRotationOnlyMatches(rotation_matches);
 }
@@ -1643,6 +1765,25 @@ std::pair<torch::Tensor, torch::Tensor> affine_residual_cleanup_matches_for_test
     const torch::Tensor& scores
 ) {
     return cleanupAffineResidualMatches(features_a, features_b, matches, scores);
+}
+
+std::pair<torch::Tensor, torch::Tensor> local_displacement_consistent_matches_for_test(
+    const FeatureSet& features_a,
+    const FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores,
+    double threshold_px,
+    int64_t neighbors,
+    int64_t min_inliers
+) {
+    return filterLocalDisplacementConsistentMatches(
+        features_a,
+        features_b,
+        matches,
+        scores,
+        threshold_px,
+        neighbors,
+        min_inliers);
 }
 
 std::pair<torch::Tensor, torch::Tensor> projective_consistent_matches_for_test(

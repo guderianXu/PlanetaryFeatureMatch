@@ -16,6 +16,7 @@ int64_t descriptor_topk_candidates_per_source_for_test_env();
 bool descriptor_topk_projective_before_rotation_for_test();
 bool descriptor_reciprocal_topk_fallback_for_test();
 bool sparse_geometry_filter_rotation_only_for_test();
+bool sparse_geometry_filter_local_for_test();
 bool should_return_rotation_only_matches_for_test(int64_t rotation_matches);
 std::pair<torch::Tensor, torch::Tensor> merge_sparse_match_candidates_for_test(
     const torch::Tensor& primary_matches,
@@ -49,6 +50,14 @@ std::pair<torch::Tensor, torch::Tensor> affine_residual_cleanup_matches_for_test
     const pfm::FeatureSet& features_b,
     const torch::Tensor& matches,
     const torch::Tensor& scores);
+std::pair<torch::Tensor, torch::Tensor> local_displacement_consistent_matches_for_test(
+    const pfm::FeatureSet& features_a,
+    const pfm::FeatureSet& features_b,
+    const torch::Tensor& matches,
+    const torch::Tensor& scores,
+    double threshold_px,
+    int64_t neighbors,
+    int64_t min_inliers);
 std::pair<torch::Tensor, torch::Tensor> projective_consistent_matches_for_test(
     const pfm::FeatureSet& features_a,
     const pfm::FeatureSet& features_b,
@@ -551,15 +560,22 @@ static void matching_pipeline_allows_reciprocal_topk_fallback_env() {
 static void matching_pipeline_allows_rotation_only_geometry_filter_for_extreme_viewpoint() {
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(129));
 
     setenv("PFM_SPARSE_GEOMETRY_FILTER", "rotation-only", 1);
     PFM_REQUIRE(pfm::testing::sparse_geometry_filter_rotation_only_for_test());
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(31));
     PFM_REQUIRE(pfm::testing::should_return_rotation_only_matches_for_test(32));
 
+    setenv("PFM_SPARSE_GEOMETRY_FILTER", "local", 1);
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
+    PFM_REQUIRE(pfm::testing::sparse_geometry_filter_local_for_test());
+
     setenv("PFM_SPARSE_GEOMETRY_FILTER", "projective", 1);
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_for_test());
+    PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_local_for_test());
     PFM_REQUIRE(!pfm::testing::should_return_rotation_only_matches_for_test(129));
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
 }
@@ -1087,6 +1103,90 @@ static void matching_pipeline_affine_cleanup_removes_borderline_residual_outlier
     PFM_REQUIRE(cleaned.first.size(0) == good_count);
 }
 
+static void matching_pipeline_local_displacement_filter_keeps_non_affine_viewpoint_matches() {
+    std::vector<float> keypoint_values_a;
+    std::vector<float> keypoint_values_b;
+    std::vector<int64_t> match_values;
+    std::vector<float> score_values;
+    constexpr int64_t grid_size = 5;
+    constexpr int64_t good_count = grid_size * grid_size;
+    constexpr int64_t outlier_count = 3;
+    keypoint_values_a.reserve(static_cast<std::size_t>((good_count + outlier_count) * 2));
+    keypoint_values_b.reserve(static_cast<std::size_t>((good_count + outlier_count) * 2));
+    match_values.reserve(static_cast<std::size_t>((good_count + outlier_count) * 2));
+    score_values.reserve(static_cast<std::size_t>(good_count + outlier_count));
+    for (int64_t index = 0; index < good_count; ++index) {
+        const float x = static_cast<float>(index % grid_size) * 4.0F;
+        const float y = static_cast<float>(index / grid_size) * 4.0F;
+        const float dx = 2.0F + 0.015F * x * x;
+        const float dy = 1.0F + 0.010F * y * y;
+        keypoint_values_a.push_back(x);
+        keypoint_values_a.push_back(y);
+        keypoint_values_b.push_back(x + dx);
+        keypoint_values_b.push_back(y + dy);
+        match_values.push_back(index);
+        match_values.push_back(index);
+        score_values.push_back(1.0F - static_cast<float>(index) * 0.002F);
+    }
+    for (int64_t index = 0; index < outlier_count; ++index) {
+        const auto row = good_count + index;
+        const float x = 6.0F + static_cast<float>(index % 2) * 4.0F;
+        const float y = 6.0F + static_cast<float>(index / 2) * 4.0F;
+        keypoint_values_a.push_back(x);
+        keypoint_values_a.push_back(y);
+        keypoint_values_b.push_back(x + 26.0F);
+        keypoint_values_b.push_back(y - 18.0F);
+        match_values.push_back(row);
+        match_values.push_back(row);
+        score_values.push_back(0.99F - static_cast<float>(index) * 0.01F);
+    }
+    const auto total_count = good_count + outlier_count;
+    const auto keypoints_a = torch::from_blob(
+                                 keypoint_values_a.data(),
+                                 {total_count, 2},
+                                 torch::kFloat32)
+                                 .clone();
+    const auto keypoints_b = torch::from_blob(
+                                 keypoint_values_b.data(),
+                                 {total_count, 2},
+                                 torch::kFloat32)
+                                 .clone();
+    const auto descriptors = torch::eye(total_count, torch::kFloat32);
+    const auto features_a = makeFeatureSet(
+        keypoints_a,
+        descriptors,
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32));
+    const auto features_b = makeFeatureSet(
+        keypoints_b,
+        descriptors,
+        torch::empty({0, 2}, torch::kFloat32),
+        torch::empty({0}, torch::kFloat32));
+    const auto matches = torch::from_blob(
+                             match_values.data(),
+                             {total_count, 2},
+                             torch::kInt64)
+                             .clone();
+    const auto scores = torch::from_blob(
+                            score_values.data(),
+                            {total_count},
+                            torch::kFloat32)
+                            .clone();
+
+    const auto filtered = pfm::testing::local_displacement_consistent_matches_for_test(
+        features_a,
+        features_b,
+        matches,
+        scores,
+        2.5,
+        9,
+        8);
+
+    PFM_REQUIRE(filtered.first.size(0) == good_count);
+    PFM_REQUIRE(filtered.second.size(0) == good_count);
+    PFM_REQUIRE(filtered.first.index({torch::indexing::Slice(), 0}).max().item<int64_t>() < good_count);
+}
+
 
 }  // namespace
 
@@ -1164,4 +1264,6 @@ void register_matching_pipeline_tests() {
                   matching_pipeline_affine_cleanup_handles_low_count_viewpoint_matches);
     register_test("matching_pipeline_affine_cleanup_removes_borderline_residual_outliers",
                   matching_pipeline_affine_cleanup_removes_borderline_residual_outliers);
+    register_test("matching_pipeline_local_displacement_filter_keeps_non_affine_viewpoint_matches",
+                  matching_pipeline_local_displacement_filter_keeps_non_affine_viewpoint_matches);
 }
