@@ -411,6 +411,26 @@ static void parse_match_defaults_to_sparse_mode() {
     PFM_REQUIRE(parsed.match_mode == "sparse");
 }
 
+static void parse_match_accepts_adaptive_and_local_sparse_geometry_filters() {
+    for (const std::string mode : {"adaptive", "local", "projective", "rotation-only"}) {
+        const auto parsed = pfm::parse_cli({
+            "pfm",
+            "match",
+            "--image-a",
+            "a.png",
+            "--image-b",
+            "b.png",
+            "--checkpoint",
+            "model.pt",
+            "--output",
+            "matches.pt",
+            "--sparse-geometry-filter",
+            mode});
+
+        PFM_REQUIRE(parsed.sparse_geometry_filter == mode);
+    }
+}
+
 static void parse_eval_command() {
     const auto parsed = pfm::parse_cli({
         "pfm",
@@ -657,6 +677,8 @@ void register_cli_tests() {
     register_test("parse_train_visualization_invalid_samples_throw", parse_train_visualization_invalid_samples_throw);
     register_test("parse_match_command", parse_match_command);
     register_test("parse_match_defaults_to_sparse_mode", parse_match_defaults_to_sparse_mode);
+    register_test("parse_match_accepts_adaptive_and_local_sparse_geometry_filters",
+                  parse_match_accepts_adaptive_and_local_sparse_geometry_filters);
     register_test("parse_eval_command", parse_eval_command);
     register_test("parse_export_command", parse_export_command);
     register_test("parse_min_keypoint_intensity_out_of_range_throws", parse_min_keypoint_intensity_out_of_range_throws);

@@ -61,7 +61,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
         "[--disable-descriptor-orientation-canonicalization]\n"
         "  match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] "
         "[--feature-a a_features.pt] [--feature-b b_features.pt] [--match-mode sparse] "
-        "[--sparse-geometry-filter projective] "
+        "[--sparse-geometry-filter adaptive] "
         "[--warp-a-to-b pair_000000.pt] [--match-correct-threshold-pixels 5] "
         "[--max-keypoints 1024] [--min-keypoints 0] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
         "[--min-keypoint-intensity 0.08] [--keypoint-grid-rows 8] [--keypoint-grid-cols 8] "
@@ -239,8 +239,8 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options) {
         ->check(CLI::IsMember({"sparse", "dense", "both"}));
     match->add_option("--sparse-geometry-filter",
                       options.sparse_geometry_filter,
-                      "Sparse geometric post-filter: projective or rotation-only")
-        ->check(CLI::IsMember({"projective", "rotation-only"}));
+                      "Sparse geometric post-filter: adaptive, projective, local, or rotation-only")
+        ->check(CLI::IsMember({"adaptive", "projective", "local", "rotation-only"}));
     match->add_option("--warp-a-to-b",
                       options.warp_a_to_b,
                       "Synthetic pair archive containing warp_a_to_b for match correctness metrics");
