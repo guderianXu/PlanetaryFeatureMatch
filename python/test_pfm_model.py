@@ -89,6 +89,28 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(config.base_channels, 4)
         self.assertTrue(torch.allclose(loaded.sparse_head.descriptor_skip.bias, torch.full((16,), 0.25)))
 
+    def test_interpolate_pytorch_state_payloads_blends_floating_weights_only(self):
+        first = {
+            "config": {"base_channels": 4},
+            "model": {
+                "weight": torch.tensor([0.0, 2.0]),
+                "counter": torch.tensor([3], dtype=torch.long),
+            },
+        }
+        second = {
+            "config": {"base_channels": 4},
+            "model": {
+                "weight": torch.tensor([2.0, 6.0]),
+                "counter": torch.tensor([9], dtype=torch.long),
+            },
+        }
+
+        mixed = pfm_model.interpolate_pytorch_state_payloads(first, second, alpha=0.25)
+
+        self.assertTrue(torch.allclose(mixed["model"]["weight"], torch.tensor([0.5, 3.0])))
+        self.assertTrue(torch.equal(mixed["model"]["counter"], torch.tensor([3], dtype=torch.long)))
+        self.assertEqual(mixed["interpolation"]["alpha"], 0.25)
+
     def test_descriptor_map_single_matches_forward_single_descriptor_output(self):
         model = pfm_model.PlanetaryFeatureMatcher(
             input_channels=1,

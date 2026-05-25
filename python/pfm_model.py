@@ -691,3 +691,37 @@ def load_pytorch_state(
         raise RuntimeError(f"pytorch state load mismatch: {result}")
     model.eval()
     return model, config
+
+
+def interpolate_pytorch_state_payloads(
+    first: dict,
+    second: dict,
+    *,
+    alpha: float,
+) -> dict:
+    if alpha < 0.0 or alpha > 1.0:
+        raise ValueError("alpha must be in [0, 1]")
+    if first["config"] != second["config"]:
+        raise ValueError("cannot interpolate checkpoints with different configs")
+    first_state = first["model"]
+    second_state = second["model"]
+    if first_state.keys() != second_state.keys():
+        raise ValueError("checkpoint model state keys differ")
+    mixed_state = {}
+    for key, first_tensor in first_state.items():
+        second_tensor = second_state[key]
+        if first_tensor.shape != second_tensor.shape:
+            raise ValueError(f"checkpoint tensor shape differs for {key}")
+        if first_tensor.is_floating_point() and second_tensor.is_floating_point():
+            mixed_state[key] = first_tensor * (1.0 - alpha) + second_tensor.to(first_tensor.device) * alpha
+        else:
+            mixed_state[key] = first_tensor.clone()
+    return {
+        "config": dict(first["config"]),
+        "model": mixed_state,
+        "interpolation": {
+            "alpha": float(alpha),
+            "first_source": first.get("source_checkpoint", ""),
+            "second_source": second.get("source_checkpoint", ""),
+        },
+    }

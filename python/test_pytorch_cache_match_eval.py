@@ -27,6 +27,37 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertTrue((keypoints >= 0).all())
         self.assertTrue((selected < 16).all())
 
+    def test_select_descriptor_keypoints_prefers_local_texture(self):
+        image = torch.full((1, 8, 8), 0.5)
+        image[:, 7, 7] = 1.0
+        descriptors = torch.randn(1, 4, 4, 4)
+
+        keypoints, selected = eval_py.select_descriptor_keypoints(
+            image,
+            descriptors,
+            max_keypoints=1,
+            min_intensity=0.01,
+        )
+
+        self.assertEqual(tuple(keypoints[0].tolist()), (3.0, 3.0))
+        self.assertEqual(int(selected[0]), 15)
+
+    def test_select_descriptor_keypoints_can_mix_texture_and_uniform_coverage(self):
+        image = torch.full((1, 8, 8), 0.5)
+        image[:, 7, 7] = 1.0
+        descriptors = torch.randn(1, 4, 4, 4)
+
+        _, selected = eval_py.select_descriptor_keypoints(
+            image,
+            descriptors,
+            max_keypoints=4,
+            min_intensity=0.01,
+            texture_fraction=0.5,
+        )
+
+        self.assertIn(15, selected.tolist())
+        self.assertEqual(len(set(selected.tolist())), 4)
+
     def test_cyclic_descriptor_similarity_accepts_quarter_channel_shift(self):
         desc_a = torch.zeros(1, 8)
         desc_b = torch.zeros(1, 8)

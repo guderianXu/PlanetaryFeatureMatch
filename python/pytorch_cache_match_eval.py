@@ -40,12 +40,33 @@ def _feature_to_image_points(
     return torch.stack([x, y], dim=1)
 
 
+def image_texture_scores(image: torch.Tensor, points_xy: torch.Tensor) -> torch.Tensor:
+    if image.dim() != 3:
+        raise ValueError("image must have shape CxHxW")
+    if points_xy.dim() != 2 or points_xy.size(1) != 2:
+        raise ValueError("points_xy must have shape Nx2")
+    if points_xy.numel() == 0:
+        return image.new_empty((0,))
+    base = image.to(torch.float32).mean(dim=0, keepdim=True).unsqueeze(0)
+    local_mean = F.avg_pool2d(base, kernel_size=5, stride=1, padding=2, count_include_pad=False)
+    contrast = (base - local_mean).abs()
+    dx = (base - torch.roll(base, shifts=1, dims=3)).abs()
+    dy = (base - torch.roll(base, shifts=1, dims=2)).abs()
+    texture = contrast + dx + dy
+    _, _, height, width = texture.shape
+    rounded = points_xy.round().to(torch.long)
+    x = rounded[:, 0].clamp(0, width - 1)
+    y = rounded[:, 1].clamp(0, height - 1)
+    return texture[0, 0, y, x].to(image.device)
+
+
 def select_descriptor_keypoints(
     image: torch.Tensor,
     descriptors: torch.Tensor,
     *,
     max_keypoints: int,
     min_intensity: float,
+    texture_fraction: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if image.dim() != 3:
         raise ValueError("image must have shape CxHxW")
@@ -53,6 +74,8 @@ def select_descriptor_keypoints(
         raise ValueError("descriptors must have shape 1xDxHxW")
     if max_keypoints <= 0:
         raise ValueError("max_keypoints must be positive")
+    if texture_fraction < 0.0 or texture_fraction > 1.0:
+        raise ValueError("texture_fraction must be in [0, 1]")
     _, image_height, image_width = image.shape
     descriptor_height = descriptors.size(2)
     descriptor_width = descriptors.size(3)
@@ -76,13 +99,29 @@ def select_descriptor_keypoints(
     valid = intensity > min_intensity if min_intensity > 0.0 else torch.ones_like(intensity, dtype=torch.bool)
     selected = torch.nonzero(valid, as_tuple=False).reshape(-1)
     if selected.numel() > max_keypoints:
-        sample = torch.linspace(
-            0,
-            selected.numel() - 1,
-            steps=max_keypoints,
-            device=selected.device,
-        ).round().to(torch.long)
-        selected = selected.index_select(0, sample)
+        texture_count = min(max_keypoints, int(round(float(max_keypoints) * float(texture_fraction))))
+        uniform_count = max_keypoints - texture_count
+        chosen_parts: list[torch.Tensor] = []
+        if texture_count > 0:
+            texture = image_texture_scores(image.to(descriptors.device), image_points)
+            selected_scores = texture.index_select(0, selected)
+            order = selected_scores.argsort(descending=True, stable=True)[:texture_count]
+            chosen_parts.append(selected.index_select(0, order))
+        if uniform_count > 0:
+            already = torch.cat(chosen_parts) if chosen_parts else selected.new_empty((0,))
+            keep = torch.ones(selected.size(0), dtype=torch.bool, device=selected.device)
+            if already.numel() > 0:
+                keep &= ~torch.isin(selected, already)
+            remaining = selected[keep]
+            if remaining.numel() > 0:
+                sample = torch.linspace(
+                    0,
+                    remaining.numel() - 1,
+                    steps=min(uniform_count, remaining.numel()),
+                    device=remaining.device,
+                ).round().to(torch.long)
+                chosen_parts.append(remaining.index_select(0, sample))
+        selected = torch.cat(chosen_parts) if chosen_parts else selected[:max_keypoints]
     return keypoints.index_select(0, selected).contiguous(), selected.to(torch.long).contiguous()
 
 
@@ -311,18 +350,21 @@ def match_pair_descriptor_maps(
     min_score: float = -1.0,
     mutual: bool = False,
     geometry_filter: str = "none",
+    texture_fraction: float = 1.0,
 ) -> MatchEvalResult:
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
         descriptors_a,
         max_keypoints=max_keypoints,
         min_intensity=min_intensity,
+        texture_fraction=texture_fraction,
     )
     keypoints_b, selected_b = select_descriptor_keypoints(
         pair.view_b,
         descriptors_b,
         max_keypoints=max_keypoints,
         min_intensity=min_intensity,
+        texture_fraction=texture_fraction,
     )
     rows_a = gather_descriptor_rows(descriptors_a, selected_a)
     rows_b = gather_descriptor_rows(descriptors_b, selected_b)
@@ -414,6 +456,7 @@ def evaluate_pair_path(
     texture_blend_weight: float,
     max_keypoints: int,
     min_intensity: float,
+    texture_fraction: float,
     threshold_px: float,
     topk: int,
     max_matches: int,
@@ -435,6 +478,7 @@ def evaluate_pair_path(
             descriptors_b,
             max_keypoints=max_keypoints,
             min_intensity=min_intensity,
+            texture_fraction=texture_fraction,
             threshold_px=threshold_px,
             topk=topk,
             max_matches=max_matches,
@@ -466,6 +510,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-keypoints", type=int, default=4096)
     parser.add_argument("--max-matches", type=int, default=512)
     parser.add_argument("--min-intensity", type=float, default=0.01)
+    parser.add_argument("--texture-keypoint-fraction", type=float, default=1.0)
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--mutual", action="store_true")
@@ -526,6 +571,7 @@ def main() -> int:
                 texture_blend_weight=args.texture_blend_weight,
                 max_keypoints=args.max_keypoints,
                 min_intensity=args.min_intensity,
+                texture_fraction=args.texture_keypoint_fraction,
                 threshold_px=args.threshold_px,
                 topk=args.descriptor_topk,
                 max_matches=args.max_matches,
