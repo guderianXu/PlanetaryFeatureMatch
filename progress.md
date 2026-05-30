@@ -684,3 +684,12 @@
 - extreme_cross_position：raw `2193/3072=0.7139`；GraphMatcher `2069/2104=0.9834`。
 - 指定极端样本 `pair_004541_cross_off008_s00109_s00119.pt`：raw `122/512=0.2383`；GraphMatcher `89/106=0.8396`，`graph_rejected_count=1942`。
 - 该极端样本 weak texture：raw `120/294=0.4082`；GraphMatcher `88/93=0.9462`。
+
+## 2026-05-30 GraphMatcher recall calibration probe
+- 完成从 high-precision dustbin checkpoint 继续的召回校准 probe：`runs/graphmatcher_no_xy_dustbin_recall_v21full256_b1_1epoch_s512_nm64_w02_eval512_20260530_181320`。
+- 配置：冻结 extractor，继续只训 GraphMatcher，`no_xy` metadata，no-match distractor 从 128 降到 64，no-match weight 从 0.5 降到 0.2，LR `2e-5`，1 epoch，`skip=0`。
+- 训练验证：`eval_before loss=0.024489 top1=0.9992`，`eval_after loss=0.021031 top1=0.9993`。
+- 18 样本 GraphMatcher：accepted matches `7973 -> 8607`，correct `7896 -> 8174`，micro precision `0.9903 -> 0.9497`。
+- extreme_cross_position：accepted `2104 -> 2547`，correct `2069 -> 2233`，micro precision `0.9834 -> 0.8767`。
+- 指定极端样本 `pair_004541_cross_off008_s00109_s00119.pt`：accepted `106 -> 176`，correct `89 -> 110`，precision `0.8396 -> 0.6250`。
+- 结论：召回确实上升，但 precision 损失过大。当前最佳正式 GraphMatcher 仍是 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`；下一步不应继续降低 dustbin 训练权重，而应做 inference-time dustbin/score calibration 或分层候选接收策略。

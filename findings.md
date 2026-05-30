@@ -273,3 +273,5 @@
 - 2026-05-30 no_xy + dustbin GraphMatcher probe 显著修复了“GraphMatcher 压坏 descriptor”的问题。指定极端样本从上一轮正样本 CE 训练后的 `77/512=0.1504`，变为 `89/106=0.8396`；它不是提高了召回，而是正确学会大量拒配。
 - no-match/dustbin 监督比单纯正样本 CE 更符合正式匹配需求：18 样本 GraphMatcher micro precision 达 `0.9903`，极端组 micro precision 达 `0.9834`，但 accepted matches 从 raw 的 `9216` 降到 `7973`，指定极端样本从 `512` 降到 `106`。下一步优化目标应是保持 high precision 的同时提高 accepted recall。
 - 去掉 x/y metadata 先验是有效的安全默认。极端跨位置中坐标先验很容易误导 matcher；当前建议 GraphMatcher 训练/评估默认先用 `no_xy + dustbin negatives`，后续再通过消融决定是否逐步恢复几何/质量 metadata。
+- 召回校准 probe 证明降低 dustbin 训练强度会迅速损害 precision：`nm64/w0.2` 让 18 样本 accepted `7973 -> 8607`、correct `7896 -> 8174`，但 micro precision `0.9903 -> 0.9497`；指定极端样本 `106/89/0.8396 -> 176/110/0.6250`。这不是合格的主模型替代，只适合作为 precision/recall tradeoff 参考。
+- 当前最佳模型选择应优先保留 `nm128/w0.5 no_xy dustbin` checkpoint。下一步高价值方向不是继续训练降低 dustbin，而是报告/推理层的 calibration：例如按 confidence margin、raw top-K rank、weak texture quality 分层接收，或输出 high_precision / balanced 两档阈值。
