@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import math
 import os
 import random
@@ -504,12 +505,15 @@ def sample_feature_correspondences(
     feature_width: int,
     count: int,
     min_intensity: float,
+    weak_texture_fraction: float = 0.0,
     generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if count <= 0:
         raise ValueError("count must be positive")
     if feature_height <= 0 or feature_width <= 0:
         raise ValueError("feature size must be positive")
+    if weak_texture_fraction < 0.0 or weak_texture_fraction > 1.0:
+        raise ValueError("weak_texture_fraction must be in [0, 1]")
     _, height_a, width_a = pair.view_a.shape
     _, height_b, width_b = pair.view_b.shape
     yy, xx = torch.meshgrid(
@@ -536,7 +540,18 @@ def sample_feature_correspondences(
         return points_a.new_empty((0, 2)), points_b.new_empty((0, 2))
 
     take = min(count, points_a.size(0))
-    order = torch.randperm(points_a.size(0), generator=generator, device=points_a.device)[:take]
+    if weak_texture_fraction > 0.0 and take > 1:
+        order = weak_texture_balanced_order(
+            pair.view_a,
+            pair.view_b,
+            points_a,
+            points_b,
+            take=take,
+            weak_fraction=weak_texture_fraction,
+            generator=generator,
+        )
+    else:
+        order = torch.randperm(points_a.size(0), generator=generator, device=points_a.device)[:take]
     points_a = points_a.index_select(0, order)
     points_b = points_b.index_select(0, order)
     feature_a = _scale_points_to_feature_grid(
@@ -554,6 +569,62 @@ def sample_feature_correspondences(
         feature_width=feature_width,
     )
     return feature_a, feature_b
+
+
+def image_local_texture_scores(image: torch.Tensor, points_xy: torch.Tensor) -> torch.Tensor:
+    if image.dim() != 3:
+        raise ValueError("image must have shape CxHxW")
+    if points_xy.dim() != 2 or points_xy.size(1) != 2:
+        raise ValueError("points_xy must have shape Nx2")
+    if points_xy.numel() == 0:
+        return image.new_empty((0,))
+    gray = image.to(torch.float32).mean(dim=0, keepdim=True).unsqueeze(0)
+    local_mean = F.avg_pool2d(gray, kernel_size=7, stride=1, padding=3, count_include_pad=False)
+    contrast = (gray - local_mean).abs()
+    dx = (gray - torch.roll(gray, shifts=1, dims=3)).abs()
+    dy = (gray - torch.roll(gray, shifts=1, dims=2)).abs()
+    texture = contrast + dx + dy
+    _, _, height, width = texture.shape
+    rounded = points_xy.round().to(torch.long)
+    x = rounded[:, 0].clamp(0, width - 1)
+    y = rounded[:, 1].clamp(0, height - 1)
+    return texture[0, 0, y, x].to(points_xy.device)
+
+
+def weak_texture_balanced_order(
+    image_a: torch.Tensor,
+    image_b: torch.Tensor,
+    points_a: torch.Tensor,
+    points_b: torch.Tensor,
+    *,
+    take: int,
+    weak_fraction: float,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if take <= 0:
+        return torch.empty(0, dtype=torch.long, device=points_a.device)
+    total = points_a.size(0)
+    if total <= take:
+        return torch.arange(total, dtype=torch.long, device=points_a.device)
+    weak_target = min(take, int(round(float(take) * float(weak_fraction))))
+    if weak_target <= 0:
+        return torch.randperm(total, generator=generator, device=points_a.device)[:take]
+    texture = 0.5 * (
+        image_local_texture_scores(image_a, points_a) + image_local_texture_scores(image_b, points_b)
+    )
+    weak_pool_size = min(total, max(weak_target, int(math.ceil(float(total) * 0.25))))
+    weak_pool = torch.argsort(texture, stable=True)[:weak_pool_size]
+    weak_take = min(weak_target, weak_pool.numel())
+    weak_perm = torch.randperm(weak_pool.numel(), generator=generator, device=weak_pool.device)[:weak_take]
+    selected = weak_pool.index_select(0, weak_perm)
+    if selected.numel() < take:
+        used = torch.zeros(total, dtype=torch.bool, device=points_a.device)
+        used[selected] = True
+        remaining = torch.nonzero(~used, as_tuple=False).reshape(-1)
+        fill = torch.randperm(remaining.numel(), generator=generator, device=remaining.device)[: take - selected.numel()]
+        selected = torch.cat([selected, remaining.index_select(0, fill)], dim=0)
+    order = torch.randperm(selected.numel(), generator=generator, device=selected.device)
+    return selected.index_select(0, order)[:take].contiguous()
 
 
 def sample_descriptors(descriptor_map: torch.Tensor, points_xy: torch.Tensor) -> torch.Tensor:
@@ -852,6 +923,11 @@ def graph_matcher_correspondence_loss(
     no_match_points: int = 0,
     no_match_weight: float = 0.0,
     no_match_min_distance: float = 4.0,
+    accept_weight: float = 0.0,
+    accept_negative_topk: int = 8,
+    raw_preservation_weight: float = 0.0,
+    raw_preservation_margin: float = 1.0,
+    raw_preservation_raw_margin: float = 0.05,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
@@ -913,7 +989,91 @@ def graph_matcher_correspondence_loss(
             no_match_terms.append(F.cross_entropy(output.logits[:, count:total_b].T, dustbin_row))
         if no_match_terms:
             loss = loss + float(no_match_weight) * torch.stack(no_match_terms).mean()
+    if accept_weight > 0.0:
+        loss = loss + float(accept_weight) * graph_matcher_acceptance_loss(
+            output,
+            desc_a,
+            desc_b,
+            positive_count=count,
+            negative_topk=accept_negative_topk,
+        )
+    if raw_preservation_weight > 0.0:
+        loss = loss + float(raw_preservation_weight) * graph_matcher_raw_preservation_loss(
+            output.logits,
+            desc_a[:count],
+            desc_b[:count],
+            target_margin=raw_preservation_margin,
+            raw_margin_threshold=raw_preservation_raw_margin,
+        )
     return loss
+
+
+def graph_matcher_acceptance_loss(
+    output: pfm_model.GraphMatcherOutput,
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    *,
+    positive_count: int,
+    negative_topk: int = 8,
+) -> torch.Tensor:
+    if output.accept_logits is None:
+        return output.logits.new_zeros(())
+    if positive_count <= 0:
+        return output.logits.new_zeros(())
+    accept_logits = output.accept_logits
+    count = min(int(positive_count), accept_logits.size(0), accept_logits.size(1))
+    if count <= 0:
+        return output.logits.new_zeros(())
+    terms: list[torch.Tensor] = []
+    diag_logits = accept_logits[:count, :count].diagonal()
+    terms.append(F.binary_cross_entropy_with_logits(diag_logits, torch.ones_like(diag_logits)))
+    if count > 1 and negative_topk > 0:
+        similarity = normalize_descriptor_batch(desc_a[:count]) @ normalize_descriptor_batch(desc_b[:count]).T
+        off_diagonal = ~torch.eye(count, dtype=torch.bool, device=similarity.device)
+        masked_similarity = similarity.masked_fill(~off_diagonal, -float("inf"))
+        k = min(int(negative_topk), count - 1)
+        hard_negative_indices = masked_similarity.topk(k, dim=1).indices
+        hard_negative_logits = accept_logits[:count, :count].gather(1, hard_negative_indices)
+        terms.append(F.binary_cross_entropy_with_logits(hard_negative_logits, torch.zeros_like(hard_negative_logits)))
+    if accept_logits.size(1) > count:
+        no_match_ab = accept_logits[:count, count:]
+        if no_match_ab.numel() > 0:
+            terms.append(F.binary_cross_entropy_with_logits(no_match_ab, torch.zeros_like(no_match_ab)))
+    if accept_logits.size(0) > count:
+        no_match_ba = accept_logits[count:, :count]
+        if no_match_ba.numel() > 0:
+            terms.append(F.binary_cross_entropy_with_logits(no_match_ba, torch.zeros_like(no_match_ba)))
+    return torch.stack(terms).mean()
+
+
+def graph_matcher_raw_preservation_loss(
+    logits: torch.Tensor,
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    *,
+    target_margin: float = 1.0,
+    raw_margin_threshold: float = 0.05,
+) -> torch.Tensor:
+    count = min(desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1)
+    if count <= 1:
+        return logits.new_zeros(())
+    raw_similarity = normalize_descriptor_batch(desc_a[:count]) @ normalize_descriptor_batch(desc_b[:count]).T
+    pair_logits = logits[:count, :count]
+    diagonal_mask = torch.eye(count, dtype=torch.bool, device=pair_logits.device)
+    raw_diag = raw_similarity.diagonal()
+    raw_row_hard = raw_similarity.masked_fill(diagonal_mask, -float("inf")).max(dim=1).values
+    raw_col_hard = raw_similarity.masked_fill(diagonal_mask, -float("inf")).max(dim=0).values
+    confident = (raw_diag - raw_row_hard).ge(float(raw_margin_threshold)) & (
+        raw_diag - raw_col_hard
+    ).ge(float(raw_margin_threshold))
+    if not bool(confident.any()):
+        return logits.new_zeros(())
+    logit_diag = pair_logits.diagonal()
+    row_hard = pair_logits.masked_fill(diagonal_mask, -float("inf")).max(dim=1).values
+    col_hard = pair_logits.masked_fill(diagonal_mask, -float("inf")).max(dim=0).values
+    row_loss = (float(target_margin) - (logit_diag - row_hard)).clamp_min(0.0).pow(2)
+    col_loss = (float(target_margin) - (logit_diag - col_hard)).clamp_min(0.0).pow(2)
+    return 0.5 * (row_loss[confident].mean() + col_loss[confident].mean())
 
 
 def hard_negative_margin_loss(desc_a: torch.Tensor, desc_b: torch.Tensor, *, margin: float = 0.2) -> torch.Tensor:
@@ -1208,6 +1368,7 @@ def train_step(
     samples_per_pair: int,
     min_intensity: float,
     generator: torch.Generator,
+    training_weak_texture_fraction: float = 0.0,
     temperature: float,
     teacher_weight: float,
     synthetic_loss_weight: float = 1.0,
@@ -1251,6 +1412,11 @@ def train_step(
     graph_matcher_no_match_points: int = 0,
     graph_matcher_no_match_weight: float = 0.0,
     graph_matcher_no_match_min_distance: float = 4.0,
+    graph_matcher_accept_weight: float = 0.0,
+    graph_matcher_accept_negative_topk: int = 8,
+    graph_matcher_raw_preservation_weight: float = 0.0,
+    graph_matcher_raw_preservation_margin: float = 1.0,
+    graph_matcher_raw_preservation_raw_margin: float = 0.05,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
@@ -1327,6 +1493,7 @@ def train_step(
                     feature_width=descriptors_a.size(3),
                     count=samples_per_pair,
                     min_intensity=min_intensity,
+                    weak_texture_fraction=training_weak_texture_fraction,
                     generator=generator,
                 )
                 pair_losses: list[torch.Tensor] = []
@@ -1374,6 +1541,11 @@ def train_step(
                             no_match_points=graph_matcher_no_match_points,
                             no_match_weight=graph_matcher_no_match_weight,
                             no_match_min_distance=graph_matcher_no_match_min_distance,
+                            accept_weight=graph_matcher_accept_weight,
+                            accept_negative_topk=graph_matcher_accept_negative_topk,
+                            raw_preservation_weight=graph_matcher_raw_preservation_weight,
+                            raw_preservation_margin=graph_matcher_raw_preservation_margin,
+                            raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
                             generator=generator,
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
@@ -1681,6 +1853,17 @@ def select_hard_training_pairs(
             selected.append(path)
             seen.add(key)
     return selected
+
+
+def select_hard_training_pairs_by_glob(pair_paths: list[Path], patterns: list[str]) -> list[Path]:
+    if not patterns:
+        return []
+    selected: list[Path] = []
+    for pair_path in pair_paths:
+        text = pair_path.as_posix()
+        if any(fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(pair_path.name, pattern) for pattern in patterns):
+            selected.append(pair_path)
+    return sorted(dict.fromkeys(selected))
 
 
 def hard_pair_probability(step: int, *, max_probability: float, warmup_steps: int) -> float:
@@ -2023,6 +2206,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exclude-self-pairs", action="store_true")
     parser.add_argument("--batch-pairs", type=int, default=2)
     parser.add_argument("--samples-per-pair", type=int, default=256)
+    parser.add_argument("--training-weak-texture-fraction", type=float, default=0.0)
     parser.add_argument("--learning-rate", type=float, default=3.0e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--teacher-weight", type=float, default=1.0)
@@ -2046,6 +2230,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-nonfinite-steps", action="store_true")
     parser.add_argument("--min-intensity", type=float, default=0.01)
     parser.add_argument("--hard-summary", action="append", type=Path, default=[])
+    parser.add_argument("--hard-pair-glob", action="append", default=[])
     parser.add_argument("--hard-limit", type=int, default=64)
     parser.add_argument("--hard-min-matches", type=int, default=4)
     parser.add_argument("--hard-max-precision", type=float, default=0.9)
@@ -2095,6 +2280,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
+    parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -2123,6 +2313,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--epochs must be nonnegative")
     if args.gradient_accumulation_steps <= 0:
         parser.error("--gradient-accumulation-steps must be positive")
+    if args.training_weak_texture_fraction < 0.0 or args.training_weak_texture_fraction > 1.0:
+        parser.error("--training-weak-texture-fraction must be in [0, 1]")
     if args.pair_cache_size < 0:
         parser.error("--pair-cache-size must be nonnegative")
     if args.prefetch_batches < 0:
@@ -2165,6 +2357,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-no-match-weight must be nonnegative")
     if args.graph_matcher_no_match_min_distance < 0.0:
         parser.error("--graph-matcher-no-match-min-distance must be nonnegative")
+    if args.graph_matcher_accept_weight < 0.0:
+        parser.error("--graph-matcher-accept-weight must be nonnegative")
+    if args.graph_matcher_accept_negative_topk < 0:
+        parser.error("--graph-matcher-accept-negative-topk must be nonnegative")
+    if args.graph_matcher_raw_preservation_weight < 0.0:
+        parser.error("--graph-matcher-raw-preservation-weight must be nonnegative")
+    if args.graph_matcher_raw_preservation_margin < 0.0:
+        parser.error("--graph-matcher-raw-preservation-margin must be nonnegative")
+    if args.graph_matcher_raw_preservation_raw_margin < 0.0:
+        parser.error("--graph-matcher-raw-preservation-raw-margin must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -2387,6 +2589,7 @@ def main() -> int:
         min_matches=args.hard_min_matches,
         max_precision=args.hard_max_precision,
     )
+    hard_paths = sorted(dict.fromkeys(hard_paths + select_hard_training_pairs_by_glob(pair_paths, args.hard_pair_glob)))
     if hard_paths and args.hard_curriculum_max_probability <= 0.0:
         pair_paths = pair_paths + hard_paths * max(0, args.hard_repeat)
     if hard_paths:
@@ -2543,6 +2746,7 @@ def main() -> int:
                 samples_per_pair=args.samples_per_pair,
                 min_intensity=args.min_intensity,
                 generator=train_generator,
+                training_weak_texture_fraction=args.training_weak_texture_fraction,
                 temperature=args.temperature,
                 teacher_weight=teacher_weight,
                 synthetic_loss_weight=args.synthetic_loss_weight,
@@ -2598,6 +2802,11 @@ def main() -> int:
                 graph_matcher_no_match_points=args.graph_matcher_no_match_points,
                 graph_matcher_no_match_weight=args.graph_matcher_no_match_weight,
                 graph_matcher_no_match_min_distance=args.graph_matcher_no_match_min_distance,
+                graph_matcher_accept_weight=args.graph_matcher_accept_weight,
+                graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
+                graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
+                graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
+                graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,

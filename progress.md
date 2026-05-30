@@ -705,3 +705,25 @@
 - `delta=-0.20`：micro `7930/8030=0.987547`，weak `3965/4002=0.990755`，extreme `2081/2124=0.979755`，指定极端样本 `91/111=0.819820`。
 - `delta=-0.30`：micro `7957/8068=0.986242`，weak `3986/4027=0.989819`，extreme `2093/2143=0.976668`，指定极端样本 `95/116=0.818966`。
 - 结论：推理侧 dustbin 校准能温和提高 accepted/correct，但 precision 随 delta 单调下降。当前建议保留 baseline 作为 high_precision，`delta=-0.10` 或 `-0.30` 仅作为 balanced/review 模式，不替代主模型。
+
+## 2026-05-30 GraphMatcher hard replay + weak quota implementation
+- 已实现模型侧 accept head：`PlanetaryGraphMatcher` 增加零初始化 `accept_head` 与 `accept_logit_scale`，旧 checkpoint 加载时自动补默认参数，初始行为兼容。
+- 已实现训练侧弱纹理正样本配额：`sample_feature_correspondences(..., weak_texture_fraction=...)`，CLI 为 `--training-weak-texture-fraction`。
+- 已实现 hard replay glob：`--hard-pair-glob` 可按路径或文件名选择训练集中的 hard pair，配合已有 curriculum/repeat 机制使用。
+- 已实现 GraphMatcher 辅助损失：
+  - `--graph-matcher-accept-weight` / `--graph-matcher-accept-negative-topk`：训练 accept head 区分正匹配与 hard negative。
+  - `--graph-matcher-raw-preservation-weight` / `--graph-matcher-raw-preservation-margin` / `--graph-matcher-raw-preservation-raw-margin`：保护 raw descriptor 已经很确信的匹配不被 GraphMatcher 压坏。
+- 测试通过：`py_compile` 通过；`python -m unittest python/test_pfm_model.py python/test_pfm_pytorch_training.py python/test_pytorch_cache_match_eval.py`，145 tests OK，1 skipped。
+
+## 2026-05-30 GraphMatcher hard replay probes
+- Probe A：`runs/graphmatcher_accept_weakquota_v21full256_b1_1500_s512_20260530_221712`。
+  - 配置：从当前最佳 high-precision checkpoint 起，冻结 extractor，1500 steps，弱纹理配额 `0.25`，hard offset replay，`accept_weight=0.15`，`raw_preservation_weight=0.15`。
+  - 结果：micro `8048/8317=0.967657`，weak `4043/4168=0.970010`，extreme `2145/2298=0.933420`。
+  - 指定极端样本：`105/173=0.606936`，weak `104/139=0.748201`。
+  - 结论：召回上升明显，但 precision 损失过大；accept loss 当前不能作为默认训练配置。
+- Probe B：`runs/graphmatcher_rawpreserve_weakquota_v21full256_b1_1000_s512_20260530_223255`。
+  - 配置：不启用 accept loss，1000 steps，弱纹理配额 `0.25`，hard offset replay，`no_match_weight=0.7`，`raw_preservation_weight=0.30`。
+  - 结果：micro `7999/8159=0.980390`，weak `4012/4083=0.982611`，extreme `2117/2201=0.961836`。
+  - 指定极端样本：`101/138=0.731884`，weak `100/115=0.869565`。
+  - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7983/8127=0.982281`，extreme `2107/2181=0.966071`，指定极端样本 `101/134=0.753731`。
+  - 结论：raw-preservation + stronger dustbin 是更可用的 balanced 方向，但仍未达到目标 `120~160 accepted 且 precision >=0.80`。当前主模型仍应保留 high-precision baseline；Probe B 可作为下一轮继续调参起点。

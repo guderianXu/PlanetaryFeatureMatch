@@ -80,6 +80,7 @@ class PFMModelTest(unittest.TestCase):
         output = graph(desc, keypoints, desc, keypoints)
 
         self.assertEqual(tuple(output.logits.shape), (5, 5))
+        self.assertEqual(tuple(output.accept_logits.shape), (4, 4))
         self.assertEqual(output.matches.dim(), 2)
         self.assertEqual(output.matches.size(1), 2)
         self.assertEqual(output.scores.dim(), 1)

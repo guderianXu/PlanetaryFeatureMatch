@@ -513,3 +513,25 @@
 - 光照压力测试独立入口。
 - 非 90 度连续旋转压力测试独立入口。
 - 按数据来源/极端跨位置自动分组的汇总表。
+
+## 2026-05-30 GraphMatcher hard replay 与弱纹理采样收尾
+
+目标：在不破坏当前 256 维 descriptor 的前提下，继续修 GraphMatcher 对极端跨位置样本的过度拒配/误修正问题，并提高训练中弱纹理点和 hard pair 的出现比例。
+
+已完成：
+- [complete] 训练采样支持 `--training-weak-texture-fraction`，在每个 pair 的 512 个监督点中预留低局部纹理点，避免训练只集中在强纹理边缘区域。
+- [complete] 训练采样支持 `--hard-pair-glob`，可把 `cross_off008/off012/off016/off020/off024/off032` 等困难样本加入 hard replay。
+- [complete] GraphMatcher 新增 acceptance head，但最后一层零初始化，旧 checkpoint 初始行为兼容。
+- [complete] GraphMatcher loss 新增 acceptance 辅助监督和 raw-preservation 约束，目标是让 matcher 优先保留 raw descriptor 已经高置信的正确匹配。
+- [complete] 补充 focused unittest 和 `py_compile`，覆盖 weak texture quota、acceptance loss、raw-preservation loss、CLI 参数和 GraphMatcher 输出。
+- [complete] 完成两组短训探针并写入 `progress.md` / `findings.md`。
+
+实验结论：
+- accept-head 探针提高了 accepted/correct 数，但 precision 明显下降；它让 matcher 变得过于宽松，暂不作为主模型。
+- raw-preservation + 更强 dustbin 探针更稳，极端样本和弱纹理样本都有一定改善，但仍未超过当前 high-precision baseline 的总体可靠性。
+- 当前默认模型仍建议使用 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330` 这一高精度基线；raw-preservation run 可作为下一轮 balanced tuning 起点。
+
+下一步：
+- 继续冻结 extractor，只训 GraphMatcher。
+- 以 raw-preservation 探针为起点，调小接受范围、强化 hard negative 和 no-match，而不是直接增大 accept-head 权重。
+- 下一轮报告必须同时看 micro precision、extreme precision、required hard pair correct/accepted、weak texture precision，不能只看平均值。

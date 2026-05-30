@@ -278,3 +278,7 @@
 - 推理侧 dustbin calibration 比重新弱化 dustbin 训练更可控。基于同一最佳 checkpoint，`graph_dustbin_delta=-0.10/-0.20/-0.30` 让 18 样本 accepted 从 `7973` 提升到 `8001/8030/8068`，correct 从 `7896` 提升到 `7914/7930/7957`，但 micro precision 从 `0.990342` 降到 `0.989126/0.987547/0.986242`。
 - 指定极端样本的 calibration tradeoff 比整体更明显：baseline `89/106=0.839623`，`delta=-0.10` 为 `91/110=0.827273`，`delta=-0.30` 为 `95/116=0.818966`。这说明校准能多捞回少量正确点，但不能根本解决该样本的 recall；继续提升应靠更好的 hard extreme 训练或分层候选策略。
 - 当前推荐输出两档推理口径：默认 `high_precision` 使用未校准 GraphMatcher；可选 `balanced` 使用小负 `graph_dustbin_delta`。不建议把较大负 delta 设为默认，因为它会系统性增加 false matches，尤其是极端跨位置样本。
+- 直接开启 accept-head 正样本训练会让 GraphMatcher 过度接收。`accept_weight=0.15` 的 probe 让指定极端样本从 baseline `89/106=0.8396` 变成 `105/173=0.6069`，虽然多找回 16 个正确点，但 false match 增长更快。这说明 accept head 必须更保守，或者只作为独立 score/head 报告，不应早期直接加到 pair logits。
+- 更保守的 raw-preservation + stronger dustbin 方向更可靠。`no accept + no_match_weight=0.7 + raw_preservation=0.30` 的 probe 让指定极端样本变成 `101/138=0.7319`，weak texture 为 `100/115=0.8696`；micro 仍有 `0.9804`。它未达到目标，但比 accept-head probe 更接近可用 balanced 模式。
+- 对 raw-preservation probe 加 raw score/margin 过滤只能小幅改善 precision：指定极端样本最好约 `101/134=0.7537`，仍不到 `0.80`。这说明剩余错误不是简单低 raw-score 噪声，后续需要更细的 hard-negative 设计，例如按同地貌重复纹理、弱纹理区域、低重叠边界分别采负样本。
+- 当前模型选择应分为三档：`high_precision` 继续用 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`；`balanced experimental` 可参考 raw-preservation probe；`accept-head` 暂不作为推荐模型，只保留代码入口用于后续更保守训练。

@@ -93,6 +93,29 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(points_a.numel(), 0)
         self.assertEqual(points_b.numel(), 0)
 
+    def test_sample_feature_correspondences_can_reserve_weak_texture_points(self):
+        view_a = torch.full((1, 6, 6), 0.5)
+        view_b = torch.full((1, 6, 6), 0.5)
+        view_a[:, :, 4:] = torch.tensor([0.0, 1.0]).repeat(6, 1)
+        view_b[:, :, 4:] = torch.tensor([0.0, 1.0]).repeat(6, 1)
+        warp = torch.zeros(6, 6, 2)
+        yy, xx = torch.meshgrid(torch.arange(6), torch.arange(6), indexing="ij")
+        warp[..., 0] = xx
+        warp[..., 1] = yy
+        pair = SyntheticPair(view_a=view_a, view_b=view_b, warp_a_to_b=warp, valid_mask=torch.ones(6, 6, dtype=torch.bool))
+
+        points_a, _ = train.sample_feature_correspondences(
+            pair,
+            feature_height=6,
+            feature_width=6,
+            count=8,
+            min_intensity=0.0,
+            weak_texture_fraction=0.5,
+            generator=torch.Generator().manual_seed(11),
+        )
+
+        self.assertGreaterEqual(int((points_a[:, 0] < 4.0).sum()), 4)
+
     def test_resize_pair_for_training_scales_images_warp_and_mask(self):
         view = torch.arange(16, dtype=torch.float32).view(1, 4, 4)
         yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
@@ -1188,6 +1211,47 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.dustbin_bias.grad)
 
+    def test_graph_matcher_correspondence_loss_can_train_accept_head(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
+        descriptors_b = descriptors_a.clone()
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+
+        loss = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            accept_weight=0.5,
+            accept_negative_topk=2,
+        )
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIsNotNone(model.graph_matcher.accept_head[-1].weight.grad)
+
+    def test_graph_matcher_raw_preservation_loss_penalizes_degraded_raw_margin(self):
+        desc = torch.eye(3)
+        logits = torch.zeros(4, 4)
+        logits[:3, :3] = torch.tensor(
+            [
+                [1.0, 2.0, 0.0],
+                [0.0, 1.0, 2.0],
+                [2.0, 0.0, 1.0],
+            ]
+        )
+
+        loss = train.graph_matcher_raw_preservation_loss(
+            logits,
+            desc,
+            desc,
+            target_margin=1.0,
+            raw_margin_threshold=0.1,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+
     def test_apply_graph_metadata_mode_can_remove_xy_prior(self):
         metadata = torch.arange(28, dtype=torch.float32).view(2, 14)
 
@@ -1223,6 +1287,20 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "32",
             "--graph-matcher-no-match-weight",
             "0.25",
+            "--graph-matcher-accept-weight",
+            "0.2",
+            "--graph-matcher-accept-negative-topk",
+            "6",
+            "--graph-matcher-raw-preservation-weight",
+            "0.1",
+            "--graph-matcher-raw-preservation-margin",
+            "1.5",
+            "--graph-matcher-raw-preservation-raw-margin",
+            "0.04",
+            "--training-weak-texture-fraction",
+            "0.25",
+            "--hard-pair-glob",
+            "*pair_004541*.pt",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -1231,6 +1309,13 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_metadata_mode, "no_xy")
         self.assertEqual(args.graph_matcher_no_match_points, 32)
         self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.25)
+        self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
+        self.assertEqual(args.graph_matcher_accept_negative_topk, 6)
+        self.assertAlmostEqual(args.graph_matcher_raw_preservation_weight, 0.1)
+        self.assertAlmostEqual(args.graph_matcher_raw_preservation_margin, 1.5)
+        self.assertAlmostEqual(args.graph_matcher_raw_preservation_raw_margin, 0.04)
+        self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
+        self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
 
     def test_parse_args_accepts_gradient_accumulation_steps(self):
         argv = [

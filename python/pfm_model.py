@@ -45,6 +45,7 @@ class GraphMatcherOutput:
     logits: torch.Tensor
     matches: torch.Tensor
     scores: torch.Tensor
+    accept_logits: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -712,12 +713,19 @@ class PlanetaryGraphMatcher(nn.Module):
             nn.GELU(),
             nn.Linear(max(16, hidden_dim // 8), 1),
         )
+        self.accept_head = nn.Sequential(
+            nn.Linear(6, max(16, hidden_dim // 8)),
+            nn.GELU(),
+            nn.Linear(max(16, hidden_dim // 8), 1),
+        )
         self.logit_scale = nn.Parameter(torch.ones(1) * math.sqrt(float(hidden_dim)))
         self.raw_score_temperature = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
         self.graph_delta_scale = nn.Parameter(torch.tensor(0.20, dtype=torch.float32))
+        self.accept_logit_scale = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
         self.dustbin_bias = nn.Parameter(torch.zeros(1))
         self.attention_layers = nn.ModuleList([PlanetaryGraphAttentionLayer(hidden_dim) for _ in range(attention_layers)])
         _zero_module(self.geometry_bias[-1])
+        _zero_module(self.accept_head[-1])
 
     def _metadata(self, keypoints_or_meta: torch.Tensor) -> torch.Tensor:
         if keypoints_or_meta.dim() != 2:
@@ -779,6 +787,46 @@ class PlanetaryGraphMatcher(nn.Module):
         mask.scatter_(0, col_indices, True)
         return mask
 
+    def _acceptance_logits(
+        self,
+        raw_similarity: torch.Tensor,
+        graph_delta: torch.Tensor,
+        meta_a: torch.Tensor,
+        meta_b: torch.Tensor,
+    ) -> torch.Tensor:
+        if raw_similarity.numel() == 0:
+            return raw_similarity.new_empty(raw_similarity.shape)
+
+        def column(meta: torch.Tensor, index: int, default: float = 0.0) -> torch.Tensor:
+            if meta.size(1) <= index:
+                return meta.new_full((meta.size(0),), default)
+            return meta[:, index]
+
+        if raw_similarity.size(1) > 1:
+            row_top2 = raw_similarity.topk(2, dim=1).values
+            row_margin = (row_top2[:, 0] - row_top2[:, 1]).clamp(0.0, 2.0)
+        else:
+            row_margin = raw_similarity.new_zeros((raw_similarity.size(0),))
+        if raw_similarity.size(0) > 1:
+            col_top2 = raw_similarity.topk(2, dim=0).values
+            col_margin = (col_top2[0] - col_top2[1]).clamp(0.0, 2.0)
+        else:
+            col_margin = raw_similarity.new_zeros((raw_similarity.size(1),))
+        quality_pair = 0.5 * (column(meta_a, 12, 1.0)[:, None] + column(meta_b, 12, 1.0)[None, :])
+        contrast_pair = 0.5 * (column(meta_a, 13)[:, None] + column(meta_b, 13)[None, :])
+        features = torch.stack(
+            [
+                raw_similarity.clamp(-1.0, 1.0),
+                row_margin[:, None].expand_as(raw_similarity),
+                col_margin[None, :].expand_as(raw_similarity),
+                graph_delta.detach().clamp(-20.0, 20.0) / 20.0,
+                quality_pair.clamp(0.0, 1.0),
+                contrast_pair.clamp(0.0, 1.0),
+            ],
+            dim=-1,
+        )
+        return self.accept_head(features).squeeze(-1)
+
     def forward(
         self,
         descriptors_a: torch.Tensor,
@@ -803,11 +851,14 @@ class PlanetaryGraphMatcher(nn.Module):
         raw_similarity = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
         graph_delta = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
         graph_delta = graph_delta + self._geometry_compatibility_bias(kp_a, kp_b)
+        accept_logits = self._acceptance_logits(raw_similarity, graph_delta, kp_a, kp_b)
         raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
         delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
-        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta
+        accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
+        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
         candidate_mask = self._candidate_mask(desc_a, desc_b)
         pair_logits = pair_logits.masked_fill(~candidate_mask, -1.0e4)
+        accept_logits = accept_logits.masked_fill(~candidate_mask, -1.0e4)
         logits = torch.zeros(
             descriptors_a.size(0) + 1,
             descriptors_b.size(0) + 1,
@@ -831,7 +882,7 @@ class PlanetaryGraphMatcher(nn.Module):
         probabilities = best_values[inlier_mask]
         matches = torch.stack([source_indices, target_indices], dim=1).to(device="cpu", dtype=torch.long).contiguous()
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
-        return GraphMatcherOutput(logits.contiguous(), matches, scores)
+        return GraphMatcherOutput(logits.contiguous(), matches, scores, accept_logits.contiguous())
 
 
 def make_rotation_invariant_texture_descriptor(
