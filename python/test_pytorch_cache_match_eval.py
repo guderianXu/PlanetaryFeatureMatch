@@ -1,11 +1,14 @@
 import sys
 import unittest
+from argparse import Namespace
+from unittest import mock
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pytorch_cache_match_eval as eval_py
+import pfm_model
 from patch_descriptor_training import SyntheticPair
 
 
@@ -42,6 +45,24 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(tuple(keypoints[0].tolist()), (3.0, 3.0))
         self.assertEqual(int(selected[0]), 15)
 
+    def test_select_descriptor_keypoints_can_use_learned_scores(self):
+        image = torch.full((1, 8, 8), 0.5)
+        image[:, 7, 7] = 1.0
+        descriptors = torch.randn(1, 4, 4, 4)
+        learned_scores = torch.zeros(1, 1, 4, 4)
+        learned_scores[0, 0, 0, 1] = 10.0
+
+        keypoints, selected = eval_py.select_descriptor_keypoints(
+            image,
+            descriptors,
+            max_keypoints=1,
+            min_intensity=0.01,
+            keypoint_scores=learned_scores,
+        )
+
+        self.assertEqual(tuple(keypoints[0].tolist()), (1.0, 0.0))
+        self.assertEqual(int(selected[0]), 1)
+
     def test_select_descriptor_keypoints_can_mix_texture_and_uniform_coverage(self):
         image = torch.full((1, 8, 8), 0.5)
         image[:, 7, 7] = 1.0
@@ -57,6 +78,234 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertIn(15, selected.tolist())
         self.assertEqual(len(set(selected.tolist())), 4)
+
+    def test_select_descriptor_keypoints_can_reserve_weak_texture_quota(self):
+        image = torch.full((1, 8, 8), 0.5)
+        image[:, 7, 7] = 1.0
+        descriptors = torch.randn(1, 4, 4, 4)
+        learned_scores = torch.arange(16, dtype=torch.float32).view(1, 1, 4, 4)
+
+        _, selected = eval_py.select_descriptor_keypoints(
+            image,
+            descriptors,
+            max_keypoints=4,
+            min_intensity=0.01,
+            texture_fraction=0.5,
+            weak_texture_fraction=0.25,
+            keypoint_scores=learned_scores,
+        )
+
+        self.assertIn(15, selected.tolist())
+        self.assertIn(0, selected.tolist())
+        self.assertEqual(len(set(selected.tolist())), 4)
+
+    def test_select_descriptor_keypoints_can_cap_dense_cells(self):
+        image = torch.ones(1, 16, 16)
+        descriptors = torch.randn(1, 4, 8, 8)
+        learned_scores = torch.zeros(1, 1, 8, 8)
+        learned_scores[0, 0, :4, :4] = torch.arange(16, dtype=torch.float32).view(4, 4) + 100.0
+        learned_scores[0, 0, 4:, 4:] = torch.arange(16, dtype=torch.float32).view(4, 4)
+
+        keypoints, _ = eval_py.select_descriptor_keypoints(
+            image,
+            descriptors,
+            max_keypoints=8,
+            min_intensity=0.01,
+            texture_fraction=1.0,
+            keypoint_scores=learned_scores,
+            keypoint_cell_cap=2,
+            spatial_bins=2,
+        )
+        upper_left = ((keypoints[:, 0] < 4) & (keypoints[:, 1] < 4)).sum()
+
+        self.assertLessEqual(int(upper_left), 2)
+        self.assertEqual(tuple(keypoints.shape), (8, 2))
+
+    def test_select_spatially_distributed_indices_prefers_distinct_cells(self):
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        keypoints = torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1).to(torch.float32)
+        scores = torch.zeros(16)
+        scores[0] = 10.0
+        scores[1] = 9.0
+        scores[2] = 8.0
+
+        selected = eval_py.select_spatially_distributed_indices(
+            keypoints,
+            scores,
+            max_keypoints=2,
+            spatial_bins=2,
+            descriptor_height=4,
+            descriptor_width=4,
+        )
+
+        self.assertEqual(selected.tolist(), [0, 2])
+
+    def test_select_spatially_distributed_indices_fills_remaining_by_score(self):
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        keypoints = torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1).to(torch.float32)
+        scores = torch.zeros(16)
+        scores[0] = 10.0
+        scores[1] = 9.0
+        scores[2] = 8.0
+
+        selected = eval_py.select_spatially_distributed_indices(
+            keypoints,
+            scores,
+            max_keypoints=5,
+            spatial_bins=2,
+            descriptor_height=4,
+            descriptor_width=4,
+        )
+
+        self.assertEqual(selected.tolist(), [0, 2, 8, 10, 1])
+
+    def test_select_descriptor_keypoints_rejects_negative_spatial_bins(self):
+        image = torch.ones(1, 8, 8)
+        descriptors = torch.randn(1, 4, 4, 4)
+
+        with self.assertRaises(ValueError):
+            eval_py.select_descriptor_keypoints(
+                image,
+                descriptors,
+                max_keypoints=3,
+                min_intensity=0.01,
+                spatial_bins=-1,
+            )
+
+    def test_parse_args_accepts_keypoint_spatial_bins(self):
+        argv = [
+            "pytorch_cache_match_eval.py",
+            "--cache-dir",
+            "cache",
+            "--pytorch-state",
+            "state.pt",
+            "--output",
+            "summary.csv",
+            "--keypoint-spatial-bins",
+            "16",
+            "--weak-texture-keypoint-fraction",
+            "0.25",
+            "--keypoint-cell-cap",
+            "12",
+            "--keypoint-score-mode",
+            "learned",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = eval_py.parse_args()
+
+        self.assertEqual(args.keypoint_spatial_bins, 16)
+        self.assertEqual(args.weak_texture_keypoint_fraction, 0.25)
+        self.assertEqual(args.keypoint_cell_cap, 12)
+        self.assertEqual(args.keypoint_score_mode, "learned")
+
+    def test_parse_args_accepts_graph_matcher_mode(self):
+        argv = [
+            "pytorch_cache_match_eval.py",
+            "--cache-dir",
+            "cache",
+            "--pytorch-state",
+            "state.pt",
+            "--output",
+            "summary.csv",
+            "--matcher-mode",
+            "graph_matcher",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = eval_py.parse_args()
+
+        self.assertEqual(args.matcher_mode, "graph_matcher")
+
+    def test_sample_descriptor_rows_at_keypoints_interpolates_rows(self):
+        descriptors = torch.zeros(1, 2, 2, 2)
+        descriptors[0, 0] = torch.tensor([[1.0, 3.0], [5.0, 7.0]])
+        descriptors[0, 1] = torch.tensor([[2.0, 4.0], [6.0, 8.0]])
+
+        rows = eval_py.sample_descriptor_rows_at_keypoints(descriptors, torch.tensor([[0.5, 0.5]]))
+
+        self.assertTrue(torch.allclose(rows, torch.tensor([[4.0, 5.0]]), atol=1.0e-5))
+
+    def test_graph_metadata_from_raw_features_samples_geometry_fields(self):
+        heatmap = torch.full((1, 1, 2, 2), 0.7)
+        descriptors = torch.randn(1, 4, 2, 2)
+        scale = torch.full((1, 1, 2, 2), 2.0)
+        orientation = torch.zeros(1, 2, 2, 2)
+        orientation[:, 0] = 1.0
+        affine = torch.zeros(1, 4, 2, 2)
+        affine[:, 0] = 1.0
+        affine[:, 3] = 1.0
+        raw = pfm_model.RawFeatureMaps(
+            heatmap=heatmap,
+            descriptors=descriptors,
+            scale=scale,
+            orientation=orientation,
+            affine=affine,
+            dense_confidence=heatmap,
+            keypoint_offsets=torch.zeros(1, 2, 2, 2),
+            quality=torch.full((1, 1, 2, 2), 0.9),
+            local_contrast=torch.full((1, 1, 2, 2), 0.4),
+        )
+
+        meta = eval_py.graph_metadata_from_raw_features(raw, torch.tensor([[1.0, 1.0]]), meta_dim=16)
+
+        self.assertEqual(tuple(meta.shape), (1, 16))
+        self.assertAlmostEqual(float(meta[0, 4]), 0.7, places=5)
+        self.assertAlmostEqual(float(meta[0, 5]), torch.tensor(2.0).log().item(), places=5)
+        self.assertAlmostEqual(float(meta[0, 12]), 0.9, places=5)
+        self.assertAlmostEqual(float(meta[0, 13]), 0.4, places=5)
+
+    def test_parse_args_accepts_min_target_gradient(self):
+        argv = [
+            "pytorch_cache_match_eval.py",
+            "--cache-dir",
+            "cache",
+            "--pytorch-state",
+            "state.pt",
+            "--output",
+            "summary.csv",
+            "--min-target-gradient",
+            "20.25",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = eval_py.parse_args()
+
+        self.assertEqual(args.min_target_gradient, 20.25)
+
+    def test_parse_args_accepts_min_target_local_contrast(self):
+        argv = [
+            "pytorch_cache_match_eval.py",
+            "--cache-dir",
+            "cache",
+            "--pytorch-state",
+            "state.pt",
+            "--output",
+            "summary.csv",
+            "--min-target-local-contrast",
+            "5.32",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = eval_py.parse_args()
+
+        self.assertEqual(args.min_target_local_contrast, 5.32)
+
+    def test_target_texture_gradient_uses_uint8_like_sobel_scale(self):
+        image = torch.zeros(1, 5, 5)
+        image[:, :, 3:] = 1.0
+
+        gradient = eval_py.target_texture_gradient_mean(image)
+
+        self.assertGreater(gradient, 100.0)
+
+    def test_target_local_contrast_uses_uint8_like_local_variance_scale(self):
+        image = torch.zeros(1, 9, 9)
+        image[:, 4, 4] = 1.0
+
+        contrast = eval_py.target_local_contrast_mean(image)
+
+        self.assertGreater(contrast, 20.0)
 
     def test_cyclic_descriptor_similarity_accepts_quarter_channel_shift(self):
         desc_a = torch.zeros(1, 8)
@@ -136,6 +385,49 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertLess(filtered.matches, unfiltered.matches)
         self.assertEqual(filtered.matches, filtered.correct)
 
+    def test_match_pair_descriptor_maps_can_use_graph_matcher(self):
+        image = torch.ones(1, 4, 4)
+        warp = torch.zeros(4, 4, 2)
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        warp[..., 0] = xx
+        warp[..., 1] = yy
+        pair = SyntheticPair(
+            view_a=image,
+            view_b=image,
+            warp_a_to_b=warp,
+            valid_mask=torch.ones(4, 4, dtype=torch.bool),
+        )
+        descriptors = torch.eye(4).T.reshape(1, 4, 2, 2)
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def forward(self):
+                raise AssertionError("not used")
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=torch.empty(5, 5),
+                    matches=torch.tensor([[0, 0], [1, 1]], dtype=torch.long),
+                    scores=torch.tensor([0.9, 0.8], dtype=torch.float32),
+                )
+
+        result = eval_py.match_pair_descriptor_maps(
+            pair,
+            descriptors,
+            descriptors,
+            model=DummyModel(),
+            matcher_mode="graph_matcher",
+            max_keypoints=4,
+            min_intensity=0.0,
+            threshold_px=0.01,
+        )
+
+        self.assertEqual(result.matches, 2)
+        self.assertEqual(result.correct, 2)
+
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])
         desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
@@ -143,6 +435,20 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         matches, _ = eval_py.mutual_nearest_matches(desc_a, desc_b, max_matches=8, min_score=-1.0)
 
         self.assertEqual(matches.tolist(), [[0, 0], [2, 1]])
+
+    def test_mutual_nearest_matches_can_require_best_second_margin(self):
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.99, 0.01], [0.0, 1.0]])
+
+        matches, _ = eval_py.mutual_nearest_matches(
+            desc_a,
+            desc_b,
+            max_matches=8,
+            min_score=-1.0,
+            min_margin=0.05,
+        )
+
+        self.assertEqual(matches.tolist(), [[1, 2]])
 
     def test_affine_consistency_filter_removes_geometric_outliers(self):
         points_a = torch.tensor(
@@ -191,6 +497,131 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(kept_matches.size(0), 4)
         self.assertEqual(kept_scores.size(0), 4)
         self.assertNotIn([4, 4], kept_matches.tolist())
+
+    def test_limit_pair_paths_can_take_seeded_random_subset(self):
+        paths = [Path(f"source_000001/pair_{index:06d}.pt") for index in range(10)]
+
+        first = eval_py.limit_pair_paths(paths, limit_pairs=4, sample_seed=17)
+        second = eval_py.limit_pair_paths(list(reversed(paths)), limit_pairs=4, sample_seed=17)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 4)
+        self.assertNotEqual(first, paths[:4])
+
+    def test_selected_pair_paths_discovers_all_pairs_before_seeded_limit(self):
+        paths = [Path(f"source_000001/pair_{index:06d}.pt") for index in range(10)]
+        args = Namespace(
+            cache_dir=[Path("cache")],
+            limit_pairs=4,
+            sample_seed=23,
+            exclude_self_pairs=False,
+            hard_summary=[],
+            hard_limit=64,
+            hard_min_matches=4,
+            hard_max_precision=0.9,
+        )
+
+        with mock.patch.object(eval_py, "discover_pair_archives", return_value=paths) as discover:
+            selected = eval_py.selected_pair_paths(args)
+
+        self.assertEqual(len(selected), 4)
+        self.assertNotEqual(selected, paths[:4])
+        discover.assert_called_once_with([Path("cache")], limit_pairs=0, exclude_self_pairs=False)
+
+    def test_selected_pair_paths_passes_exclude_self_pairs_to_discovery(self):
+        args = Namespace(
+            cache_dir=[Path("cache")],
+            limit_pairs=0,
+            sample_seed=None,
+            exclude_self_pairs=True,
+            hard_summary=[],
+            hard_limit=64,
+            hard_min_matches=4,
+            hard_max_precision=0.9,
+        )
+
+        with mock.patch.object(eval_py, "discover_pair_archives", return_value=[]) as discover:
+            eval_py.selected_pair_paths(args)
+
+        discover.assert_called_once_with([Path("cache")], limit_pairs=0, exclude_self_pairs=True)
+
+    def test_evaluate_pair_path_skips_low_target_gradient_before_model_forward(self):
+        image = torch.ones(1, 8, 8) * 0.5
+        warp = torch.zeros(8, 8, 2)
+        yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+        warp[..., 0] = xx
+        warp[..., 1] = yy
+        pair = SyntheticPair(
+            view_a=image,
+            view_b=image,
+            warp_a_to_b=warp,
+            valid_mask=torch.ones(8, 8, dtype=torch.bool),
+        )
+
+        with mock.patch.object(eval_py, "load_libtorch_pair_archive", return_value=pair):
+            result = eval_py.evaluate_pair_path(
+                mock.Mock(),
+                Path("pair.pt"),
+                device=torch.device("cpu"),
+                mode="blend",
+                texture_blend_weight=1.0,
+                max_keypoints=16,
+                min_intensity=0.0,
+                texture_fraction=1.0,
+                threshold_px=5.0,
+                topk=1,
+                max_matches=16,
+                min_score=-1.0,
+                min_margin=0.0,
+                min_target_gradient=1.0,
+                min_target_local_contrast=0.0,
+                mutual=True,
+                geometry_filter="local",
+                keypoint_spatial_bins=0,
+            )
+
+        self.assertEqual(result.matches, 0)
+        self.assertEqual(result.correct, 0)
+        self.assertEqual(result.precision, 0.0)
+
+    def test_evaluate_pair_path_skips_low_target_local_contrast_before_model_forward(self):
+        image = torch.ones(1, 8, 8) * 0.5
+        warp = torch.zeros(8, 8, 2)
+        yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+        warp[..., 0] = xx
+        warp[..., 1] = yy
+        pair = SyntheticPair(
+            view_a=image,
+            view_b=image,
+            warp_a_to_b=warp,
+            valid_mask=torch.ones(8, 8, dtype=torch.bool),
+        )
+
+        with mock.patch.object(eval_py, "load_libtorch_pair_archive", return_value=pair):
+            result = eval_py.evaluate_pair_path(
+                mock.Mock(),
+                Path("pair.pt"),
+                device=torch.device("cpu"),
+                mode="blend",
+                texture_blend_weight=1.0,
+                max_keypoints=16,
+                min_intensity=0.0,
+                texture_fraction=1.0,
+                threshold_px=5.0,
+                topk=1,
+                max_matches=16,
+                min_score=-1.0,
+                min_margin=0.0,
+                min_target_gradient=0.0,
+                min_target_local_contrast=1.0,
+                mutual=True,
+                geometry_filter="local",
+                keypoint_spatial_bins=0,
+            )
+
+        self.assertEqual(result.matches, 0)
+        self.assertEqual(result.correct, 0)
+        self.assertEqual(result.precision, 0.0)
 
 
 if __name__ == "__main__":

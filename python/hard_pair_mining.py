@@ -36,8 +36,8 @@ def row_to_hard_pair(row: dict[str, str]) -> HardPair | None:
     if pair_index is None:
         return None
     try:
-        matches = int(row.get("sparse_matches", "0"))
-        precision = float(row.get("match_precision", "0"))
+        matches = int(row.get("sparse_matches", row.get("matches", "0")))
+        precision = float(row.get("match_precision", row.get("precision", "0")))
     except ValueError:
         return None
     return HardPair(pair_index=pair_index, precision=precision, matches=matches, pair_pt=pair_pt)

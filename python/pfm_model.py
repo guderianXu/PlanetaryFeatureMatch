@@ -21,6 +21,7 @@ class CheckpointConfig:
     descriptor_dim: int
     graph_hidden_dim: int
     graph_attention_layers: int
+    graph_keypoint_meta_dim: int = 2
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class SparseHeadOutput:
     scale: torch.Tensor
     orientation: torch.Tensor
     affine: torch.Tensor
+    keypoint_offsets: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,13 @@ class GraphMatcherOutput:
 
 
 @dataclass(frozen=True)
+class SemiDenseCandidateOutput:
+    keypoints_a: torch.Tensor
+    keypoints_b: torch.Tensor
+    scores: torch.Tensor
+
+
+@dataclass(frozen=True)
 class RawFeatureMaps:
     heatmap: torch.Tensor
     descriptors: torch.Tensor
@@ -53,6 +62,20 @@ class RawFeatureMaps:
     orientation: torch.Tensor
     affine: torch.Tensor
     dense_confidence: torch.Tensor
+    keypoint_offsets: torch.Tensor
+    quality: torch.Tensor
+    local_contrast: torch.Tensor
+
+
+def _group_count(channels: int) -> int:
+    for groups in (32, 16, 8, 4, 2):
+        if channels % groups == 0 and channels // groups >= 2:
+            return groups
+    return 1
+
+
+def _make_norm(channels: int) -> nn.GroupNorm:
+    return nn.GroupNorm(_group_count(channels), channels)
 
 
 def _make_stage(input_channels: int, output_channels: int) -> nn.Sequential:
@@ -63,6 +86,34 @@ def _make_stage(input_channels: int, output_channels: int) -> nn.Sequential:
         nn.Conv2d(output_channels, output_channels, 3, padding=1, bias=False),
         nn.BatchNorm2d(output_channels),
         nn.ReLU(inplace=True),
+    )
+
+
+class ZeroResidualContextBlock(nn.Module):
+    """Residual local/dilated context block initialized as an exact no-op."""
+
+    def __init__(self, channels: int, *, dilation: int = 1) -> None:
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive")
+        padding = dilation
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=padding, dilation=dilation, bias=False)
+        self.norm1 = _make_norm(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=padding, dilation=dilation, bias=False)
+        self.norm2 = _make_norm(channels)
+        with torch.no_grad():
+            self.conv2.weight.zero_()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = F.gelu(self.norm1(self.conv1(x)))
+        return x + self.norm2(self.conv2(hidden))
+
+
+def _make_stage_refinement(channels: int) -> nn.Sequential:
+    return nn.Sequential(
+        ZeroResidualContextBlock(channels),
+        ZeroResidualContextBlock(channels),
+        ZeroResidualContextBlock(channels, dilation=2),
     )
 
 
@@ -77,14 +128,19 @@ class Backbone(nn.Module):
         self.stage2 = _make_stage(base_channels, base_channels * 2)
         self.stage3 = _make_stage(base_channels * 2, base_channels * 4)
         self.stage4 = _make_stage(base_channels * 4, base_channels * 8)
+        self.stage1_refine = _make_stage_refinement(base_channels)
+        self.stage2_refine = _make_stage_refinement(base_channels * 2)
+        self.stage3_refine = _make_stage_refinement(base_channels * 4)
+        self.stage4_refine = _make_stage_refinement(base_channels * 8)
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         if x.dim() != 4 or x.size(1) != self.input_channels:
             raise ValueError("input tensor must have shape BxCxHxW with the configured channel count")
-        y1 = self.stage1(x)
-        y2 = self.stage2(y1)
-        y3 = self.stage3(y2)
-        y4 = self.stage4(y3)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        y1 = self.stage1_refine(self.stage1(x))
+        y2 = self.stage2_refine(self.stage2(y1))
+        y3 = self.stage3_refine(self.stage3(y2))
+        y4 = self.stage4_refine(self.stage4(y3))
         return [y1, y2, y3, y4]
 
     def sanitize_nonfinite_state(self) -> None:
@@ -99,11 +155,58 @@ class Backbone(nn.Module):
                 tensor.masked_fill_(~finite, fill)
 
 
+class DualFPNLite(nn.Module):
+    """Build separate 1/4-resolution features for keypoints and descriptors."""
+
+    def __init__(self, base_channels: int) -> None:
+        super().__init__()
+        if base_channels <= 0:
+            raise ValueError("base_channels must be positive")
+        p2_channels = base_channels * 2
+        self.keypoint_from_stage3 = nn.Conv2d(base_channels * 4, p2_channels, 1)
+        self.descriptor_from_stage3 = nn.Conv2d(base_channels * 4, p2_channels, 1)
+        self.descriptor_from_stage4 = nn.Conv2d(base_channels * 8, p2_channels, 1)
+        self.keypoint_refine = ZeroResidualContextBlock(p2_channels)
+        self.descriptor_refine = nn.Sequential(
+            ZeroResidualContextBlock(p2_channels),
+            ZeroResidualContextBlock(p2_channels, dilation=2),
+        )
+        _zero_module(self.keypoint_from_stage3)
+        _zero_module(self.descriptor_from_stage3)
+        _zero_module(self.descriptor_from_stage4)
+
+    def forward(self, features: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        if len(features) < 4:
+            raise ValueError("DualFPNLite requires backbone stages 1..4")
+        stage2 = features[1]
+        stage3 = F.interpolate(
+            self.keypoint_from_stage3(features[2]),
+            size=stage2.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        p2_keypoint = self.keypoint_refine(stage2 + stage3)
+        desc_stage3 = F.interpolate(
+            self.descriptor_from_stage3(features[2]),
+            size=stage2.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        desc_stage4 = F.interpolate(
+            self.descriptor_from_stage4(features[3]),
+            size=stage2.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        p2_descriptor = self.descriptor_refine(stage2 + desc_stage3 + desc_stage4)
+        return p2_keypoint, p2_descriptor
+
+
 def normalize_channels_stable(tensor: torch.Tensor) -> torch.Tensor:
     finite = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
-    scale = finite.detach().abs().amax(dim=1, keepdim=True).clamp_min(1.0e-12)
+    scale = finite.detach().abs().amax(dim=1, keepdim=True).clamp_min(1.0)
     scaled = finite / scale
-    return scaled / scaled.norm(p=2, dim=1, keepdim=True).clamp_min(1.0e-12)
+    return scaled / scaled.norm(p=2, dim=1, keepdim=True).clamp_min(1.0e-3)
 
 
 def _normalize_channels(tensor: torch.Tensor) -> torch.Tensor:
@@ -185,6 +288,15 @@ def _zero_module(module: nn.Module) -> None:
             parameter.zero_()
 
 
+def _init_concat_identity_projection(module: nn.Conv2d, descriptor_dim: int) -> None:
+    with torch.no_grad():
+        module.weight.zero_()
+        if module.bias is not None:
+            module.bias.zero_()
+        for channel in range(descriptor_dim):
+            module.weight[channel, channel, 0, 0] = 1.0
+
+
 class SparseHead(nn.Module):
     def __init__(self, input_channels: int, descriptor_dim: int) -> None:
         super().__init__()
@@ -198,8 +310,12 @@ class SparseHead(nn.Module):
             nn.Conv2d(input_channels, input_channels, 3, padding=1),
             nn.ReLU(inplace=True),
         )
+        self.keypoint_context = ZeroResidualContextBlock(input_channels)
+        self.descriptor_context = ZeroResidualContextBlock(input_channels)
+        self.geometry_context = ZeroResidualContextBlock(input_channels)
         self.heatmap = nn.Conv2d(input_channels, 1, 1)
         self.heatmap_viewpoint_context = nn.Conv2d(input_channels * 5, 1, 1)
+        self.keypoint_offsets = nn.Conv2d(input_channels, 2, 1)
         self.descriptors = _make_descriptor_tower(input_channels, descriptor_dim)
         self.descriptor_multiscale = nn.Conv2d(input_channels * 3, descriptor_dim, 1)
         self.descriptor_attention = nn.Conv2d(input_channels * 3, descriptor_dim, 1)
@@ -207,68 +323,159 @@ class SparseHead(nn.Module):
         self.descriptor_viewpoint_attention = nn.Conv2d(input_channels * 5, descriptor_dim, 1)
         self.descriptor_orientation_alignment = nn.Conv2d(descriptor_dim, descriptor_dim, 1)
         self.descriptor_dilated_context = nn.Conv2d(descriptor_dim, descriptor_dim, 3, padding=2, dilation=2)
+        self.descriptor_branch_quality = nn.Conv2d(descriptor_dim, 1, 1)
+        self.descriptor_rotation_fusion = nn.Conv2d(descriptor_dim * 2, descriptor_dim, 1)
         _zero_module(self.heatmap_viewpoint_context)
+        _zero_module(self.keypoint_offsets)
         _zero_module(self.descriptor_viewpoint_context)
         _zero_module(self.descriptor_viewpoint_attention)
         _zero_module(self.descriptor_orientation_alignment)
         _zero_module(self.descriptor_dilated_context)
+        _zero_module(self.descriptor_branch_quality)
+        _init_concat_identity_projection(self.descriptor_rotation_fusion, descriptor_dim)
         self.descriptor_skip = nn.Conv2d(input_channels, descriptor_dim, 1)
         self.scale = nn.Conv2d(input_channels, 1, 1)
         self.orientation = nn.Conv2d(input_channels, 2, 1)
         self.affine = nn.Conv2d(input_channels, 4, 1)
 
-    def _descriptor_branch(self, feature: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        context = self.context(feature)
-        multiscale_context = make_multiscale_descriptor_context(context)
-        viewpoint_descriptor = _apply_anisotropic_viewpoint_projection(self.descriptor_viewpoint_context, context)
+    def _descriptor_branch(
+        self,
+        keypoint_feature: torch.Tensor,
+        descriptor_feature: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if descriptor_feature is None:
+            descriptor_feature = keypoint_feature
+        keypoint_shared_context = self.context(keypoint_feature)
+        descriptor_shared_context = self.context(descriptor_feature)
+        keypoint_context = self.keypoint_context(keypoint_shared_context)
+        descriptor_context = self.descriptor_context(descriptor_shared_context)
+        multiscale_context = make_multiscale_descriptor_context(descriptor_context)
+        viewpoint_descriptor = _apply_anisotropic_viewpoint_projection(self.descriptor_viewpoint_context, descriptor_context)
         viewpoint_gate = 1.0 + torch.sigmoid(
-            _apply_anisotropic_viewpoint_projection(self.descriptor_viewpoint_attention, context)
+            _apply_anisotropic_viewpoint_projection(self.descriptor_viewpoint_attention, descriptor_context)
         )
         descriptor_base = (
-            self.descriptors(context)
+            self.descriptors(descriptor_context)
             + self.descriptor_multiscale(multiscale_context)
             + viewpoint_descriptor * viewpoint_gate
-            + self.descriptor_skip(feature)
+            + self.descriptor_skip(descriptor_feature)
         )
         descriptor_gated = descriptor_base * (1.0 + torch.sigmoid(self.descriptor_attention(multiscale_context)))
-        heatmap = self.heatmap(context) + _apply_anisotropic_viewpoint_projection(
+        heatmap = self.heatmap(keypoint_context) + _apply_anisotropic_viewpoint_projection(
             self.heatmap_viewpoint_context,
-            context,
+            keypoint_context,
         )
-        return context, heatmap, descriptor_gated
+        keypoint_offsets = torch.tanh(self.keypoint_offsets(keypoint_context)) * 0.5
+        geometry_context = self.geometry_context(descriptor_shared_context)
+        return geometry_context, heatmap, descriptor_gated, keypoint_offsets
 
-    def forward(self, feature: torch.Tensor) -> SparseHeadOutput:
+    def forward(self, feature: torch.Tensor, descriptor_feature: torch.Tensor | None = None) -> SparseHeadOutput:
         if feature.dim() != 4 or feature.size(1) != self.input_channels:
             raise ValueError("feature tensor must have shape BxCxHxW with the configured channel count")
-        context, heatmap_sum, descriptor_gated = self._descriptor_branch(feature)
-        descriptor_sum = (
+        if descriptor_feature is not None and (
+            descriptor_feature.dim() != 4
+            or descriptor_feature.size(1) != self.input_channels
+            or descriptor_feature.shape[-2:] != feature.shape[-2:]
+        ):
+            raise ValueError("descriptor_feature must have shape BxCxHxW matching the keypoint feature grid")
+        geometry_context, heatmap_sum, descriptor_gated, keypoint_offsets = self._descriptor_branch(
+            feature,
+            descriptor_feature,
+        )
+        descriptor_branches = [
             descriptor_gated
             + self.descriptor_orientation_alignment(descriptor_gated)
-            + self.descriptor_dilated_context(descriptor_gated)
-        )
+            + self.descriptor_dilated_context(descriptor_gated),
+        ]
         for turns in range(1, 4):
             rotated_feature = _rotate_feature_map(feature, turns)
-            _, rotated_heatmap, rotated_descriptor_gated = self._descriptor_branch(rotated_feature)
+            rotated_descriptor_feature = _rotate_feature_map(
+                descriptor_feature if descriptor_feature is not None else feature,
+                turns,
+            )
+            _, rotated_heatmap, rotated_descriptor_gated, _ = self._descriptor_branch(
+                rotated_feature,
+                rotated_descriptor_feature,
+            )
             heatmap_sum = heatmap_sum + _rotate_feature_map(rotated_heatmap, -turns)
             rotated_descriptor = _rotate_feature_map(rotated_descriptor_gated, -turns)
             orientation_aligned = _align_descriptor_orientation_channels(rotated_descriptor, turns)
-            descriptor_sum = (
-                descriptor_sum
-                + rotated_descriptor
+            descriptor_branches.append(
+                rotated_descriptor
                 + self.descriptor_orientation_alignment(orientation_aligned)
-                + self.descriptor_dilated_context(rotated_descriptor)
+                + self.descriptor_dilated_context(rotated_descriptor),
             )
+        descriptor_stack = torch.stack(descriptor_branches, dim=1)
+        quality_logits = torch.stack([self.descriptor_branch_quality(branch) for branch in descriptor_branches], dim=1)
+        branch_weights = torch.softmax(quality_logits, dim=1)
+        descriptor_invariant = (descriptor_stack * branch_weights).sum(dim=1)
+        descriptor_equivariant = descriptor_branches[0]
+        descriptor_sum = self.descriptor_rotation_fusion(torch.cat([descriptor_invariant, descriptor_equivariant], dim=1))
         heatmap = torch.sigmoid(heatmap_sum / 4.0)
-        descriptors = _normalize_channels(descriptor_sum / 4.0)
-        scale = F.softplus(self.scale(context)) + 1.0e-3
-        orientation = _normalize_channels(self.orientation(context))
-        affine = self.affine(context)
-        return SparseHeadOutput(heatmap, descriptors, scale, orientation, affine)
+        descriptors = _normalize_channels(descriptor_sum)
+        scale = torch.exp(torch.clamp(self.scale(geometry_context), min=-2.0, max=2.0))
+        orientation = _normalize_channels(self.orientation(geometry_context))
+        affine_delta = torch.tanh(self.affine(geometry_context)) * 0.1
+        identity = affine_delta.new_tensor([1.0, 0.0, 0.0, 1.0]).view(1, 4, 1, 1)
+        affine = identity + affine_delta
+        descriptors = geometry_aware_descriptor_pool(descriptors, orientation, scale, affine)
+        return SparseHeadOutput(heatmap, descriptors, scale, orientation, affine, keypoint_offsets)
 
 
 def make_xy_grid(height: int, width: int, *, device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
     y, x = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
     return torch.stack([x.to(dtype), y.to(dtype)], dim=-1)
+
+
+def geometry_aware_descriptor_pool(
+    descriptors: torch.Tensor,
+    orientation: torch.Tensor,
+    scale: torch.Tensor,
+    affine: torch.Tensor,
+    *,
+    radius: float = 0.75,
+) -> torch.Tensor:
+    """Pool dense descriptors on a small canonical grid controlled by predicted geometry."""
+
+    if descriptors.dim() != 4:
+        raise ValueError("descriptors must have shape BxDxHxW")
+    if orientation.shape[:2] != (descriptors.size(0), 2) or orientation.shape[-2:] != descriptors.shape[-2:]:
+        raise ValueError("orientation must have shape Bx2xHxW matching descriptors")
+    if scale.shape[:2] != (descriptors.size(0), 1) or scale.shape[-2:] != descriptors.shape[-2:]:
+        raise ValueError("scale must have shape Bx1xHxW matching descriptors")
+    if affine.shape[:2] != (descriptors.size(0), 4) or affine.shape[-2:] != descriptors.shape[-2:]:
+        raise ValueError("affine must have shape Bx4xHxW matching descriptors")
+    batch, _, height, width = descriptors.shape
+    if height <= 1 or width <= 1:
+        return _normalize_channels(descriptors)
+    base_xy = make_xy_grid(height, width, device=descriptors.device, dtype=descriptors.dtype)
+    base_xy = base_xy.permute(2, 0, 1).unsqueeze(0).expand(batch, 2, height, width)
+    ori = F.normalize(orientation.to(descriptors.dtype), p=2, dim=1, eps=1.0e-6)
+    tangent = ori
+    normal = torch.stack([-ori[:, 1], ori[:, 0]], dim=1)
+    clamped_scale = scale.to(descriptors.dtype).clamp(0.5, 2.0)
+    a00, a01, a10, a11 = [affine[:, index : index + 1].to(descriptors.dtype) for index in range(4)]
+
+    def sample(offset_x: torch.Tensor, offset_y: torch.Tensor) -> torch.Tensor:
+        warped_x = a00 * offset_x + a01 * offset_y
+        warped_y = a10 * offset_x + a11 * offset_y
+        sample_xy = base_xy + torch.cat([warped_x, warped_y], dim=1)
+        grid_x = sample_xy[:, 0] * (2.0 / float(max(1, width - 1))) - 1.0
+        grid_y = sample_xy[:, 1] * (2.0 / float(max(1, height - 1))) - 1.0
+        grid = torch.stack([grid_x, grid_y], dim=-1)
+        return F.grid_sample(descriptors, grid, mode="bilinear", padding_mode="border", align_corners=True)
+
+    step = clamped_scale * float(radius)
+    zero = torch.zeros_like(step)
+    offsets = [
+        (zero, zero),
+        (tangent[:, 0:1] * step, tangent[:, 1:2] * step),
+        (-tangent[:, 0:1] * step, -tangent[:, 1:2] * step),
+        (normal[:, 0:1] * step, normal[:, 1:2] * step),
+        (-normal[:, 0:1] * step, -normal[:, 1:2] * step),
+    ]
+    pooled = torch.stack([sample(dx, dy) for dx, dy in offsets], dim=0).mean(dim=0)
+    return _normalize_channels(0.5 * descriptors + 0.5 * pooled)
 
 
 def _shifted_feature(feature: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
@@ -351,17 +558,90 @@ class DescriptorMatcher(nn.Module):
         return torch.bmm(normalized_a, normalized_b.transpose(1, 2)) / math.sqrt(float(self.descriptor_dim))
 
 
-def prepare_keypoints_for_embedding(keypoints: torch.Tensor) -> torch.Tensor:
+def prepare_keypoints_for_embedding(keypoints: torch.Tensor, *, meta_dim: int = 2) -> torch.Tensor:
+    if meta_dim <= 0:
+        raise ValueError("meta_dim must be positive")
     prepared = keypoints.to(dtype=torch.float32)
     if prepared.size(0) == 0:
-        return prepared
+        return prepared.new_empty((0, meta_dim))
     min_xy = prepared.min(dim=0, keepdim=True).values
     max_xy = prepared.max(dim=0, keepdim=True).values
     center = (min_xy + max_xy) * 0.5
     span = (max_xy - min_xy).max(dim=1, keepdim=True).values.clamp_min(1.0e-6)
     centered = (prepared - center) * 2.0 / span
     radius = centered.pow(2).sum(dim=1, keepdim=True).sqrt()
-    return torch.cat([radius, radius.pow(2)], dim=1)
+    if meta_dim == 1:
+        return radius
+    legacy = torch.cat([radius, radius.pow(2)], dim=1)
+    if meta_dim == 2:
+        return legacy
+    spatial = torch.cat([centered, legacy], dim=1)
+    if meta_dim <= spatial.size(1):
+        return spatial[:, :meta_dim]
+    return torch.cat([spatial, spatial.new_zeros((spatial.size(0), meta_dim - spatial.size(1)))], dim=1)
+
+
+def prepare_graph_keypoint_metadata(
+    keypoints: torch.Tensor,
+    *,
+    meta_dim: int,
+    scores: torch.Tensor | None = None,
+    scale: torch.Tensor | None = None,
+    orientation: torch.Tensor | None = None,
+    affine: torch.Tensor | None = None,
+    quality: torch.Tensor | None = None,
+    local_contrast: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build v2.1 GraphMatcher metadata from selected sparse keypoints."""
+
+    if meta_dim <= 0:
+        raise ValueError("meta_dim must be positive")
+    base = prepare_keypoints_for_embedding(keypoints, meta_dim=max(meta_dim, 4))
+    count = keypoints.size(0)
+    device = keypoints.device
+    dtype = torch.float32
+
+    def vector(value: torch.Tensor | None, default: float, width: int = 1) -> torch.Tensor:
+        if value is None:
+            return torch.full((count, width), float(default), dtype=dtype, device=device)
+        value = value.to(device=device, dtype=dtype)
+        if value.dim() == 1:
+            value = value.unsqueeze(1)
+        if value.size(0) != count:
+            raise ValueError("metadata vectors must have one row per keypoint")
+        if value.size(1) < width:
+            value = torch.cat([value, value.new_full((count, width - value.size(1)), float(default))], dim=1)
+        return value[:, :width]
+
+    score_column = vector(scores, 1.0)
+    scale_column = vector(scale, 1.0).clamp_min(1.0e-4).log()
+    orientation_columns = F.normalize(vector(orientation, 0.0, width=2), p=2, dim=1, eps=1.0e-6)
+    if orientation is None:
+        orientation_columns[:, 0] = 1.0
+        orientation_columns[:, 1] = 0.0
+    affine_columns = vector(affine, 0.0, width=4)
+    if affine is None:
+        affine_columns[:, 0] = 1.0
+        affine_columns[:, 3] = 1.0
+    quality_column = vector(quality, 1.0)
+    contrast_column = vector(local_contrast, 0.0)
+    uncertainty_column = (1.0 - quality_column).clamp(0.0, 1.0)
+    metadata = torch.cat(
+        [
+            base[:, :4],
+            score_column,
+            scale_column,
+            orientation_columns,
+            affine_columns,
+            quality_column,
+            contrast_column,
+            uncertainty_column,
+        ],
+        dim=1,
+    )
+    if metadata.size(1) >= meta_dim:
+        return metadata[:, :meta_dim].contiguous()
+    return torch.cat([metadata, metadata.new_zeros((count, meta_dim - metadata.size(1)))], dim=1).contiguous()
 
 
 def _attend(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, hidden_dim: int) -> torch.Tensor:
@@ -409,18 +689,95 @@ class PlanetaryGraphAttentionLayer(nn.Module):
 
 
 class PlanetaryGraphMatcher(nn.Module):
-    def __init__(self, descriptor_dim: int, hidden_dim: int, attention_layers: int = 1) -> None:
+    def __init__(
+        self,
+        descriptor_dim: int,
+        hidden_dim: int,
+        attention_layers: int = 1,
+        keypoint_meta_dim: int = 2,
+        candidate_topk: int = 64,
+    ) -> None:
         super().__init__()
-        if descriptor_dim <= 0 or hidden_dim <= 0 or attention_layers <= 0:
-            raise ValueError("descriptor_dim, hidden_dim, and attention_layers must be positive")
+        if descriptor_dim <= 0 or hidden_dim <= 0 or attention_layers <= 0 or keypoint_meta_dim <= 0:
+            raise ValueError("descriptor_dim, hidden_dim, attention_layers, and keypoint_meta_dim must be positive")
         self.descriptor_dim = descriptor_dim
         self.hidden_dim = hidden_dim
+        self.keypoint_meta_dim = keypoint_meta_dim
+        self.candidate_topk = int(candidate_topk)
         self.descriptor_projection = nn.Linear(descriptor_dim, hidden_dim)
-        self.keypoint_projection = nn.Linear(2, hidden_dim)
+        self.keypoint_projection = nn.Linear(keypoint_meta_dim, hidden_dim)
         self.score_projection = nn.Linear(hidden_dim, hidden_dim)
+        self.geometry_bias = nn.Sequential(
+            nn.Linear(8, max(16, hidden_dim // 8)),
+            nn.GELU(),
+            nn.Linear(max(16, hidden_dim // 8), 1),
+        )
         self.logit_scale = nn.Parameter(torch.ones(1) * math.sqrt(float(hidden_dim)))
+        self.raw_score_temperature = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
+        self.graph_delta_scale = nn.Parameter(torch.tensor(0.20, dtype=torch.float32))
         self.dustbin_bias = nn.Parameter(torch.zeros(1))
         self.attention_layers = nn.ModuleList([PlanetaryGraphAttentionLayer(hidden_dim) for _ in range(attention_layers)])
+        _zero_module(self.geometry_bias[-1])
+
+    def _metadata(self, keypoints_or_meta: torch.Tensor) -> torch.Tensor:
+        if keypoints_or_meta.dim() != 2:
+            raise ValueError("graph matcher keypoints/meta must have shape NxC")
+        if keypoints_or_meta.size(1) == self.keypoint_meta_dim:
+            return keypoints_or_meta.to(dtype=torch.float32)
+        if keypoints_or_meta.size(1) < 2:
+            raise ValueError("graph matcher keypoints must contain at least x/y")
+        return prepare_keypoints_for_embedding(keypoints_or_meta[:, :2], meta_dim=self.keypoint_meta_dim)
+
+    def _geometry_compatibility_bias(self, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
+        def column(meta: torch.Tensor, index: int, default: float = 0.0) -> torch.Tensor:
+            if meta.size(1) <= index:
+                return meta.new_full((meta.size(0),), default)
+            return meta[:, index]
+
+        ax = column(meta_a, 0)[:, None]
+        ay = column(meta_a, 1)[:, None]
+        bx = column(meta_b, 0)[None, :]
+        by = column(meta_b, 1)[None, :]
+        score_delta = column(meta_a, 4)[:, None] - column(meta_b, 4)[None, :]
+        scale_delta = column(meta_a, 5)[:, None] - column(meta_b, 5)[None, :]
+        aox = column(meta_a, 6, 1.0)[:, None]
+        aoy = column(meta_a, 7)[:, None]
+        box = column(meta_b, 6, 1.0)[None, :]
+        boy = column(meta_b, 7)[None, :]
+        orientation_cos = (aox * box + aoy * boy).clamp(-1.0, 1.0)
+        quality_pair = 0.5 * (column(meta_a, 12, 1.0)[:, None] + column(meta_b, 12, 1.0)[None, :])
+        contrast_pair = 0.5 * (column(meta_a, 13)[:, None] + column(meta_b, 13)[None, :])
+        dx = ax - bx
+        dy = ay - by
+        features = torch.stack(
+            [
+                dx,
+                dy,
+                torch.sqrt(dx.square() + dy.square()).clamp_max(4.0),
+                score_delta,
+                scale_delta,
+                orientation_cos,
+                quality_pair,
+                contrast_pair,
+            ],
+            dim=-1,
+        )
+        return self.geometry_bias(features).squeeze(-1)
+
+    def _candidate_mask(self, desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+        count_a = desc_a.size(0)
+        count_b = desc_b.size(0)
+        if self.candidate_topk <= 0 or self.candidate_topk >= count_b:
+            return torch.ones(count_a, count_b, dtype=torch.bool, device=desc_a.device)
+        similarity = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
+        mask = torch.zeros(count_a, count_b, dtype=torch.bool, device=desc_a.device)
+        row_k = min(self.candidate_topk, count_b)
+        row_indices = similarity.topk(row_k, dim=1).indices
+        mask.scatter_(1, row_indices, True)
+        col_k = min(self.candidate_topk, count_a)
+        col_indices = similarity.topk(col_k, dim=0).indices
+        mask.scatter_(0, col_indices, True)
+        return mask
 
     def forward(
         self,
@@ -431,21 +788,26 @@ class PlanetaryGraphMatcher(nn.Module):
     ) -> GraphMatcherOutput:
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
-        if keypoints_a.dim() != 2 or keypoints_b.dim() != 2 or keypoints_a.size(1) != 2 or keypoints_b.size(1) != 2:
-            raise ValueError("graph matcher keypoints must have shape Nx2")
         if descriptors_a.size(0) != keypoints_a.size(0) or descriptors_b.size(0) != keypoints_b.size(0):
             raise ValueError("graph matcher descriptor and keypoint counts must match")
         desc_a = descriptors_a.to(dtype=torch.float32)
         desc_b = descriptors_b.to(dtype=torch.float32)
-        kp_a = prepare_keypoints_for_embedding(keypoints_a).to(device=desc_a.device)
-        kp_b = prepare_keypoints_for_embedding(keypoints_b).to(device=desc_b.device)
+        kp_a = self._metadata(keypoints_a).to(device=desc_a.device)
+        kp_b = self._metadata(keypoints_b).to(device=desc_b.device)
         embed_a = torch.relu(self.descriptor_projection(desc_a) + self.keypoint_projection(kp_a))
         embed_b = torch.relu(self.descriptor_projection(desc_b) + self.keypoint_projection(kp_b))
         for layer in self.attention_layers:
             embed_a, embed_b = layer(embed_a, embed_b)
         embed_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
         embed_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
-        pair_logits = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
+        raw_similarity = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
+        graph_delta = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
+        graph_delta = graph_delta + self._geometry_compatibility_bias(kp_a, kp_b)
+        raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
+        delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
+        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta
+        candidate_mask = self._candidate_mask(desc_a, desc_b)
+        pair_logits = pair_logits.masked_fill(~candidate_mask, -1.0e4)
         logits = torch.zeros(
             descriptors_a.size(0) + 1,
             descriptors_b.size(0) + 1,
@@ -454,16 +816,19 @@ class PlanetaryGraphMatcher(nn.Module):
         ) + self.dustbin_bias
         logits[: descriptors_a.size(0), : descriptors_b.size(0)] = pair_logits
         row_logits = logits[: descriptors_a.size(0), :]
-        best_values, best_indices = row_logits.max(dim=1)
+        row_prob = torch.softmax(logits[: descriptors_a.size(0), :], dim=1)[:, : descriptors_b.size(0)]
+        col_prob = torch.softmax(logits[:, : descriptors_b.size(0)], dim=0)[: descriptors_a.size(0), :]
+        dual_scores = row_prob * col_prob
+        best_values, best_indices = dual_scores.max(dim=1)
         source_indices = torch.arange(descriptors_a.size(0), device=best_indices.device)
-        inlier_mask = best_indices.lt(descriptors_b.size(0))
+        inlier_mask = best_values.gt(torch.softmax(row_logits, dim=1)[:, -1])
         if descriptors_a.size(0) > 0 and descriptors_b.size(0) > 0:
-            reverse_best = pair_logits.max(dim=0).indices
+            reverse_best = dual_scores.max(dim=0).indices
             mutual_sources = reverse_best.index_select(0, best_indices.clamp(0, descriptors_b.size(0) - 1))
             inlier_mask = inlier_mask & mutual_sources.eq(source_indices)
         source_indices = source_indices[inlier_mask]
         target_indices = best_indices[inlier_mask]
-        probabilities = torch.softmax(row_logits, dim=1).max(dim=1).values[inlier_mask]
+        probabilities = best_values[inlier_mask]
         matches = torch.stack([source_indices, target_indices], dim=1).to(device="cpu", dtype=torch.long).contiguous()
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
         return GraphMatcherOutput(logits.contiguous(), matches, scores)
@@ -475,7 +840,7 @@ def make_rotation_invariant_texture_descriptor(
     descriptor_width: int,
     descriptor_dim: int,
 ) -> torch.Tensor:
-    base = image
+    base = torch.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
     if base.size(1) != 1:
         base = base.mean(dim=1, keepdim=True)
     channels = [base]
@@ -489,16 +854,48 @@ def make_rotation_invariant_texture_descriptor(
     radius = torch.sqrt((x - center_x).pow(2) + (y - center_y).pow(2)) / max_radius
     radius = radius.expand(base.size(0), 1, height, width).contiguous()
     channels.extend([radius, radius.pow(2), base * radius])
+    local_mean = F.avg_pool2d(base, kernel_size=15, stride=1, padding=7, count_include_pad=False)
+    local_sq_mean = F.avg_pool2d(base.square(), kernel_size=15, stride=1, padding=7, count_include_pad=False)
+    local_std = (local_sq_mean - local_mean.square()).clamp_min(0.0).sqrt()
+    local_normalized = (base - local_mean) / local_std.add(1.0e-3)
+    channels.extend([local_normalized, local_std, (base - local_mean).abs()])
     for kernel in (3, 7, 15, 31):
         blur = F.avg_pool2d(base, kernel_size=kernel, stride=1, padding=kernel // 2, count_include_pad=False)
         channels.extend([blur, (base - blur).abs()])
+    dog_small = F.avg_pool2d(base, kernel_size=3, stride=1, padding=1, count_include_pad=False) - F.avg_pool2d(
+        base,
+        kernel_size=7,
+        stride=1,
+        padding=3,
+        count_include_pad=False,
+    )
+    dog_large = F.avg_pool2d(base, kernel_size=7, stride=1, padding=3, count_include_pad=False) - F.avg_pool2d(
+        base,
+        kernel_size=21,
+        stride=1,
+        padding=10,
+        count_include_pad=False,
+    )
+    laplacian = (
+        -4.0 * base
+        + torch.roll(base, shifts=1, dims=2)
+        + torch.roll(base, shifts=-1, dims=2)
+        + torch.roll(base, shifts=1, dims=3)
+        + torch.roll(base, shifts=-1, dims=3)
+    )
+    channels.extend([dog_small, dog_large, laplacian.abs()])
     dx = (base - torch.roll(base, shifts=1, dims=3)).abs()
     dy = (base - torch.roll(base, shifts=1, dims=2)).abs()
     gradient = dx + dy
+    signed_dx = base - torch.roll(base, shifts=1, dims=3)
+    signed_dy = base - torch.roll(base, shifts=1, dims=2)
+    grad_norm = torch.sqrt(signed_dx.square() + signed_dy.square()).clamp_min(1.0e-6)
+    channels.extend([signed_dx / grad_norm, signed_dy / grad_norm, gradient])
     for kernel in (3, 7, 11):
         channels.append(F.avg_pool2d(gradient, kernel_size=kernel, stride=1, padding=kernel // 2, count_include_pad=False))
     for ring_radius in (1, 2, 4, 8):
         diffs = []
+        signed_diffs = []
         for dy_offset, dx_offset in (
             (-ring_radius, 0),
             (ring_radius, 0),
@@ -509,14 +906,20 @@ def make_rotation_invariant_texture_descriptor(
             (ring_radius, -ring_radius),
             (ring_radius, ring_radius),
         ):
-            diffs.append((base - torch.roll(base, shifts=(dy_offset, dx_offset), dims=(2, 3))).abs())
+            shifted = torch.roll(base, shifts=(dy_offset, dx_offset), dims=(2, 3))
+            signed = base - shifted
+            signed_diffs.append(signed)
+            diffs.append(signed.abs())
         ring = torch.stack(diffs, dim=1)
+        signed_ring = torch.stack(signed_diffs, dim=1)
         ring_mean = ring.mean(dim=1)
         channels.append(ring_mean)
         channels.append(ring.max(dim=1).values)
         centered_ring = ring - ring.mean(dim=1, keepdim=True)
         channels.append(centered_ring.pow(2).mean(dim=1).sqrt())
         channels.append(ring_mean * radius)
+        channels.append(torch.tanh(signed_ring * 8.0).mean(dim=1))
+        channels.append((signed_ring > 0.0).to(base.dtype).mean(dim=1) * 2.0 - 1.0)
     channels.append(gradient * radius)
     target = torch.cat(channels, dim=1)
     target = F.interpolate(target, size=(descriptor_height, descriptor_width), mode="bilinear", align_corners=False)
@@ -538,6 +941,74 @@ def blend_rotation_invariant_texture_descriptor(
     return _normalize_channels(descriptors + target * blend_weight)
 
 
+class TextureDescriptorAdapter(nn.Module):
+    """Trainable residual adapter for the analytic texture descriptor."""
+
+    def __init__(self, descriptor_dim: int) -> None:
+        super().__init__()
+        if descriptor_dim <= 0:
+            raise ValueError("descriptor_dim must be positive")
+        self.descriptor_dim = descriptor_dim
+        self.residual = nn.Conv2d(descriptor_dim, descriptor_dim, 1)
+        _zero_module(self.residual)
+
+    def forward(self, texture: torch.Tensor) -> torch.Tensor:
+        if texture.dim() != 4 or texture.size(1) != self.descriptor_dim:
+            raise ValueError("texture tensor must have shape BxDxHxW with the configured descriptor dimension")
+        return _normalize_channels(texture + self.residual(texture))
+
+
+class DescriptorFusionAdapter(nn.Module):
+    """Higher-capacity residual fusion for learned and texture descriptors."""
+
+    def __init__(self, descriptor_dim: int, hidden_dim: int | None = None) -> None:
+        super().__init__()
+        if descriptor_dim <= 0:
+            raise ValueError("descriptor_dim must be positive")
+        self.descriptor_dim = descriptor_dim
+        self.hidden_dim = hidden_dim if hidden_dim is not None else max(16, descriptor_dim * 2)
+        self.input_projection = nn.Conv2d(descriptor_dim * 4, self.hidden_dim, 1)
+        self.context = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim, 3, padding=1),
+            nn.GELU(),
+        )
+        self.texture_gate = nn.Conv2d(descriptor_dim * 4, 1, 1)
+        self.output = nn.Conv2d(self.hidden_dim, descriptor_dim, 1)
+        _zero_module(self.texture_gate)
+        _zero_module(self.output)
+
+    def forward(self, learned: torch.Tensor, texture: torch.Tensor, *, blend_weight: float) -> torch.Tensor:
+        if learned.shape != texture.shape or learned.dim() != 4 or learned.size(1) != self.descriptor_dim:
+            raise ValueError("learned and texture descriptors must have matching BxDxHxW shapes")
+        initial_weighted_texture = texture * float(blend_weight)
+        gate_features = torch.cat(
+            [
+                learned,
+                initial_weighted_texture,
+                learned - initial_weighted_texture,
+                learned * initial_weighted_texture,
+            ],
+            dim=1,
+        )
+        texture_gate = 1.0 + 0.5 * torch.tanh(self.texture_gate(gate_features))
+        weighted_texture = initial_weighted_texture * texture_gate
+        base = _normalize_channels(learned + weighted_texture)
+        features = torch.cat(
+            [
+                learned,
+                weighted_texture,
+                learned - weighted_texture,
+                learned * weighted_texture,
+            ],
+            dim=1,
+        )
+        residual = self.output(self.context(self.input_projection(features)))
+        return _normalize_channels(base + residual)
+
+
 def make_rotation_invariant_texture_saliency(image: torch.Tensor, target_height: int, target_width: int) -> torch.Tensor:
     base = image
     if base.size(1) != 1:
@@ -554,31 +1025,167 @@ def make_rotation_invariant_texture_saliency(image: torch.Tensor, target_height:
     return (saliency - min_value) / (max_value - min_value).clamp_min(1.0e-6)
 
 
+class QualityHead(nn.Module):
+    """Estimate descriptor/keypoint reliability from fused descriptors and local image structure."""
+
+    def __init__(self, descriptor_dim: int) -> None:
+        super().__init__()
+        if descriptor_dim <= 0:
+            raise ValueError("descriptor_dim must be positive")
+        hidden = max(16, descriptor_dim // 2)
+        self.predictor = nn.Sequential(
+            nn.Conv2d(descriptor_dim + 3, hidden, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, 1, 1),
+        )
+        _zero_module(self.predictor[-1])
+
+    def forward(
+        self,
+        descriptors: torch.Tensor,
+        heatmap: torch.Tensor,
+        texture_saliency: torch.Tensor,
+        dense_confidence: torch.Tensor,
+    ) -> torch.Tensor:
+        if descriptors.dim() != 4:
+            raise ValueError("descriptors must have shape BxDxHxW")
+        auxiliaries = []
+        for tensor in (heatmap, texture_saliency, dense_confidence):
+            if tensor.dim() != 4 or tensor.size(0) != descriptors.size(0) or tensor.size(1) != 1:
+                raise ValueError("quality auxiliary maps must have shape Bx1xHxW")
+            if tensor.shape[-2:] != descriptors.shape[-2:]:
+                tensor = F.interpolate(tensor, size=descriptors.shape[-2:], mode="bilinear", align_corners=False)
+            auxiliaries.append(tensor.to(descriptors.dtype))
+        logits = self.predictor(torch.cat([descriptors, *auxiliaries], dim=1))
+        return torch.sigmoid(logits + 0.5 * auxiliaries[0] + 0.5 * auxiliaries[1] + 0.25 * auxiliaries[2])
+
+
+class SemiDenseCandidateBranch(nn.Module):
+    """Coarse detector-free candidate branch for weak-texture regions."""
+
+    def __init__(self, descriptor_dim: int, projection_dim: int = 64, max_grid: int = 32) -> None:
+        super().__init__()
+        if descriptor_dim <= 0 or projection_dim <= 0 or max_grid <= 0:
+            raise ValueError("descriptor_dim, projection_dim and max_grid must be positive")
+        self.descriptor_dim = descriptor_dim
+        self.projection_dim = projection_dim
+        self.max_grid = max_grid
+        self.projection = nn.Sequential(
+            nn.Conv2d(descriptor_dim, projection_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(projection_dim, projection_dim, 1),
+        )
+
+    def _coarse(self, descriptors: torch.Tensor) -> torch.Tensor:
+        if descriptors.dim() != 4 or descriptors.size(1) != self.descriptor_dim:
+            raise ValueError("semi-dense descriptors must have shape BxDxHxW")
+        height, width = descriptors.shape[-2:]
+        target_height = min(height, self.max_grid)
+        target_width = min(width, self.max_grid)
+        coarse = descriptors
+        if (target_height, target_width) != (height, width):
+            coarse = F.adaptive_avg_pool2d(coarse, (target_height, target_width))
+        return F.normalize(self.projection(coarse), p=2, dim=1, eps=1.0e-12)
+
+    def forward(
+        self,
+        descriptors_a: torch.Tensor,
+        descriptors_b: torch.Tensor,
+        *,
+        max_candidates: int,
+        min_score: float = 0.0,
+    ) -> SemiDenseCandidateOutput:
+        if descriptors_a.size(0) != 1 or descriptors_b.size(0) != 1:
+            raise ValueError("semi-dense candidate branch currently expects single-pair descriptor maps")
+        if max_candidates <= 0:
+            empty_xy = descriptors_a.new_empty((0, 2))
+            empty_scores = descriptors_a.new_empty((0,))
+            return SemiDenseCandidateOutput(empty_xy, empty_xy.clone(), empty_scores)
+        coarse_a = self._coarse(descriptors_a)
+        coarse_b = self._coarse(descriptors_b)
+        _, channels, coarse_ha, coarse_wa = coarse_a.shape
+        _, _, coarse_hb, coarse_wb = coarse_b.shape
+        flat_a = coarse_a.squeeze(0).permute(1, 2, 0).reshape(-1, channels)
+        flat_b = coarse_b.squeeze(0).permute(1, 2, 0).reshape(-1, channels)
+        logits = flat_a @ flat_b.T / math.sqrt(float(channels))
+        dual_scores = torch.softmax(logits, dim=1) * torch.softmax(logits, dim=0)
+        flat_scores = dual_scores.reshape(-1)
+        candidate_count = min(int(max_candidates), int(flat_scores.numel()))
+        if candidate_count == 0:
+            empty_xy = descriptors_a.new_empty((0, 2))
+            return SemiDenseCandidateOutput(empty_xy, empty_xy.clone(), descriptors_a.new_empty((0,)))
+        values, indices = flat_scores.topk(candidate_count)
+        keep = values >= float(min_score)
+        values = values[keep]
+        indices = indices[keep]
+        if values.numel() == 0:
+            empty_xy = descriptors_a.new_empty((0, 2))
+            return SemiDenseCandidateOutput(empty_xy, empty_xy.clone(), values)
+        source = torch.div(indices, flat_b.size(0), rounding_mode="floor")
+        target = indices.remainder(flat_b.size(0))
+        source_y = torch.div(source, coarse_wa, rounding_mode="floor").to(descriptors_a.dtype)
+        source_x = source.remainder(coarse_wa).to(descriptors_a.dtype)
+        target_y = torch.div(target, coarse_wb, rounding_mode="floor").to(descriptors_b.dtype)
+        target_x = target.remainder(coarse_wb).to(descriptors_b.dtype)
+
+        def scale_coords(x: torch.Tensor, y: torch.Tensor, coarse_h: int, coarse_w: int, full_h: int, full_w: int) -> torch.Tensor:
+            if coarse_w > 1:
+                x = x * float(max(1, full_w - 1)) / float(coarse_w - 1)
+            if coarse_h > 1:
+                y = y * float(max(1, full_h - 1)) / float(coarse_h - 1)
+            return torch.stack([x, y], dim=1)
+
+        keypoints_a = scale_coords(source_x, source_y, coarse_ha, coarse_wa, descriptors_a.size(2), descriptors_a.size(3))
+        keypoints_b = scale_coords(target_x, target_y, coarse_hb, coarse_wb, descriptors_b.size(2), descriptors_b.size(3))
+        return SemiDenseCandidateOutput(keypoints_a.contiguous(), keypoints_b.contiguous(), values.contiguous())
+
+
 class PlanetaryFeatureMatcher(nn.Module):
     def __init__(
         self,
         *,
         input_channels: int = 1,
-        base_channels: int = 48,
-        descriptor_dim: int = 192,
-        graph_hidden_dim: int = 384,
+        base_channels: int = 64,
+        descriptor_dim: int = 256,
+        graph_hidden_dim: int = 512,
         graph_attention_layers: int = 8,
+        graph_keypoint_meta_dim: int = 16,
     ) -> None:
         super().__init__()
-        self.config = CheckpointConfig(input_channels, base_channels, descriptor_dim, graph_hidden_dim, graph_attention_layers)
+        self.config = CheckpointConfig(
+            input_channels,
+            base_channels,
+            descriptor_dim,
+            graph_hidden_dim,
+            graph_attention_layers,
+            graph_keypoint_meta_dim,
+        )
         self.backbone = Backbone(input_channels, base_channels)
+        self.dual_fpn = DualFPNLite(base_channels)
         self.sparse_head = SparseHead(base_channels * 2, descriptor_dim)
+        self.texture_adapter = TextureDescriptorAdapter(descriptor_dim)
+        self.descriptor_fusion = DescriptorFusionAdapter(descriptor_dim)
         self.dense_head = DenseHead(base_channels)
-        self.graph_matcher = PlanetaryGraphMatcher(descriptor_dim, graph_hidden_dim, graph_attention_layers)
+        self.quality_head = QualityHead(descriptor_dim)
+        self.semi_dense_branch = SemiDenseCandidateBranch(descriptor_dim)
+        self.graph_matcher = PlanetaryGraphMatcher(
+            descriptor_dim,
+            graph_hidden_dim,
+            graph_attention_layers,
+            graph_keypoint_meta_dim,
+        )
 
     def learned_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
         features = self.backbone(image)
-        sparse = self.sparse_head(features[1])
+        p2_keypoint, p2_descriptor = self.dual_fpn(features)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
         return sparse.descriptors
 
-    def texture_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
+    def raw_texture_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
         descriptor_height = max(1, (image.size(2) + 3) // 4)
@@ -590,6 +1197,26 @@ class PlanetaryFeatureMatcher(nn.Module):
             self.config.descriptor_dim,
         )
 
+    def texture_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
+        return self.texture_adapter(self.raw_texture_descriptor_map_single(image))
+
+    def fuse_descriptor_maps(
+        self,
+        learned_descriptors: torch.Tensor,
+        image: torch.Tensor,
+        *,
+        texture_blend_weight: float = INFERENCE_TEXTURE_BLEND_WEIGHT,
+    ) -> torch.Tensor:
+        texture = self.texture_adapter(
+            make_rotation_invariant_texture_descriptor(
+                image,
+                learned_descriptors.size(2),
+                learned_descriptors.size(3),
+                learned_descriptors.size(1),
+            )
+        )
+        return self.descriptor_fusion(learned_descriptors, texture, blend_weight=texture_blend_weight)
+
     def descriptor_map_single(
         self,
         image: torch.Tensor,
@@ -599,8 +1226,9 @@ class PlanetaryFeatureMatcher(nn.Module):
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
         features = self.backbone(image)
-        sparse = self.sparse_head(features[1])
-        return blend_rotation_invariant_texture_descriptor(sparse.descriptors, image, texture_blend_weight)
+        p2_keypoint, p2_descriptor = self.dual_fpn(features)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
+        return self.fuse_descriptor_maps(sparse.descriptors, image, texture_blend_weight=texture_blend_weight)
 
     def forward_single(
         self,
@@ -611,12 +1239,25 @@ class PlanetaryFeatureMatcher(nn.Module):
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
         features = self.backbone(image)
-        sparse = self.sparse_head(features[1])
-        descriptors = blend_rotation_invariant_texture_descriptor(sparse.descriptors, image, texture_blend_weight)
-        heatmap = make_rotation_invariant_texture_saliency(image, sparse.heatmap.size(2), sparse.heatmap.size(3))
+        p2_keypoint, p2_descriptor = self.dual_fpn(features)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
+        descriptors = self.fuse_descriptor_maps(sparse.descriptors, image, texture_blend_weight=texture_blend_weight)
+        texture_saliency = make_rotation_invariant_texture_saliency(image, sparse.heatmap.size(2), sparse.heatmap.size(3))
         dense = self.dense_head(features[0], features[0])
         dense_confidence = F.interpolate(dense.confidence, size=sparse.heatmap.shape[-2:], mode="nearest")
-        return RawFeatureMaps(heatmap, descriptors, sparse.scale, sparse.orientation, sparse.affine, dense_confidence)
+        quality = self.quality_head(descriptors, sparse.heatmap, texture_saliency, dense_confidence)
+        heatmap = (sparse.heatmap * quality).clamp(0.0, 1.0)
+        return RawFeatureMaps(
+            heatmap,
+            descriptors,
+            sparse.scale,
+            sparse.orientation,
+            sparse.affine,
+            dense_confidence,
+            sparse.keypoint_offsets,
+            quality,
+            texture_saliency,
+        )
 
 
 def _read_int_from_state(state: dict[str, torch.Tensor], key: str, fallback: int | None = None) -> int:
@@ -636,7 +1277,20 @@ def checkpoint_config_from_state_dict(state: dict[str, torch.Tensor]) -> Checkpo
         descriptor_dim=descriptor_dim,
         graph_hidden_dim=_read_int_from_state(state, "config.graph_hidden_dim", max(32, descriptor_dim)),
         graph_attention_layers=_read_int_from_state(state, "config.graph_attention_layers", 1),
+        graph_keypoint_meta_dim=_read_int_from_state(state, "config.graph_keypoint_meta_dim", 2),
     )
+
+
+def _with_default_compatible_state(
+    model: PlanetaryFeatureMatcher,
+    state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    patched = dict(state)
+    defaults = model.state_dict()
+    for key, value in defaults.items():
+        if key not in patched:
+            patched[key] = value.detach().clone()
+    return patched
 
 
 def load_libtorch_checkpoint(
@@ -654,8 +1308,10 @@ def load_libtorch_checkpoint(
         descriptor_dim=config.descriptor_dim,
         graph_hidden_dim=config.graph_hidden_dim,
         graph_attention_layers=config.graph_attention_layers,
+        graph_keypoint_meta_dim=config.graph_keypoint_meta_dim,
     ).to(device)
     model_state = {key: value for key, value in raw_state.items() if not key.startswith("config.")}
+    model_state = _with_default_compatible_state(model, model_state)
     result = model.load_state_dict(model_state, strict=strict)
     if strict and (result.missing_keys or result.unexpected_keys):
         raise RuntimeError(f"checkpoint load mismatch: {result}")
@@ -678,6 +1334,7 @@ def load_pytorch_state(
         descriptor_dim=int(config_dict["descriptor_dim"]),
         graph_hidden_dim=int(config_dict["graph_hidden_dim"]),
         graph_attention_layers=int(config_dict["graph_attention_layers"]),
+        graph_keypoint_meta_dim=int(config_dict.get("graph_keypoint_meta_dim", 2)),
     )
     model = PlanetaryFeatureMatcher(
         input_channels=config.input_channels,
@@ -685,8 +1342,10 @@ def load_pytorch_state(
         descriptor_dim=config.descriptor_dim,
         graph_hidden_dim=config.graph_hidden_dim,
         graph_attention_layers=config.graph_attention_layers,
+        graph_keypoint_meta_dim=config.graph_keypoint_meta_dim,
     ).to(device)
-    result = model.load_state_dict(payload["model"], strict=strict)
+    model_state = _with_default_compatible_state(model, payload["model"])
+    result = model.load_state_dict(model_state, strict=strict)
     if strict and (result.missing_keys or result.unexpected_keys):
         raise RuntimeError(f"pytorch state load mismatch: {result}")
     model.eval()

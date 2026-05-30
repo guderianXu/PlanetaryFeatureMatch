@@ -1,0 +1,9 @@
+algorithm,family,status,keypoints_a,keypoints_b,raw_matches,matches_drawn,visualization,message
+SIFT-r0.80-raw,classical,ok,2049,2048,49,49,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/SIFT-r0.80-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+RootSIFT-r0.80-raw,classical,ok,2049,2048,30,30,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/RootSIFT-r0.80-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+RootSIFT-r0.90-raw,classical,ok,2049,2048,256,160,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/RootSIFT-r0.90-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+ORB-cross-raw,classical,ok,2048,2048,256,160,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/ORB-cross-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+AKAZE-cross-raw,classical,ok,1085,980,256,160,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/AKAZE-cross-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+LightGlue-SIFT-raw,learned,ok,864,847,56,56,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/LightGlue-SIFT-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+PFM-current-raw,pfm,ok,1024,1024,256,160,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/PFM-current-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair
+PFM-latest-p1-viewpoint-raw,pfm,ok,1024,1024,256,160,/home/xjw/code/deeplearning/PlanetaryFeatureMatch/对比文档/极端测试/figures/PFM-latest-p1-viewpoint-raw.png,raw matcher output; no RANSAC/Homography filtering; no GT correctness for this real TIFF pair

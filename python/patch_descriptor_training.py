@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,12 @@ from typing import Iterable
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from compact_pair_cache import (
+    is_compact_pair_payload,
+    load_shared_image,
+    resolve_compact_image_path,
+)
 
 DESCRIPTOR_NORMALIZE_EPS = 1.0e-3
 
@@ -32,7 +39,24 @@ class SyntheticPair:
 
 
 def load_libtorch_pair_archive(path: Path | str, *, device: str | torch.device = "cpu") -> SyntheticPair:
-    module = torch.jit.load(str(path), map_location=device)
+    pair_path = Path(path)
+    try:
+        payload = torch.load(pair_path, map_location=device)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "TorchScript archive" not in message and "weights_only" not in message:
+            raise
+    else:
+        if is_compact_pair_payload(payload):
+            image_a_path = resolve_compact_image_path(pair_path, payload["image_a"])
+            image_b_path = resolve_compact_image_path(pair_path, payload["image_b"])
+            return SyntheticPair(
+                view_a=load_shared_image(image_a_path, device=device),
+                view_b=load_shared_image(image_b_path, device=device),
+                warp_a_to_b=payload["warp_a_to_b"].to(device=device, dtype=torch.float32).contiguous(),
+                valid_mask=payload["valid_mask"].to(device=device, dtype=torch.bool).contiguous(),
+            )
+    module = torch.jit.load(str(pair_path), map_location=device)
     return SyntheticPair(
         view_a=module.view_a.to(device=device, dtype=torch.float32).contiguous(),
         view_b=module.view_b.to(device=device, dtype=torch.float32).contiguous(),
@@ -282,7 +306,25 @@ def paired_descriptor_loss(
     return contrastive + diversity_weight * diversity
 
 
-def discover_pair_archives(cache_dirs: Iterable[Path | str], *, limit_pairs: int = 0) -> list[Path]:
+_SOURCE_INDEX_RE = re.compile(r"^source_(\d+)(?:_|$)")
+_PAIR_INDEX_RE = re.compile(r"^pair_(\d+)$")
+
+
+def is_self_pair_archive(path: Path | str) -> bool:
+    pair_path = Path(path)
+    source_match = _SOURCE_INDEX_RE.match(pair_path.parent.name)
+    pair_match = _PAIR_INDEX_RE.match(pair_path.stem)
+    if source_match is None or pair_match is None:
+        return False
+    return int(source_match.group(1)) == int(pair_match.group(1))
+
+
+def discover_pair_archives(
+    cache_dirs: Iterable[Path | str],
+    *,
+    limit_pairs: int = 0,
+    exclude_self_pairs: bool = False,
+) -> list[Path]:
     paths: list[Path] = []
     for cache_dir in cache_dirs:
         root = Path(cache_dir)
@@ -290,6 +332,8 @@ def discover_pair_archives(cache_dirs: Iterable[Path | str], *, limit_pairs: int
             continue
         paths.extend(sorted(root.glob("source_*/pair_*.pt")))
     unique = sorted(dict.fromkeys(paths))
+    if exclude_self_pairs:
+        unique = [path for path in unique if not is_self_pair_archive(path)]
     if limit_pairs > 0:
         return unique[:limit_pairs]
     return unique

@@ -1,10 +1,13 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compact_pair_cache import make_compact_pair_payload, save_shared_image
+
 import patch_descriptor_training as pdt
 
 
@@ -133,6 +136,60 @@ class PatchDescriptorTrainingTest(unittest.TestCase):
         self.assertEqual(pair.view_b.dim(), 3)
         self.assertEqual(pair.warp_a_to_b.shape[-1], 2)
         self.assertEqual(pair.valid_mask.dtype, torch.bool)
+
+    def test_load_libtorch_pair_archive_reads_compact_pair_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pair_path = root / "cache" / "train" / "source_000001" / "pair_000001.pt"
+            image_store = root / "image_store"
+            pair_path.parent.mkdir(parents=True)
+            view_a = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4) / 16.0
+            view_b = torch.flip(view_a, dims=[2])
+            warp = torch.zeros(4, 4, 2, dtype=torch.float32)
+            valid = torch.ones(4, 4, dtype=torch.bool)
+            image_a_path = save_shared_image(view_a, image_store)
+            image_b_path = save_shared_image(view_b, image_store)
+            torch.save(
+                make_compact_pair_payload(
+                    pair_path=pair_path,
+                    image_a_path=image_a_path,
+                    image_b_path=image_b_path,
+                    warp_a_to_b=warp,
+                    valid_mask=valid,
+                ),
+                pair_path,
+            )
+
+            pair = pdt.load_libtorch_pair_archive(pair_path)
+
+        self.assertTrue(torch.equal(pair.view_a, view_a))
+        self.assertTrue(torch.equal(pair.view_b, view_b))
+        self.assertTrue(torch.equal(pair.warp_a_to_b, warp))
+        self.assertTrue(torch.equal(pair.valid_mask, valid))
+
+    def test_is_self_pair_archive_matches_source_index_and_pair_index(self):
+        self.assertTrue(
+            pdt.is_self_pair_archive(
+                Path("cache/source_000088_20260514T070226673_NAS_PAN_L2b/pair_000088.pt")
+            )
+        )
+        self.assertTrue(pdt.is_self_pair_archive(Path("cache/source_000001_10/pair_000001.pt")))
+        self.assertFalse(pdt.is_self_pair_archive(Path("cache/source_000001_10/pair_000694.pt")))
+        self.assertFalse(pdt.is_self_pair_archive(Path("cache/source_without_index/pair_000001.pt")))
+
+    def test_discover_pair_archives_can_exclude_self_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source_000001_10"
+            source.mkdir()
+            self_pair = source / "pair_000001.pt"
+            other_pair = source / "pair_000694.pt"
+            self_pair.touch()
+            other_pair.touch()
+
+            discovered = pdt.discover_pair_archives([root], exclude_self_pairs=True)
+
+        self.assertEqual(discovered, [other_pair])
 
 
 if __name__ == "__main__":

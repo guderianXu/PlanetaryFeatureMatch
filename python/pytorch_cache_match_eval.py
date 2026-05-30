@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from torch.nn import functional as F
 
@@ -60,6 +63,141 @@ def image_texture_scores(image: torch.Tensor, points_xy: torch.Tensor) -> torch.
     return texture[0, 0, y, x].to(image.device)
 
 
+def target_texture_gradient_mean(image: torch.Tensor) -> float:
+    if image.dim() != 3:
+        raise ValueError("image must have shape CxHxW")
+    if image.numel() == 0:
+        return 0.0
+    base = image.detach().to(dtype=torch.float32).mean(dim=0).cpu().numpy()
+    base = np.nan_to_num(base, nan=0.0, posinf=0.0, neginf=0.0)
+    if float(base.max(initial=0.0)) <= 1.5:
+        base = base * 255.0
+    uint8_image = np.clip(base, 0.0, 255.0).astype(np.uint8, copy=False)
+    grad_x = cv2.Sobel(uint8_image, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(uint8_image, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+    return float(magnitude.mean())
+
+
+def target_local_contrast_mean(image: torch.Tensor) -> float:
+    if image.dim() != 3:
+        raise ValueError("image must have shape CxHxW")
+    if image.numel() == 0:
+        return 0.0
+    base = image.detach().to(dtype=torch.float32).mean(dim=0).cpu().numpy()
+    base = np.nan_to_num(base, nan=0.0, posinf=0.0, neginf=0.0)
+    if float(base.max(initial=0.0)) <= 1.5:
+        base = base * 255.0
+    gray = np.clip(base, 0.0, 255.0).astype(np.float32, copy=False)
+    local_mean = cv2.blur(gray, (9, 9))
+    local_square_mean = cv2.blur(np.square(gray), (9, 9))
+    local_variance = np.maximum(local_square_mean - np.square(local_mean), 0.0)
+    return float(np.mean(np.sqrt(local_variance)))
+
+
+def select_spatially_distributed_indices(
+    keypoints: torch.Tensor,
+    scores: torch.Tensor,
+    *,
+    max_keypoints: int,
+    spatial_bins: int,
+    descriptor_height: int,
+    descriptor_width: int,
+) -> torch.Tensor:
+    if max_keypoints <= 0:
+        raise ValueError("max_keypoints must be positive")
+    if spatial_bins <= 0:
+        raise ValueError("spatial_bins must be positive")
+    if keypoints.dim() != 2 or keypoints.size(1) != 2:
+        raise ValueError("keypoints must have shape Nx2")
+    if scores.dim() != 1 or scores.size(0) != keypoints.size(0):
+        raise ValueError("scores must have shape N")
+    if keypoints.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=keypoints.device)
+
+    bins = int(spatial_bins)
+    x_bin = torch.clamp((keypoints[:, 0] * bins / max(1, descriptor_width)).floor().to(torch.long), 0, bins - 1)
+    y_bin = torch.clamp((keypoints[:, 1] * bins / max(1, descriptor_height)).floor().to(torch.long), 0, bins - 1)
+    cell_ids = y_bin * bins + x_bin
+    chosen: list[torch.Tensor] = []
+    for cell_id in range(bins * bins):
+        members = torch.nonzero(cell_ids == cell_id, as_tuple=False).reshape(-1)
+        if members.numel() == 0:
+            continue
+        best = members.index_select(0, scores.index_select(0, members).argmax().reshape(1))[0]
+        chosen.append(best)
+    if not chosen:
+        return torch.empty(0, dtype=torch.long, device=keypoints.device)
+    selected = torch.stack(chosen)
+    order = scores.index_select(0, selected).argsort(descending=True, stable=True)
+    selected = selected.index_select(0, order)
+    if selected.numel() < min(max_keypoints, keypoints.size(0)):
+        used = torch.zeros(keypoints.size(0), dtype=torch.bool, device=keypoints.device)
+        used[selected] = True
+        remaining = torch.nonzero(~used, as_tuple=False).reshape(-1)
+        if remaining.numel() > 0:
+            fill_order = scores.index_select(0, remaining).argsort(descending=True, stable=True)
+            fill_count = min(max_keypoints - selected.numel(), remaining.numel())
+            selected = torch.cat([selected, remaining.index_select(0, fill_order[:fill_count])])
+    return selected[:max_keypoints].contiguous()
+
+
+def apply_keypoint_cell_cap(
+    ordered_indices: torch.Tensor,
+    *,
+    keypoints: torch.Tensor,
+    scores: torch.Tensor,
+    candidate_indices: torch.Tensor,
+    max_keypoints: int,
+    spatial_bins: int,
+    descriptor_height: int,
+    descriptor_width: int,
+    keypoint_cell_cap: int,
+) -> torch.Tensor:
+    if keypoint_cell_cap <= 0 or spatial_bins <= 0 or ordered_indices.numel() == 0:
+        return ordered_indices[:max_keypoints].contiguous()
+    bins = int(spatial_bins)
+    x_bin = torch.clamp((keypoints[:, 0] * bins / max(1, descriptor_width)).floor().to(torch.long), 0, bins - 1)
+    y_bin = torch.clamp((keypoints[:, 1] * bins / max(1, descriptor_height)).floor().to(torch.long), 0, bins - 1)
+    cell_ids = y_bin * bins + x_bin
+    counts = torch.zeros(bins * bins, dtype=torch.long, device=keypoints.device)
+    used = torch.zeros(keypoints.size(0), dtype=torch.bool, device=keypoints.device)
+    chosen: list[torch.Tensor] = []
+    for index in ordered_indices:
+        cell_id = int(cell_ids[index].detach().cpu())
+        if int(counts[cell_id]) >= keypoint_cell_cap:
+            continue
+        counts[cell_id] += 1
+        used[index] = True
+        chosen.append(index)
+        if len(chosen) >= max_keypoints:
+            break
+    if len(chosen) < max_keypoints:
+        remaining = candidate_indices[~used.index_select(0, candidate_indices)]
+        if remaining.numel() > 0:
+            order = scores.index_select(0, remaining).argsort(descending=True, stable=True)
+            for index in remaining.index_select(0, order):
+                cell_id = int(cell_ids[index].detach().cpu())
+                if int(counts[cell_id]) >= keypoint_cell_cap:
+                    continue
+                counts[cell_id] += 1
+                used[index] = True
+                chosen.append(index)
+                if len(chosen) >= max_keypoints:
+                    break
+    if len(chosen) < max_keypoints:
+        remaining = candidate_indices[~used.index_select(0, candidate_indices)]
+        if remaining.numel() > 0:
+            order = scores.index_select(0, remaining).argsort(descending=True, stable=True)
+            for index in remaining.index_select(0, order):
+                chosen.append(index)
+                if len(chosen) >= max_keypoints:
+                    break
+    if not chosen:
+        return ordered_indices[:max_keypoints].contiguous()
+    return torch.stack(chosen)[:max_keypoints].contiguous()
+
+
 def select_descriptor_keypoints(
     image: torch.Tensor,
     descriptors: torch.Tensor,
@@ -67,6 +205,10 @@ def select_descriptor_keypoints(
     max_keypoints: int,
     min_intensity: float,
     texture_fraction: float = 1.0,
+    weak_texture_fraction: float = 0.0,
+    spatial_bins: int = 0,
+    keypoint_cell_cap: int = 0,
+    keypoint_scores: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if image.dim() != 3:
         raise ValueError("image must have shape CxHxW")
@@ -76,9 +218,34 @@ def select_descriptor_keypoints(
         raise ValueError("max_keypoints must be positive")
     if texture_fraction < 0.0 or texture_fraction > 1.0:
         raise ValueError("texture_fraction must be in [0, 1]")
+    if weak_texture_fraction < 0.0 or weak_texture_fraction > 1.0:
+        raise ValueError("weak_texture_fraction must be in [0, 1]")
+    if texture_fraction + weak_texture_fraction > 1.0:
+        raise ValueError("texture_fraction + weak_texture_fraction must be <= 1")
+    if spatial_bins < 0:
+        raise ValueError("spatial_bins must be non-negative")
+    if keypoint_cell_cap < 0:
+        raise ValueError("keypoint_cell_cap must be non-negative")
     _, image_height, image_width = image.shape
     descriptor_height = descriptors.size(2)
     descriptor_width = descriptors.size(3)
+    score_map: torch.Tensor | None = None
+    if keypoint_scores is not None:
+        if keypoint_scores.dim() == 4:
+            if keypoint_scores.size(0) != 1 or keypoint_scores.size(1) != 1:
+                raise ValueError("keypoint_scores must have shape 1x1xHxW or HxW")
+            score_map = keypoint_scores[0, 0].to(descriptors.device, torch.float32)
+        elif keypoint_scores.dim() == 2:
+            score_map = keypoint_scores.to(descriptors.device, torch.float32)
+        else:
+            raise ValueError("keypoint_scores must have shape 1x1xHxW or HxW")
+        if tuple(score_map.shape) != (descriptor_height, descriptor_width):
+            score_map = F.interpolate(
+                score_map.view(1, 1, score_map.size(0), score_map.size(1)),
+                size=(descriptor_height, descriptor_width),
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0]
     yy, xx = torch.meshgrid(
         torch.arange(descriptor_height, device=descriptors.device),
         torch.arange(descriptor_width, device=descriptors.device),
@@ -100,19 +267,52 @@ def select_descriptor_keypoints(
     selected = torch.nonzero(valid, as_tuple=False).reshape(-1)
     if selected.numel() > max_keypoints:
         texture_count = min(max_keypoints, int(round(float(max_keypoints) * float(texture_fraction))))
-        uniform_count = max_keypoints - texture_count
+        weak_count = min(max_keypoints - texture_count, int(round(float(max_keypoints) * float(weak_texture_fraction))))
+        uniform_count = max_keypoints - texture_count - weak_count
         chosen_parts: list[torch.Tensor] = []
+        chosen_mask = torch.zeros(keypoints.size(0), dtype=torch.bool, device=keypoints.device)
+        scores = score_map.reshape(-1) if score_map is not None else image_texture_scores(image.to(descriptors.device), image_points)
         if texture_count > 0:
-            texture = image_texture_scores(image.to(descriptors.device), image_points)
-            selected_scores = texture.index_select(0, selected)
-            order = selected_scores.argsort(descending=True, stable=True)[:texture_count]
-            chosen_parts.append(selected.index_select(0, order))
+            selected_scores = scores.index_select(0, selected)
+            selected_keypoints = keypoints.index_select(0, selected)
+            if spatial_bins > 0:
+                order = select_spatially_distributed_indices(
+                    selected_keypoints,
+                    selected_scores,
+                    max_keypoints=texture_count,
+                    spatial_bins=spatial_bins,
+                    descriptor_height=descriptor_height,
+                    descriptor_width=descriptor_width,
+                )
+                chosen = selected.index_select(0, order)
+                chosen_mask[chosen] = True
+                chosen_parts.append(chosen)
+            else:
+                order = selected_scores.argsort(descending=True, stable=True)[:texture_count]
+                chosen = selected.index_select(0, order)
+                chosen_mask[chosen] = True
+                chosen_parts.append(chosen)
+        if weak_count > 0:
+            remaining = selected[~chosen_mask.index_select(0, selected)]
+            if remaining.numel() > 0:
+                weak_scores = (-scores).index_select(0, remaining)
+                if spatial_bins > 0:
+                    weak_keypoints = keypoints.index_select(0, remaining)
+                    order = select_spatially_distributed_indices(
+                        weak_keypoints,
+                        weak_scores,
+                        max_keypoints=weak_count,
+                        spatial_bins=spatial_bins,
+                        descriptor_height=descriptor_height,
+                        descriptor_width=descriptor_width,
+                    )
+                else:
+                    order = weak_scores.argsort(descending=True, stable=True)[:weak_count]
+                chosen = remaining.index_select(0, order)
+                chosen_mask[chosen] = True
+                chosen_parts.append(chosen)
         if uniform_count > 0:
-            already = torch.cat(chosen_parts) if chosen_parts else selected.new_empty((0,))
-            keep = torch.ones(selected.size(0), dtype=torch.bool, device=selected.device)
-            if already.numel() > 0:
-                keep &= ~torch.isin(selected, already)
-            remaining = selected[keep]
+            remaining = selected[~chosen_mask.index_select(0, selected)]
             if remaining.numel() > 0:
                 sample = torch.linspace(
                     0,
@@ -122,6 +322,18 @@ def select_descriptor_keypoints(
                 ).round().to(torch.long)
                 chosen_parts.append(remaining.index_select(0, sample))
         selected = torch.cat(chosen_parts) if chosen_parts else selected[:max_keypoints]
+        if keypoint_cell_cap > 0:
+            selected = apply_keypoint_cell_cap(
+                selected,
+                keypoints=keypoints,
+                scores=scores,
+                candidate_indices=torch.nonzero(valid, as_tuple=False).reshape(-1),
+                max_keypoints=max_keypoints,
+                spatial_bins=spatial_bins,
+                descriptor_height=descriptor_height,
+                descriptor_width=descriptor_width,
+                keypoint_cell_cap=keypoint_cell_cap,
+            )
     return keypoints.index_select(0, selected).contiguous(), selected.to(torch.long).contiguous()
 
 
@@ -132,6 +344,32 @@ def gather_descriptor_rows(descriptors: torch.Tensor, selected_indices: torch.Te
     if selected_indices.numel() == 0:
         return flat.new_empty((0, descriptors.size(1)))
     return flat.index_select(0, selected_indices.to(descriptors.device)).contiguous()
+
+
+def sample_descriptor_rows_at_keypoints(descriptors: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor:
+    if descriptors.dim() != 4 or descriptors.size(0) != 1:
+        raise ValueError("descriptors must have shape 1xDxHxW")
+    if keypoints.dim() != 2 or keypoints.size(1) != 2:
+        raise ValueError("keypoints must have shape Nx2")
+    if keypoints.numel() == 0:
+        return descriptors.new_empty((0, descriptors.size(1)))
+    height, width = descriptors.shape[-2:]
+    grid_x = keypoints[:, 0].to(descriptors.device, torch.float32) * (2.0 / float(max(1, width - 1))) - 1.0
+    grid_y = keypoints[:, 1].to(descriptors.device, torch.float32) * (2.0 / float(max(1, height - 1))) - 1.0
+    grid = torch.stack([grid_x, grid_y], dim=1).view(1, -1, 1, 2)
+    sampled = F.grid_sample(descriptors.to(torch.float32), grid, mode="bilinear", padding_mode="border", align_corners=True)
+    return sampled.squeeze(0).squeeze(-1).T.contiguous()
+
+
+def sample_map_rows_at_keypoints(map_tensor: torch.Tensor | None, keypoints: torch.Tensor, *, width: int = 1) -> torch.Tensor | None:
+    if map_tensor is None:
+        return None
+    if map_tensor.dim() != 4 or map_tensor.size(0) != 1:
+        raise ValueError("map_tensor must have shape 1xCxHxW")
+    sampled = sample_descriptor_rows_at_keypoints(map_tensor, keypoints)
+    if sampled.size(1) < width:
+        sampled = torch.cat([sampled, sampled.new_zeros((sampled.size(0), width - sampled.size(1)))], dim=1)
+    return sampled[:, :width].contiguous()
 
 
 def cyclic_descriptor_similarity(desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
@@ -204,9 +442,12 @@ def mutual_nearest_matches(
     *,
     max_matches: int = 512,
     min_score: float = -1.0,
+    min_margin: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if max_matches <= 0:
         raise ValueError("max_matches must be positive")
+    if min_margin < 0.0:
+        raise ValueError("min_margin must be non-negative")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -214,6 +455,11 @@ def mutual_nearest_matches(
         )
     similarity = cyclic_descriptor_similarity(desc_a, desc_b)
     best_scores, best_targets = similarity.max(dim=1)
+    if min_margin > 0.0 and similarity.size(1) > 1:
+        top2 = similarity.topk(2, dim=1).values
+        row_margins = top2[:, 0] - top2[:, 1]
+    else:
+        row_margins = torch.full((similarity.size(0),), float("inf"), dtype=torch.float32, device=similarity.device)
     best_sources = similarity.max(dim=0).indices
     matches: list[list[int]] = []
     scores: list[float] = []
@@ -221,6 +467,8 @@ def mutual_nearest_matches(
         target = int(best_targets[source].detach().cpu())
         score = float(best_scores[source].detach().cpu())
         if score < min_score:
+            continue
+        if float(row_margins[source].detach().cpu()) < min_margin:
             continue
         if int(best_sources[target].detach().cpu()) == source:
             matches.append([source, target])
@@ -232,6 +480,106 @@ def mutual_nearest_matches(
     return (
         torch.tensor([matches[index] for index in order], dtype=torch.long, device=device),
         torch.tensor([scores[index] for index in order], dtype=torch.float32, device=device),
+    )
+
+
+def graph_matcher_matches(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    desc_a: torch.Tensor,
+    keypoints_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    keypoints_b: torch.Tensor,
+    *,
+    max_matches: int = 512,
+    min_score: float = -1.0,
+    scores_a: torch.Tensor | None = None,
+    scores_b: torch.Tensor | None = None,
+    metadata_a: torch.Tensor | None = None,
+    metadata_b: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if max_matches <= 0:
+        raise ValueError("max_matches must be positive")
+    if desc_a.size(0) == 0 or desc_b.size(0) == 0:
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
+            torch.empty(0, dtype=torch.float32, device=desc_a.device),
+        )
+    model_device = next(model.parameters()).device
+    meta_dim = int(getattr(getattr(model, "config", None), "graph_keypoint_meta_dim", 2))
+    if metadata_a is None:
+        meta_a = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints_a.to(model_device, torch.float32),
+            meta_dim=meta_dim,
+            scores=scores_a.to(model_device, torch.float32) if scores_a is not None else None,
+            quality=scores_a.to(model_device, torch.float32) if scores_a is not None else None,
+        )
+    else:
+        meta_a = metadata_a.to(model_device, torch.float32)
+    if metadata_b is None:
+        meta_b = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints_b.to(model_device, torch.float32),
+            meta_dim=meta_dim,
+            scores=scores_b.to(model_device, torch.float32) if scores_b is not None else None,
+            quality=scores_b.to(model_device, torch.float32) if scores_b is not None else None,
+        )
+    else:
+        meta_b = metadata_b.to(model_device, torch.float32)
+    output = model.graph_matcher(
+        desc_a.to(model_device, torch.float32),
+        meta_a,
+        desc_b.to(model_device, torch.float32),
+        meta_b,
+    )
+    matches = output.matches.to(device=desc_a.device)
+    scores = output.scores.to(device=desc_a.device)
+    if scores.numel() == 0:
+        return matches, scores
+    keep = scores >= float(min_score)
+    matches = matches[keep]
+    scores = scores[keep]
+    order = torch.argsort(scores, descending=True)[:max_matches]
+    return matches.index_select(0, order), scores.index_select(0, order)
+
+
+def gather_score_rows(score_map: torch.Tensor | None, selected: torch.Tensor) -> torch.Tensor | None:
+    if score_map is None:
+        return None
+    if score_map.dim() == 4:
+        flat = score_map[0, 0].reshape(-1)
+    elif score_map.dim() == 2:
+        flat = score_map.reshape(-1)
+    else:
+        raise ValueError("score_map must have shape 1x1xHxW or HxW")
+    flat = flat.to(selected.device, torch.float32)
+    return flat.index_select(0, selected.to(selected.device))
+
+
+def graph_metadata_from_raw_features(
+    raw: pfm_model.RawFeatureMaps | None,
+    keypoints: torch.Tensor,
+    *,
+    meta_dim: int,
+    fallback_scores: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    if raw is None:
+        return None
+    scores = sample_map_rows_at_keypoints(raw.heatmap, keypoints, width=1)
+    if scores is None:
+        scores = fallback_scores.reshape(-1, 1) if fallback_scores is not None else None
+    scale = sample_map_rows_at_keypoints(raw.scale, keypoints, width=1)
+    orientation = sample_map_rows_at_keypoints(raw.orientation, keypoints, width=2)
+    affine = sample_map_rows_at_keypoints(raw.affine, keypoints, width=4)
+    quality = sample_map_rows_at_keypoints(raw.quality, keypoints, width=1)
+    local_contrast = sample_map_rows_at_keypoints(raw.local_contrast, keypoints, width=1)
+    return pfm_model.prepare_graph_keypoint_metadata(
+        keypoints,
+        meta_dim=meta_dim,
+        scores=scores.squeeze(1) if scores is not None else None,
+        scale=scale.squeeze(1) if scale is not None else None,
+        orientation=orientation,
+        affine=affine,
+        quality=quality.squeeze(1) if quality is not None else None,
+        local_contrast=local_contrast.squeeze(1) if local_contrast is not None else None,
     )
 
 
@@ -377,15 +725,25 @@ def match_pair_descriptor_maps(
     descriptors_a: torch.Tensor,
     descriptors_b: torch.Tensor,
     *,
+    model: pfm_model.PlanetaryFeatureMatcher | None = None,
+    matcher_mode: str = "raw_descriptor",
     max_keypoints: int,
     min_intensity: float,
     threshold_px: float,
     topk: int = 1,
     max_matches: int = 512,
     min_score: float = -1.0,
+    min_margin: float = 0.0,
     mutual: bool = False,
     geometry_filter: str = "none",
     texture_fraction: float = 1.0,
+    weak_texture_fraction: float = 0.0,
+    keypoint_spatial_bins: int = 0,
+    keypoint_cell_cap: int = 0,
+    keypoint_scores_a: torch.Tensor | None = None,
+    keypoint_scores_b: torch.Tensor | None = None,
+    raw_features_a: pfm_model.RawFeatureMaps | None = None,
+    raw_features_b: pfm_model.RawFeatureMaps | None = None,
 ) -> MatchEvalResult:
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
@@ -393,6 +751,10 @@ def match_pair_descriptor_maps(
         max_keypoints=max_keypoints,
         min_intensity=min_intensity,
         texture_fraction=texture_fraction,
+        weak_texture_fraction=weak_texture_fraction,
+        spatial_bins=keypoint_spatial_bins,
+        keypoint_cell_cap=keypoint_cell_cap,
+        keypoint_scores=keypoint_scores_a,
     )
     keypoints_b, selected_b = select_descriptor_keypoints(
         pair.view_b,
@@ -400,12 +762,104 @@ def match_pair_descriptor_maps(
         max_keypoints=max_keypoints,
         min_intensity=min_intensity,
         texture_fraction=texture_fraction,
+        weak_texture_fraction=weak_texture_fraction,
+        spatial_bins=keypoint_spatial_bins,
+        keypoint_cell_cap=keypoint_cell_cap,
+        keypoint_scores=keypoint_scores_b,
     )
     rows_a = gather_descriptor_rows(descriptors_a, selected_a)
     rows_b = gather_descriptor_rows(descriptors_b, selected_b)
-    if mutual:
-        matches, _ = mutual_nearest_matches(rows_a, rows_b, max_matches=max_matches, min_score=min_score)
-    else:
+    row_scores_a = gather_score_rows(keypoint_scores_a, selected_a)
+    row_scores_b = gather_score_rows(keypoint_scores_b, selected_b)
+    if matcher_mode == "graph_matcher":
+        if model is None:
+            raise ValueError("model is required for graph_matcher mode")
+        if hasattr(model, "semi_dense_branch") and raw_features_a is not None and raw_features_b is not None:
+            semi_dense = model.semi_dense_branch(
+                descriptors_a,
+                descriptors_b,
+                max_candidates=max(1, max_matches // 2),
+                min_score=max(0.0, min_score),
+            )
+            if semi_dense.scores.numel() > 0:
+                keypoints_a = torch.cat([keypoints_a, semi_dense.keypoints_a.to(keypoints_a.device)], dim=0)
+                keypoints_b = torch.cat([keypoints_b, semi_dense.keypoints_b.to(keypoints_b.device)], dim=0)
+                rows_a = torch.cat(
+                    [rows_a, sample_descriptor_rows_at_keypoints(descriptors_a, semi_dense.keypoints_a.to(descriptors_a.device))],
+                    dim=0,
+                )
+                rows_b = torch.cat(
+                    [rows_b, sample_descriptor_rows_at_keypoints(descriptors_b, semi_dense.keypoints_b.to(descriptors_b.device))],
+                    dim=0,
+                )
+                row_scores_a = (
+                    torch.cat([row_scores_a, semi_dense.scores.to(row_scores_a.device)], dim=0)
+                    if row_scores_a is not None
+                    else None
+                )
+                row_scores_b = (
+                    torch.cat([row_scores_b, semi_dense.scores.to(row_scores_b.device)], dim=0)
+                    if row_scores_b is not None
+                    else None
+                )
+        metadata_a = graph_metadata_from_raw_features(
+            raw_features_a,
+            keypoints_a,
+            meta_dim=getattr(getattr(model, "config", None), "graph_keypoint_meta_dim", 2),
+            fallback_scores=row_scores_a,
+        )
+        metadata_b = graph_metadata_from_raw_features(
+            raw_features_b,
+            keypoints_b,
+            meta_dim=getattr(getattr(model, "config", None), "graph_keypoint_meta_dim", 2),
+            fallback_scores=row_scores_b,
+        )
+        matches, _ = graph_matcher_matches(
+            model,
+            rows_a,
+            keypoints_a,
+            rows_b,
+            keypoints_b,
+            max_matches=max_matches,
+            min_score=min_score,
+            scores_a=row_scores_a,
+            scores_b=row_scores_b,
+            metadata_a=metadata_a,
+            metadata_b=metadata_b,
+        )
+        if matches.size(0) < max_matches and rows_a.size(0) > 0 and rows_b.size(0) > 0:
+            fallback_matches, fallback_scores = mutual_nearest_matches(
+                rows_a,
+                rows_b,
+                max_matches=max_matches,
+                min_score=min_score,
+                min_margin=min_margin,
+            )
+            if fallback_matches.numel() > 0:
+                seen = {(int(a), int(b)) for a, b in matches.detach().cpu().tolist()}
+                additions = []
+                addition_scores = []
+                for index, (source, target) in enumerate(fallback_matches.detach().cpu().tolist()):
+                    key = (int(source), int(target))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    additions.append([source, target])
+                    addition_scores.append(float(fallback_scores[index].detach().cpu()))
+                    if len(additions) + matches.size(0) >= max_matches:
+                        break
+                if additions:
+                    add_matches = torch.tensor(additions, dtype=torch.long, device=matches.device)
+                    matches = torch.cat([matches, add_matches], dim=0)
+    elif matcher_mode == "raw_descriptor" and mutual:
+        matches, _ = mutual_nearest_matches(
+            rows_a,
+            rows_b,
+            max_matches=max_matches,
+            min_score=min_score,
+            min_margin=min_margin,
+        )
+    elif matcher_mode == "raw_descriptor":
         matches, _ = greedy_unique_matches(
             rows_a,
             rows_b,
@@ -413,6 +867,8 @@ def match_pair_descriptor_maps(
             max_matches=max_matches,
             min_score=min_score,
         )
+    else:
+        raise ValueError(f"unsupported matcher_mode: {matcher_mode}")
     if matches.numel() == 0:
         return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
 
@@ -500,6 +956,87 @@ def descriptor_maps_for_pair(
     raise ValueError(f"unsupported descriptor mode: {mode}")
 
 
+def descriptor_maps_and_keypoint_scores_for_pair(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    pair: SyntheticPair,
+    *,
+    mode: str,
+    texture_blend_weight: float,
+    keypoint_score_mode: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if keypoint_score_mode == "texture":
+        descriptors_a, descriptors_b = descriptor_maps_for_pair(
+            model,
+            pair,
+            mode=mode,
+            texture_blend_weight=texture_blend_weight,
+        )
+        return descriptors_a, descriptors_b, None, None
+    if keypoint_score_mode != "learned":
+        raise ValueError(f"unsupported keypoint score mode: {keypoint_score_mode}")
+
+    def single(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        image_batch = image.unsqueeze(0)
+        raw = model.forward_single(image_batch, texture_blend_weight=texture_blend_weight)
+        if mode == "learned":
+            descriptors = model.learned_descriptor_map_single(image_batch)
+        elif mode == "texture":
+            descriptors = model.texture_descriptor_map_single(image_batch)
+        elif mode == "blend":
+            descriptors = raw.descriptors
+        else:
+            raise ValueError(f"unsupported descriptor mode: {mode}")
+        return descriptors, raw.heatmap
+
+    descriptors_a, keypoint_scores_a = single(pair.view_a)
+    descriptors_b, keypoint_scores_b = single(pair.view_b)
+    return descriptors_a, descriptors_b, keypoint_scores_a, keypoint_scores_b
+
+
+def feature_maps_and_keypoint_scores_for_pair(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    pair: SyntheticPair,
+    *,
+    mode: str,
+    texture_blend_weight: float,
+    keypoint_score_mode: str,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    pfm_model.RawFeatureMaps | None,
+    pfm_model.RawFeatureMaps | None,
+]:
+    if keypoint_score_mode != "learned" and mode != "blend":
+        descriptors_a, descriptors_b, scores_a, scores_b = descriptor_maps_and_keypoint_scores_for_pair(
+            model,
+            pair,
+            mode=mode,
+            texture_blend_weight=texture_blend_weight,
+            keypoint_score_mode=keypoint_score_mode,
+        )
+        return descriptors_a, descriptors_b, scores_a, scores_b, None, None
+
+    def single(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, pfm_model.RawFeatureMaps]:
+        image_batch = image.unsqueeze(0)
+        raw = model.forward_single(image_batch, texture_blend_weight=texture_blend_weight)
+        if mode == "blend":
+            descriptors = raw.descriptors
+        elif mode == "learned":
+            descriptors = model.learned_descriptor_map_single(image_batch)
+        elif mode == "texture":
+            descriptors = model.texture_descriptor_map_single(image_batch)
+        else:
+            raise ValueError(f"unsupported descriptor mode: {mode}")
+        score = raw.heatmap if keypoint_score_mode == "learned" else None
+        return descriptors, score, raw
+
+    descriptors_a, scores_a, raw_a = single(pair.view_a)
+    descriptors_b, scores_b, raw_b = single(pair.view_b)
+    return descriptors_a, descriptors_b, scores_a, scores_b, raw_a, raw_b
+
+
 def evaluate_pair_path(
     model: pfm_model.PlanetaryFeatureMatcher,
     pair_path: Path,
@@ -514,30 +1051,64 @@ def evaluate_pair_path(
     topk: int,
     max_matches: int,
     min_score: float,
+    min_margin: float,
+    min_target_gradient: float,
+    min_target_local_contrast: float,
     mutual: bool,
     geometry_filter: str,
+    keypoint_spatial_bins: int,
+    weak_texture_fraction: float = 0.0,
+    keypoint_cell_cap: int = 0,
+    keypoint_score_mode: str = "texture",
+    matcher_mode: str = "raw_descriptor",
 ) -> MatchEvalResult:
+    if min_target_gradient < 0.0:
+        raise ValueError("min_target_gradient must be non-negative")
+    if min_target_local_contrast < 0.0:
+        raise ValueError("min_target_local_contrast must be non-negative")
     pair = load_libtorch_pair_archive(pair_path, device=device)
+    if min_target_gradient > 0.0 and target_texture_gradient_mean(pair.view_b) < min_target_gradient:
+        return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
+    if min_target_local_contrast > 0.0 and target_local_contrast_mean(pair.view_b) < min_target_local_contrast:
+        return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
     with torch.no_grad():
-        descriptors_a, descriptors_b = descriptor_maps_for_pair(
+        (
+            descriptors_a,
+            descriptors_b,
+            keypoint_scores_a,
+            keypoint_scores_b,
+            raw_features_a,
+            raw_features_b,
+        ) = feature_maps_and_keypoint_scores_for_pair(
             model,
             pair,
             mode=mode,
             texture_blend_weight=texture_blend_weight,
+            keypoint_score_mode=keypoint_score_mode,
         )
         return match_pair_descriptor_maps(
             pair,
             descriptors_a,
             descriptors_b,
+            model=model,
+            matcher_mode=matcher_mode,
             max_keypoints=max_keypoints,
             min_intensity=min_intensity,
             texture_fraction=texture_fraction,
+            weak_texture_fraction=weak_texture_fraction,
             threshold_px=threshold_px,
             topk=topk,
             max_matches=max_matches,
             min_score=min_score,
+            min_margin=min_margin,
             mutual=mutual,
             geometry_filter=geometry_filter,
+            keypoint_spatial_bins=keypoint_spatial_bins,
+            keypoint_cell_cap=keypoint_cell_cap,
+            keypoint_scores_a=keypoint_scores_a,
+            keypoint_scores_b=keypoint_scores_b,
+            raw_features_a=raw_features_a,
+            raw_features_b=raw_features_b,
         )
 
 
@@ -549,6 +1120,15 @@ def summarize(rows: list[dict[str, str]]) -> str:
     precision = 0.0 if total == 0 else correct / total
     low = sum(1 for row in rows if float(row["precision"]) < 0.9)
     return f"pairs={len(rows)} total_matches={total} correct={correct} precision={precision:.6f} low_precision_pairs={low}"
+
+
+def limit_pair_paths(pair_paths: list[Path], *, limit_pairs: int, sample_seed: int | None = None) -> list[Path]:
+    paths = sorted(dict.fromkeys(pair_paths))
+    if limit_pairs <= 0 or len(paths) <= limit_pairs:
+        return paths
+    if sample_seed is None:
+        return paths[:limit_pairs]
+    return sorted(random.Random(sample_seed).sample(paths, limit_pairs))
 
 
 def parse_args() -> argparse.Namespace:
@@ -564,12 +1144,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-matches", type=int, default=512)
     parser.add_argument("--min-intensity", type=float, default=0.01)
     parser.add_argument("--texture-keypoint-fraction", type=float, default=1.0)
+    parser.add_argument("--weak-texture-keypoint-fraction", type=float, default=0.0)
+    parser.add_argument("--keypoint-spatial-bins", type=int, default=0)
+    parser.add_argument("--keypoint-cell-cap", type=int, default=0)
+    parser.add_argument("--keypoint-score-mode", choices=["texture", "learned"], default="texture")
+    parser.add_argument("--matcher-mode", choices=["raw_descriptor", "graph_matcher"], default="raw_descriptor")
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--mutual", action="store_true")
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--min-score", type=float, default=-1.0)
+    parser.add_argument("--min-margin", type=float, default=0.0)
+    parser.add_argument("--min-target-gradient", type=float, default=0.0)
+    parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
+    parser.add_argument("--sample-seed", type=int, default=None)
+    parser.add_argument("--exclude-self-pairs", action="store_true")
     parser.add_argument("--hard-summary", action="append", type=Path, default=[])
     parser.add_argument("--hard-limit", type=int, default=64)
     parser.add_argument("--hard-min-matches", type=int, default=4)
@@ -590,16 +1180,23 @@ def load_model(args: argparse.Namespace) -> pfm_model.PlanetaryFeatureMatcher:
 
 
 def selected_pair_paths(args: argparse.Namespace) -> list[Path]:
-    pair_paths = discover_pair_archives(args.cache_dir, limit_pairs=args.limit_pairs)
+    sample_seed = getattr(args, "sample_seed", None)
+    discover_limit = 0 if sample_seed is not None else args.limit_pairs
+    pair_paths = discover_pair_archives(
+        args.cache_dir,
+        limit_pairs=discover_limit,
+        exclude_self_pairs=getattr(args, "exclude_self_pairs", False),
+    )
     if not args.hard_summary:
-        return pair_paths
-    return pfm_pytorch_training.select_hard_training_pairs(
+        return limit_pair_paths(pair_paths, limit_pairs=args.limit_pairs, sample_seed=sample_seed)
+    selected = pfm_pytorch_training.select_hard_training_pairs(
         pair_paths,
         args.hard_summary,
         limit=args.hard_limit,
         min_matches=args.hard_min_matches,
         max_precision=args.hard_max_precision,
     )
+    return limit_pair_paths(selected, limit_pairs=args.limit_pairs, sample_seed=sample_seed)
 
 
 def main() -> int:
@@ -625,12 +1222,20 @@ def main() -> int:
                 max_keypoints=args.max_keypoints,
                 min_intensity=args.min_intensity,
                 texture_fraction=args.texture_keypoint_fraction,
+                weak_texture_fraction=args.weak_texture_keypoint_fraction,
                 threshold_px=args.threshold_px,
                 topk=args.descriptor_topk,
                 max_matches=args.max_matches,
                 min_score=args.min_score,
+                min_margin=args.min_margin,
+                min_target_gradient=args.min_target_gradient,
+                min_target_local_contrast=args.min_target_local_contrast,
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
+                keypoint_spatial_bins=args.keypoint_spatial_bins,
+                keypoint_cell_cap=args.keypoint_cell_cap,
+                keypoint_score_mode=args.keypoint_score_mode,
+                matcher_mode=args.matcher_mode,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

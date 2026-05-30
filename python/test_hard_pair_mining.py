@@ -44,6 +44,22 @@ class HardPairMiningTest(unittest.TestCase):
 
         self.assertEqual(hard_pair_mining.format_cli_args(selected), "--hard-synthetic-pair-cache-index 5 --hard-synthetic-pair-cache-index 4")
 
+    def test_reads_current_cache_eval_summary_columns(self):
+        rows = [
+            {"pair_pt": "cache/source_a/pair_000004.pt", "matches": "50", "precision": "0.40"},
+            {"pair_pt": "cache/source_b/pair_000005.pt", "matches": "70", "precision": "0.95"},
+            {"pair_pt": "cache/source_c/pair_000006.pt", "matches": "0", "precision": "0.00"},
+        ]
+
+        selected = hard_pair_mining.select_hard_pairs(
+            rows,
+            limit=4,
+            min_matches=1,
+            max_precision=0.9,
+        )
+
+        self.assertEqual([entry.pair_index for entry in selected], [4])
+
 
 if __name__ == "__main__":
     unittest.main()

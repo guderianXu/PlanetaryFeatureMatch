@@ -19,4 +19,11 @@ Testing/
 runs/
 img/
 img.zip
+训练数据/
+辅助软件/
+*.pt
+*.pth
+*.tif
+*.tiff
+*.log
 *.pre-merge-backup
