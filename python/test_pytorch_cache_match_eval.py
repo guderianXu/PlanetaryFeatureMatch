@@ -210,12 +210,24 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "summary.csv",
             "--matcher-mode",
             "graph_matcher",
+            "--graph-dustbin-delta",
+            "-0.5",
+            "--graph-acceptance-margin",
+            "0.02",
+            "--graph-min-raw-score",
+            "0.4",
+            "--graph-min-raw-margin",
+            "0.03",
         ]
 
         with mock.patch.object(sys, "argv", argv):
             args = eval_py.parse_args()
 
         self.assertEqual(args.matcher_mode, "graph_matcher")
+        self.assertEqual(args.graph_dustbin_delta, -0.5)
+        self.assertEqual(args.graph_acceptance_margin, 0.02)
+        self.assertEqual(args.graph_min_raw_score, 0.4)
+        self.assertEqual(args.graph_min_raw_margin, 0.03)
 
     def test_sample_descriptor_rows_at_keypoints_interpolates_rows(self):
         descriptors = torch.zeros(1, 2, 2, 2)
@@ -427,6 +439,65 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertEqual(result.matches, 2)
         self.assertEqual(result.correct, 2)
+
+    def test_calibrated_graph_matches_can_lower_dustbin_rejection(self):
+        logits = torch.tensor(
+            [
+                [5.0, -5.0, 6.0],
+                [-5.0, 5.0, 6.0],
+                [-5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        rejected_matches, _ = eval_py.calibrated_graph_matches_from_logits(logits, count_a=2, count_b=2)
+        accepted_matches, _ = eval_py.calibrated_graph_matches_from_logits(
+            logits,
+            count_a=2,
+            count_b=2,
+            dustbin_delta=-2.0,
+        )
+
+        self.assertEqual(rejected_matches.tolist(), [])
+        self.assertEqual(accepted_matches.tolist(), [[0, 0], [1, 1]])
+
+    def test_graph_matcher_matches_can_filter_by_raw_margin(self):
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.99, 0.01]])
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+        logits = torch.tensor(
+            [
+                [5.0, -5.0, -5.0],
+                [-5.0, 5.0, -5.0],
+                [-5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=logits.to(desc_a.device),
+                    matches=torch.empty(0, 2, dtype=torch.long),
+                    scores=torch.empty(0),
+                )
+
+        matches, _ = eval_py.graph_matcher_matches(
+            DummyModel(),
+            desc_a,
+            keypoints,
+            desc_b,
+            keypoints,
+            max_matches=8,
+            graph_dustbin_delta=-0.01,
+            graph_min_raw_margin=0.05,
+        )
+
+        self.assertEqual(matches.tolist(), [])
 
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])

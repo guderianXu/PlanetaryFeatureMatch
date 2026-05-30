@@ -492,6 +492,10 @@ def graph_matcher_matches(
     *,
     max_matches: int = 512,
     min_score: float = -1.0,
+    graph_dustbin_delta: float = 0.0,
+    graph_acceptance_margin: float = 0.0,
+    graph_min_raw_score: float = -1.0,
+    graph_min_raw_margin: float = 0.0,
     scores_a: torch.Tensor | None = None,
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
@@ -499,6 +503,10 @@ def graph_matcher_matches(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if max_matches <= 0:
         raise ValueError("max_matches must be positive")
+    if graph_acceptance_margin < 0.0:
+        raise ValueError("graph_acceptance_margin must be non-negative")
+    if graph_min_raw_margin < 0.0:
+        raise ValueError("graph_min_raw_margin must be non-negative")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -530,14 +538,98 @@ def graph_matcher_matches(
         desc_b.to(model_device, torch.float32),
         meta_b,
     )
-    matches = output.matches.to(device=desc_a.device)
-    scores = output.scores.to(device=desc_a.device)
+    use_calibrated_logits = (
+        abs(float(graph_dustbin_delta)) > 0.0
+        or float(graph_acceptance_margin) > 0.0
+        or float(graph_min_raw_score) > -1.0
+        or float(graph_min_raw_margin) > 0.0
+    )
+    if use_calibrated_logits:
+        matches, scores = calibrated_graph_matches_from_logits(
+            output.logits,
+            count_a=desc_a.size(0),
+            count_b=desc_b.size(0),
+            dustbin_delta=graph_dustbin_delta,
+            acceptance_margin=graph_acceptance_margin,
+        )
+        matches = matches.to(device=desc_a.device)
+        scores = scores.to(device=desc_a.device)
+    else:
+        matches = output.matches.to(device=desc_a.device)
+        scores = output.scores.to(device=desc_a.device)
     if scores.numel() == 0:
         return matches, scores
     keep = scores >= float(min_score)
+    if graph_min_raw_score > -1.0 or graph_min_raw_margin > 0.0:
+        raw_similarity = cyclic_descriptor_similarity(desc_a, desc_b)
+        raw_scores = raw_similarity[matches[:, 0].to(raw_similarity.device), matches[:, 1].to(raw_similarity.device)]
+        if graph_min_raw_score > -1.0:
+            keep = keep & raw_scores.to(keep.device).ge(float(graph_min_raw_score))
+        if graph_min_raw_margin > 0.0:
+            if raw_similarity.size(1) > 1:
+                top2 = raw_similarity.topk(2, dim=1).values
+                raw_margins = top2[:, 0] - top2[:, 1]
+            else:
+                raw_margins = torch.full(
+                    (raw_similarity.size(0),),
+                    float("inf"),
+                    dtype=torch.float32,
+                    device=raw_similarity.device,
+                )
+            keep = keep & raw_margins.index_select(0, matches[:, 0].to(raw_similarity.device)).to(keep.device).ge(
+                float(graph_min_raw_margin)
+            )
     matches = matches[keep]
     scores = scores[keep]
     order = torch.argsort(scores, descending=True)[:max_matches]
+    return matches.index_select(0, order), scores.index_select(0, order)
+
+
+def calibrated_graph_matches_from_logits(
+    logits: torch.Tensor,
+    *,
+    count_a: int,
+    count_b: int,
+    dustbin_delta: float = 0.0,
+    acceptance_margin: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if count_a < 0 or count_b < 0:
+        raise ValueError("count_a and count_b must be non-negative")
+    if acceptance_margin < 0.0:
+        raise ValueError("acceptance_margin must be non-negative")
+    if count_a == 0 or count_b == 0:
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=logits.device),
+            torch.empty(0, dtype=torch.float32, device=logits.device),
+        )
+    if logits.dim() != 2 or logits.size(0) < count_a + 1 or logits.size(1) < count_b + 1:
+        raise ValueError("logits must include pair scores plus dustbin row and column")
+    adjusted = logits[: count_a + 1, : count_b + 1].to(torch.float32).clone()
+    if dustbin_delta != 0.0:
+        adjusted[:count_a, count_b] += float(dustbin_delta)
+        adjusted[count_a, :count_b] += float(dustbin_delta)
+        adjusted[count_a, count_b] += float(dustbin_delta)
+    row_logits = adjusted[:count_a, :]
+    row_prob = torch.softmax(row_logits, dim=1)[:, :count_b]
+    col_prob = torch.softmax(adjusted[:, :count_b], dim=0)[:count_a, :]
+    dual_scores = row_prob * col_prob
+    best_values, best_indices = dual_scores.max(dim=1)
+    dustbin_prob = torch.softmax(row_logits, dim=1)[:, -1]
+    inlier_mask = best_values.gt(dustbin_prob + float(acceptance_margin))
+    best_sources = dual_scores.max(dim=0).indices
+    source_indices = torch.arange(count_a, device=logits.device)
+    mutual_mask = best_sources.index_select(0, best_indices).eq(source_indices)
+    keep = inlier_mask & mutual_mask
+    if not bool(keep.any()):
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=logits.device),
+            torch.empty(0, dtype=torch.float32, device=logits.device),
+        )
+    kept_sources = source_indices[keep]
+    kept_targets = best_indices[keep]
+    matches = torch.stack([kept_sources, kept_targets], dim=1).to(torch.long)
+    scores = best_values[keep].to(torch.float32)
+    order = torch.argsort(scores, descending=True)
     return matches.index_select(0, order), scores.index_select(0, order)
 
 
@@ -734,6 +826,10 @@ def match_pair_descriptor_maps(
     max_matches: int = 512,
     min_score: float = -1.0,
     min_margin: float = 0.0,
+    graph_dustbin_delta: float = 0.0,
+    graph_acceptance_margin: float = 0.0,
+    graph_min_raw_score: float = -1.0,
+    graph_min_raw_margin: float = 0.0,
     mutual: bool = False,
     geometry_filter: str = "none",
     texture_fraction: float = 1.0,
@@ -822,6 +918,10 @@ def match_pair_descriptor_maps(
             keypoints_b,
             max_matches=max_matches,
             min_score=min_score,
+            graph_dustbin_delta=graph_dustbin_delta,
+            graph_acceptance_margin=graph_acceptance_margin,
+            graph_min_raw_score=graph_min_raw_score,
+            graph_min_raw_margin=graph_min_raw_margin,
             scores_a=row_scores_a,
             scores_b=row_scores_b,
             metadata_a=metadata_a,
@@ -1061,6 +1161,10 @@ def evaluate_pair_path(
     keypoint_cell_cap: int = 0,
     keypoint_score_mode: str = "texture",
     matcher_mode: str = "raw_descriptor",
+    graph_dustbin_delta: float = 0.0,
+    graph_acceptance_margin: float = 0.0,
+    graph_min_raw_score: float = -1.0,
+    graph_min_raw_margin: float = 0.0,
 ) -> MatchEvalResult:
     if min_target_gradient < 0.0:
         raise ValueError("min_target_gradient must be non-negative")
@@ -1101,6 +1205,10 @@ def evaluate_pair_path(
             max_matches=max_matches,
             min_score=min_score,
             min_margin=min_margin,
+            graph_dustbin_delta=graph_dustbin_delta,
+            graph_acceptance_margin=graph_acceptance_margin,
+            graph_min_raw_score=graph_min_raw_score,
+            graph_min_raw_margin=graph_min_raw_margin,
             mutual=mutual,
             geometry_filter=geometry_filter,
             keypoint_spatial_bins=keypoint_spatial_bins,
@@ -1155,6 +1263,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
+    parser.add_argument("--graph-dustbin-delta", type=float, default=0.0)
+    parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
+    parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
+    parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -1236,6 +1348,10 @@ def main() -> int:
                 keypoint_cell_cap=args.keypoint_cell_cap,
                 keypoint_score_mode=args.keypoint_score_mode,
                 matcher_mode=args.matcher_mode,
+                graph_dustbin_delta=args.graph_dustbin_delta,
+                graph_acceptance_margin=args.graph_acceptance_margin,
+                graph_min_raw_score=args.graph_min_raw_score,
+                graph_min_raw_margin=args.graph_min_raw_margin,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

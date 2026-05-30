@@ -488,7 +488,7 @@
 - [complete] 阶段 1：定位当前 GraphMatcher 训练和推理实现，确认 residual raw score、top-K、metadata/dustbin、弱纹理指标、光照/旋转诊断缺口。
 - [complete] 阶段 2：实现 residual GraphMatcher：`final_score = raw_score / tau + alpha * graph_delta`，默认小 alpha，保留 candidate top-K。
 - [complete] 阶段 3：加入 GraphMatcher metadata ablation 支持，至少支持 full/meta-disabled/xy-disabled/geometry-disabled 诊断入口。
-- [in_progress] 阶段 4：报告增加 raw top-K recall、Graph accepted/rejected、worst pairs、按数据来源/极端跨位置分组统计。
+- [complete] 阶段 4：报告增加 raw top-K recall、Graph accepted/rejected、worst pairs、按数据来源/极端跨位置分组统计。
 - [complete] 阶段 5：报告增加 weak texture precision/recall/count，而不是只输出 weak texture fraction。
 - [pending] 阶段 6：增加 illumination branch 压力测试入口：same geometry + different illumination / shadow / low contrast / brightness reversal-like。
 - [pending] 阶段 7：增加连续旋转压力测试入口，不只测 0/90/180/270，至少覆盖 30/45/60/120/135/150 等非 C4 角度。
@@ -506,6 +506,8 @@
 - 可视化报告 CSV 增加 raw top-1/5/16/32/64 recall、selected/rejected、weak texture precision/count。
 - `--graph-metadata-mode` 支持 `full`、`descriptor_only`、`no_xy`、`no_geometry`、`no_quality`。
 - 对 `pair_004541_cross_off008_s00109_s00119.pt` 的轻量诊断显示：旧权重在 residual 逻辑下 GraphMatcher 从原报告 `17/512` 恢复到 `133/512`，descriptor-only metadata 为 `140/512`。
+- GraphMatcher 报告/评估入口新增 inference-time calibration：`--graph-dustbin-delta`、`--graph-acceptance-margin`、`--graph-min-raw-score`、`--graph-min-raw-margin`。
+- 以当前最佳 `nm128/w0.5 no_xy dustbin` checkpoint 扫描后确认：小负 dustbin delta 可温和提高 accepted/correct，但会降低 precision；默认仍应使用 high_precision baseline。
 
 仍待完成：
 - 光照压力测试独立入口。

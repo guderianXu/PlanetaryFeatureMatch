@@ -476,6 +476,10 @@ def compute_visual_matches(
     descriptor_topk: int,
     min_score: float,
     min_margin: float,
+    graph_dustbin_delta: float,
+    graph_acceptance_margin: float,
+    graph_min_raw_score: float,
+    graph_min_raw_margin: float,
     mutual: bool,
     matcher_mode: str,
     graph_metadata_mode: str,
@@ -561,6 +565,10 @@ def compute_visual_matches(
                 keypoints_b,
                 max_matches=max_matches,
                 min_score=min_score,
+                graph_dustbin_delta=graph_dustbin_delta,
+                graph_acceptance_margin=graph_acceptance_margin,
+                graph_min_raw_score=graph_min_raw_score,
+                graph_min_raw_margin=graph_min_raw_margin,
                 scores_a=row_scores_a,
                 scores_b=row_scores_b,
                 metadata_a=meta_a,
@@ -1318,6 +1326,7 @@ def matching_config_lines(args: argparse.Namespace) -> list[str]:
         f"max_keypoints={args.max_keypoints}, max_matches={args.max_matches}, draw_matches={args.draw_matches}。",
         f"texture_fraction={args.texture_keypoint_fraction:.3f}, weak_texture_fraction={args.weak_texture_keypoint_fraction:.3f}, spatial_bins={args.keypoint_spatial_bins}, cell_cap={args.keypoint_cell_cap}。",
         f"min_score={args.min_score:.6f}, min_margin={args.min_margin:.6f}, threshold_px={args.threshold_px:.2f}。",
+        f"graph_dustbin_delta={args.graph_dustbin_delta:.6f}, graph_acceptance_margin={args.graph_acceptance_margin:.6f}, graph_min_raw_score={args.graph_min_raw_score:.6f}, graph_min_raw_margin={args.graph_min_raw_margin:.6f}。",
         f"training_crop_size={args.training_crop_size}, training_max_image_size={args.training_max_image_size}。",
     ]
 
@@ -1363,6 +1372,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
+    parser.add_argument("--graph-dustbin-delta", type=float, default=0.0)
+    parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
+    parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
+    parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
     parser.add_argument("--non-mutual", action="store_true")
     parser.add_argument("--no-pdf", action="store_true")
     args = parser.parse_args()
@@ -1437,6 +1450,10 @@ def main() -> int:
             descriptor_topk=args.descriptor_topk,
             min_score=args.min_score,
             min_margin=args.min_margin,
+            graph_dustbin_delta=args.graph_dustbin_delta,
+            graph_acceptance_margin=args.graph_acceptance_margin,
+            graph_min_raw_score=args.graph_min_raw_score,
+            graph_min_raw_margin=args.graph_min_raw_margin,
             mutual=not args.non_mutual,
             matcher_mode=args.matcher_mode,
             graph_metadata_mode=args.graph_metadata_mode,

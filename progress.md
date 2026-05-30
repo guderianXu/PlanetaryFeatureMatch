@@ -693,3 +693,15 @@
 - extreme_cross_position：accepted `2104 -> 2547`，correct `2069 -> 2233`，micro precision `0.9834 -> 0.8767`。
 - 指定极端样本 `pair_004541_cross_off008_s00109_s00119.pt`：accepted `106 -> 176`，correct `89 -> 110`，precision `0.8396 -> 0.6250`。
 - 结论：召回确实上升，但 precision 损失过大。当前最佳正式 GraphMatcher 仍是 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`；下一步不应继续降低 dustbin 训练权重，而应做 inference-time dustbin/score calibration 或分层候选接收策略。
+
+## 2026-05-30 GraphMatcher inference calibration
+- 已实现报告/评估侧 GraphMatcher 校准参数：`--graph-dustbin-delta`、`--graph-acceptance-margin`、`--graph-min-raw-score`、`--graph-min-raw-margin`。
+- 默认行为保持不变；只有显式传入校准参数时才从 logits 重算匹配并应用 raw descriptor score/margin 过滤。
+- 新增单元测试覆盖 dustbin 降低后接受更多匹配、raw margin 过滤 graph 匹配、CLI 参数解析。
+- 验证通过：`py_compile python/pytorch_cache_match_eval.py scripts/training_visual_report.py`；`python -m unittest python/test_pytorch_cache_match_eval.py`，32 tests OK。
+- 用当前最佳 checkpoint 按原始 2048 候选报告配置扫描 `graph_dustbin_delta=-0.10/-0.20/-0.30`。
+- baseline GraphMatcher：micro `7896/7973=0.990342`，weak `3947/3974=0.993206`，extreme `2069/2104=0.983365`，指定极端样本 `89/106=0.839623`。
+- `delta=-0.10`：micro `7914/8001=0.989126`，weak `3959/3989=0.992479`，extreme `2074/2111=0.982473`，指定极端样本 `91/110=0.827273`。
+- `delta=-0.20`：micro `7930/8030=0.987547`，weak `3965/4002=0.990755`，extreme `2081/2124=0.979755`，指定极端样本 `91/111=0.819820`。
+- `delta=-0.30`：micro `7957/8068=0.986242`，weak `3986/4027=0.989819`，extreme `2093/2143=0.976668`，指定极端样本 `95/116=0.818966`。
+- 结论：推理侧 dustbin 校准能温和提高 accepted/correct，但 precision 随 delta 单调下降。当前建议保留 baseline 作为 high_precision，`delta=-0.10` 或 `-0.30` 仅作为 balanced/review 模式，不替代主模型。

@@ -275,3 +275,6 @@
 - 去掉 x/y metadata 先验是有效的安全默认。极端跨位置中坐标先验很容易误导 matcher；当前建议 GraphMatcher 训练/评估默认先用 `no_xy + dustbin negatives`，后续再通过消融决定是否逐步恢复几何/质量 metadata。
 - 召回校准 probe 证明降低 dustbin 训练强度会迅速损害 precision：`nm64/w0.2` 让 18 样本 accepted `7973 -> 8607`、correct `7896 -> 8174`，但 micro precision `0.9903 -> 0.9497`；指定极端样本 `106/89/0.8396 -> 176/110/0.6250`。这不是合格的主模型替代，只适合作为 precision/recall tradeoff 参考。
 - 当前最佳模型选择应优先保留 `nm128/w0.5 no_xy dustbin` checkpoint。下一步高价值方向不是继续训练降低 dustbin，而是报告/推理层的 calibration：例如按 confidence margin、raw top-K rank、weak texture quality 分层接收，或输出 high_precision / balanced 两档阈值。
+- 推理侧 dustbin calibration 比重新弱化 dustbin 训练更可控。基于同一最佳 checkpoint，`graph_dustbin_delta=-0.10/-0.20/-0.30` 让 18 样本 accepted 从 `7973` 提升到 `8001/8030/8068`，correct 从 `7896` 提升到 `7914/7930/7957`，但 micro precision 从 `0.990342` 降到 `0.989126/0.987547/0.986242`。
+- 指定极端样本的 calibration tradeoff 比整体更明显：baseline `89/106=0.839623`，`delta=-0.10` 为 `91/110=0.827273`，`delta=-0.30` 为 `95/116=0.818966`。这说明校准能多捞回少量正确点，但不能根本解决该样本的 recall；继续提升应靠更好的 hard extreme 训练或分层候选策略。
+- 当前推荐输出两档推理口径：默认 `high_precision` 使用未校准 GraphMatcher；可选 `balanced` 使用小负 `graph_dustbin_delta`。不建议把较大负 delta 设为默认，因为它会系统性增加 false matches，尤其是极端跨位置样本。
