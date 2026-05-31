@@ -932,6 +932,8 @@ def graph_matcher_correspondence_loss(
     hard_negative_dustbin_topk: int = 8,
     hard_negative_dustbin_margin: float = 0.25,
     hard_negative_dustbin_spatial_min_distance: float = 0.0,
+    semi_dense_no_match_points: int = 0,
+    semi_dense_min_score: float = 0.0,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
@@ -939,6 +941,8 @@ def graph_matcher_correspondence_loss(
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
     points_b_xy = points_b_xy[:count]
+    positive_points_a_xy = points_a_xy
+    positive_points_b_xy = points_b_xy
     desc_a = normalize_descriptor_batch(sample_descriptors(descriptors_a, points_a_xy))
     desc_b = normalize_descriptor_batch(sample_descriptors(descriptors_b, points_b_xy))
     if no_match_points > 0 and no_match_weight > 0.0:
@@ -966,6 +970,38 @@ def graph_matcher_correspondence_loss(
         if neg_b_points.numel() > 0:
             desc_b = torch.cat([desc_b, normalize_descriptor_batch(sample_descriptors(descriptors_b, neg_b_points))], dim=0)
             points_b_xy = torch.cat([points_b_xy, neg_b_points.to(points_b_xy.device)], dim=0)
+    if semi_dense_no_match_points > 0 and no_match_weight > 0.0 and hasattr(model, "semi_dense_branch"):
+        semi_dense = model.semi_dense_branch(
+            descriptors_a,
+            descriptors_b,
+            max_candidates=semi_dense_no_match_points,
+            min_score=semi_dense_min_score,
+        )
+        semi_a_points = semi_dense.keypoints_a.to(device=descriptors_a.device, dtype=points_a_xy.dtype)
+        semi_b_points = semi_dense.keypoints_b.to(device=descriptors_b.device, dtype=points_b_xy.dtype)
+        if semi_a_points.numel() > 0:
+            keep = torch.ones(semi_a_points.size(0), dtype=torch.bool, device=semi_a_points.device)
+            if no_match_min_distance > 0.0 and positive_points_a_xy.numel() > 0:
+                keep &= torch.cdist(semi_a_points, positive_points_a_xy.to(semi_a_points.device)).amin(dim=1) >= float(
+                    no_match_min_distance
+                )
+            if no_match_min_distance > 0.0 and positive_points_b_xy.numel() > 0:
+                keep &= torch.cdist(semi_b_points, positive_points_b_xy.to(semi_b_points.device)).amin(dim=1) >= float(
+                    no_match_min_distance
+                )
+            semi_a_points = semi_a_points[keep]
+            semi_b_points = semi_b_points[keep]
+        if semi_a_points.numel() > 0:
+            desc_a = torch.cat(
+                [desc_a, normalize_descriptor_batch(sample_descriptors(descriptors_a, semi_a_points))],
+                dim=0,
+            )
+            desc_b = torch.cat(
+                [desc_b, normalize_descriptor_batch(sample_descriptors(descriptors_b, semi_b_points))],
+                dim=0,
+            )
+            points_a_xy = torch.cat([points_a_xy, semi_a_points.to(points_a_xy.device)], dim=0)
+            points_b_xy = torch.cat([points_b_xy, semi_b_points.to(points_b_xy.device)], dim=0)
     meta_a = pfm_model.prepare_graph_keypoint_metadata(
         points_a_xy,
         meta_dim=model.config.graph_keypoint_meta_dim,
@@ -1488,6 +1524,8 @@ def train_step(
     graph_matcher_hard_negative_dustbin_topk: int = 8,
     graph_matcher_hard_negative_dustbin_margin: float = 0.25,
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
+    graph_matcher_semi_dense_no_match_points: int = 0,
+    graph_matcher_semi_dense_min_score: float = 0.0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
@@ -1621,6 +1659,8 @@ def train_step(
                             hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
                             hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
                             hard_negative_dustbin_spatial_min_distance=graph_matcher_hard_negative_dustbin_spatial_min_distance,
+                            semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
+                            semi_dense_min_score=graph_matcher_semi_dense_min_score,
                             generator=generator,
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
@@ -2364,6 +2404,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-hard-negative-dustbin-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-margin", type=float, default=0.25)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
+    parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -2454,6 +2496,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-hard-negative-dustbin-margin must be nonnegative")
     if args.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0:
         parser.error("--graph-matcher-hard-negative-dustbin-spatial-min-distance must be nonnegative")
+    if args.graph_matcher_semi_dense_no_match_points < 0:
+        parser.error("--graph-matcher-semi-dense-no-match-points must be nonnegative")
+    if args.graph_matcher_semi_dense_min_score < 0.0:
+        parser.error("--graph-matcher-semi-dense-min-score must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -2898,6 +2944,8 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_topk=args.graph_matcher_hard_negative_dustbin_topk,
                 graph_matcher_hard_negative_dustbin_margin=args.graph_matcher_hard_negative_dustbin_margin,
                 graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
+                graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
+                graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,

@@ -28,6 +28,8 @@ PlanetaryFeatureMatch 是一个基于 C++17、LibTorch 和 OpenCV 的行星影�
 
 这个方向不是只做 SuperPoint 风格的稀疏特征，也不是只做 LoFTR 风格的稠密匹配，而是同时服务于后续稀疏匹配和半稠密匹配。匹配阶段默认使用 checkpoint 中训练好的 `PlanetaryGraphMatcher` 学习式匹配器，不再把最近邻描述子匹配作为正式推理流程。训练使用自监督合成图像对，基础损失包括 repeatability、descriptor cross entropy、graph matching cross entropy、Smooth L1 offset 和 confidence BCE；checkpoint 会把 backbone、sparse head、dense head、graph matcher 权重以及结构 metadata 保存到同一个 `.pt` 文件，便于训练、推理、评估和导出保持一致。
 
+PFM v2.1 的 GraphMatcher 固化评估模式、光照/连续旋转压力测试和 semi-dense 候选训练入口见 `docs/pfm_v21_graphmatcher_diagnostics.md`。
+
 模型文件大小不能直接和 YOLO 对比：YOLO 是多类别目标检测器，包含更大的检测 backbone、neck、多尺度 detection heads 和类别输出层；本项目是灰度行星影像局部特征匹配模型，目标是匹配准确性和几何稳定性，不是用文件大小衡量能力。
 
 ## 仓库结构

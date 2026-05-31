@@ -1211,6 +1211,28 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.dustbin_bias.grad)
 
+    def test_graph_matcher_correspondence_loss_can_use_semi_dense_no_match_candidates(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))
+        descriptors_b = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))
+        points = torch.tensor([[1.0, 1.0], [3.0, 3.0], [5.0, 5.0]], dtype=torch.float32)
+
+        loss = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            metadata_mode="descriptor_only",
+            no_match_weight=0.5,
+            semi_dense_no_match_points=4,
+            semi_dense_min_score=0.0,
+        )
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIsNotNone(model.graph_matcher.dustbin_bias.grad)
+
     def test_graph_matcher_correspondence_loss_can_train_accept_head(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
@@ -1395,6 +1417,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.35",
             "--graph-matcher-hard-negative-dustbin-spatial-min-distance",
             "4.5",
+            "--graph-matcher-semi-dense-no-match-points",
+            "24",
+            "--graph-matcher-semi-dense-min-score",
+            "0.02",
             "--training-weak-texture-fraction",
             "0.25",
             "--hard-pair-glob",
@@ -1416,6 +1442,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_hard_negative_dustbin_topk, 12)
         self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_margin, 0.35)
         self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_spatial_min_distance, 4.5)
+        self.assertEqual(args.graph_matcher_semi_dense_no_match_points, 24)
+        self.assertAlmostEqual(args.graph_matcher_semi_dense_min_score, 0.02)
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
 
