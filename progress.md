@@ -747,3 +747,14 @@
   - 未过滤 GraphMatcher：micro `7986/8121=0.983376`，weak `4003/4059=0.986203`，extreme `2108/2174=0.969641`，指定极端样本 `100/129=0.775194`。
   - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7970/8096=0.984437`，weak `4000/4050=0.987654`，extreme `2099/2159=0.972209`，指定极端样本 `100/125=0.800000`，weak `99/108=0.916667`。
   - 结论：这是当前最好的 balanced experimental 口径；比 high-precision baseline 多 74 个正确匹配，指定极端样本多 11 个正确匹配，但总体 precision 低于 high-precision baseline。
+
+## 2026-05-31 GraphMatcher spatial hard-negative gate probe
+
+- 已实现 hard-negative dustbin 的空间门控：`--graph-matcher-hard-negative-dustbin-spatial-min-distance`。当该参数大于 0 时，只压制 target 位置相距足够远的 raw-confusable off-diagonal 候选，避免近邻候选被过度惩罚。
+- 新增 TDD 单测：构造一个近邻 confusable 候选和一个远距离 confusable 候选，确认空间门控只惩罚远距离候选。
+- 验证通过：`py_compile` 通过；`python -m unittest python/test_pfm_model.py python/test_pfm_pytorch_training.py python/test_pytorch_cache_match_eval.py` 为 `147 tests OK, 1 skipped`。
+- Probe E：`runs/graphmatcher_spatial_hardnegdustbin_from_rawpreserve_v21full256_b1_600_s512_20260531_111558`。
+  - 配置：从 raw-preservation probe 继续，LR `5e-6`，600 steps，`hard_negative_dustbin_weight=0.05`，`spatial_min_distance=4.0`。
+  - 未过滤 GraphMatcher：micro `7996/8151=0.980984`，weak `4011/4081=0.982847`，extreme `2114/2194=0.963537`，指定极端样本 `101/136=0.742647`。
+  - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7981/8121=0.982761`，weak `4010/4071=0.985016`，extreme `2105/2176=0.967371`，指定极端样本 `101/132=0.765152`。
+  - 结论：空间门控保留了更多正确匹配，但 false matches 增长更快，未超过上一轮非空间 hard-negative dustbin 的 best balanced 口径 `100/125=0.800000`。当前不推荐替代 best balanced，只保留为后续分层 hard negative 的诊断入口。

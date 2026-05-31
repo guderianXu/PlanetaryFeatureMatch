@@ -931,6 +931,7 @@ def graph_matcher_correspondence_loss(
     hard_negative_dustbin_weight: float = 0.0,
     hard_negative_dustbin_topk: int = 8,
     hard_negative_dustbin_margin: float = 0.25,
+    hard_negative_dustbin_spatial_min_distance: float = 0.0,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
@@ -1016,6 +1017,8 @@ def graph_matcher_correspondence_loss(
             positive_count=count,
             negative_topk=hard_negative_dustbin_topk,
             margin=hard_negative_dustbin_margin,
+            points_b_xy=points_b_xy[:count],
+            spatial_min_distance=hard_negative_dustbin_spatial_min_distance,
         )
     return loss
 
@@ -1096,6 +1099,8 @@ def graph_matcher_hard_negative_dustbin_loss(
     positive_count: int,
     negative_topk: int = 8,
     margin: float = 0.25,
+    points_b_xy: torch.Tensor | None = None,
+    spatial_min_distance: float = 0.0,
 ) -> torch.Tensor:
     count = min(int(positive_count), desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1)
     if count <= 1 or negative_topk <= 0:
@@ -1103,14 +1108,39 @@ def graph_matcher_hard_negative_dustbin_loss(
     raw_similarity = normalize_descriptor_batch(desc_a[:count]) @ normalize_descriptor_batch(desc_b[:count]).T
     diagonal = torch.eye(count, dtype=torch.bool, device=raw_similarity.device)
     masked_similarity = raw_similarity.masked_fill(diagonal, -float("inf"))
+    if points_b_xy is not None and spatial_min_distance > 0.0:
+        if points_b_xy.dim() != 2 or points_b_xy.size(1) != 2:
+            raise ValueError("points_b_xy must have shape Nx2")
+        if points_b_xy.size(0) < count:
+            raise ValueError("points_b_xy must contain at least positive_count rows")
+        target_points = points_b_xy[:count].to(device=raw_similarity.device, dtype=raw_similarity.dtype)
+        target_distance = torch.cdist(target_points, target_points, p=2.0)
+        far_enough = target_distance.ge(float(spatial_min_distance))
+        masked_similarity = masked_similarity.masked_fill(~far_enough, -float("inf"))
+        valid_rows = torch.isfinite(masked_similarity).any(dim=1)
+        if not bool(valid_rows.any()):
+            return logits.new_zeros(())
+        row_indices = torch.nonzero(valid_rows, as_tuple=False).reshape(-1)
+        masked_similarity = masked_similarity.index_select(0, row_indices)
+    else:
+        row_indices = torch.arange(count, dtype=torch.long, device=raw_similarity.device)
     k = min(int(negative_topk), count - 1)
+    finite_per_row = torch.isfinite(masked_similarity).sum(dim=1)
+    k = min(k, int(finite_per_row.max().item()))
+    if k <= 0:
+        return logits.new_zeros(())
     hard_indices = masked_similarity.topk(k, dim=1).indices
     pair_logits = logits[:count, :count]
-    hard_logits = pair_logits.gather(1, hard_indices)
-    row_dustbin = logits[:count, -1].unsqueeze(1).expand_as(hard_logits)
+    selected_pair_logits = pair_logits.index_select(0, row_indices)
+    hard_logits = selected_pair_logits.gather(1, hard_indices)
+    finite_hard = torch.isfinite(masked_similarity.gather(1, hard_indices))
+    row_dustbin = logits[:count, -1].index_select(0, row_indices).unsqueeze(1).expand_as(hard_logits)
     col_dustbin = logits[-1, :count].index_select(0, hard_indices.reshape(-1)).view_as(hard_logits)
     dustbin_floor = torch.minimum(row_dustbin, col_dustbin)
-    return (hard_logits - dustbin_floor + float(margin)).clamp_min(0.0).pow(2).mean()
+    loss = (hard_logits - dustbin_floor + float(margin)).clamp_min(0.0).pow(2)
+    if not bool(finite_hard.any()):
+        return logits.new_zeros(())
+    return loss[finite_hard].mean()
 
 
 def hard_negative_margin_loss(desc_a: torch.Tensor, desc_b: torch.Tensor, *, margin: float = 0.2) -> torch.Tensor:
@@ -1457,6 +1487,7 @@ def train_step(
     graph_matcher_hard_negative_dustbin_weight: float = 0.0,
     graph_matcher_hard_negative_dustbin_topk: int = 8,
     graph_matcher_hard_negative_dustbin_margin: float = 0.25,
+    graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
@@ -1589,6 +1620,7 @@ def train_step(
                             hard_negative_dustbin_weight=graph_matcher_hard_negative_dustbin_weight,
                             hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
                             hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
+                            hard_negative_dustbin_spatial_min_distance=graph_matcher_hard_negative_dustbin_spatial_min_distance,
                             generator=generator,
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
@@ -2331,6 +2363,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-hard-negative-dustbin-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -2419,6 +2452,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-hard-negative-dustbin-topk must be nonnegative")
     if args.graph_matcher_hard_negative_dustbin_margin < 0.0:
         parser.error("--graph-matcher-hard-negative-dustbin-margin must be nonnegative")
+    if args.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0:
+        parser.error("--graph-matcher-hard-negative-dustbin-spatial-min-distance must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -2862,6 +2897,7 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_weight=args.graph_matcher_hard_negative_dustbin_weight,
                 graph_matcher_hard_negative_dustbin_topk=args.graph_matcher_hard_negative_dustbin_topk,
                 graph_matcher_hard_negative_dustbin_margin=args.graph_matcher_hard_negative_dustbin_margin,
+                graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,

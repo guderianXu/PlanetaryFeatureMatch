@@ -558,3 +558,21 @@
 - 默认高精度模型仍是 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`。
 - 当前最好的 balanced experimental 模型是 `graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916`，推理/报告使用 `graph_min_raw_score=0.4` 和 `graph_min_raw_margin=0.01`。
 - 下一阶段若继续优化，应围绕 hard negative 的类别分层做，不再简单调大/调小一个全局 dustbin 权重。
+
+## 2026-05-31 GraphMatcher 空间门控 hard negative
+
+目标：只压制与真值目标位置明显错开的 raw-confusable hard negatives，避免把近邻候选、定位误差候选或局部可接受候选全部压到 dustbin 以下。
+
+已完成：
+- [complete] 给 `graph_matcher_hard_negative_dustbin_loss` 增加 `points_b_xy` 和 `spatial_min_distance`。
+- [complete] 增加 CLI：`--graph-matcher-hard-negative-dustbin-spatial-min-distance`。
+- [complete] 增加 TDD 单测，验证空间门控只惩罚远距离 confusable 候选。
+- [complete] 运行空间门控 probe：`graphmatcher_spatial_hardnegdustbin_from_rawpreserve_v21full256_b1_600_s512_20260531_111558`。
+
+结果：
+- 未过滤：micro `7996/8151=0.980984`，extreme `2114/2194=0.963537`，指定极端样本 `101/136=0.742647`。
+- 加 `raw_score>=0.4` 和 `raw_margin>=0.01`：micro `7981/8121=0.982761`，extreme `2105/2176=0.967371`，指定极端样本 `101/132=0.765152`。
+
+当前决策：
+- 空间门控没有超过上一轮 best balanced `100/125=0.800000`，暂不作为推荐配置。
+- 该入口保留用于后续更细 hard negative 分层，例如弱纹理、重复纹理、低重叠边界分别设置不同的惩罚策略。

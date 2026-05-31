@@ -1291,6 +1291,57 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             0.0,
         )
 
+    def test_graph_matcher_hard_negative_dustbin_loss_can_ignore_nearby_target_candidates(self):
+        desc_a = torch.eye(4)
+        desc_b = torch.eye(4)
+        desc_b[1] = torch.tensor([0.95, 0.31, 0.0, 0.0])
+        desc_b[2] = torch.tensor([0.94, 0.0, 0.34, 0.0])
+        desc_b = torch.nn.functional.normalize(desc_b, dim=1)
+        logits = torch.zeros(5, 5)
+        logits[:4, 4] = 1.0
+        logits[4, :4] = 1.0
+        logits[0, 1] = 2.0
+        logits[0, 2] = 2.0
+        points_b = torch.tensor(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [16.0, 0.0],
+                [0.0, 16.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        loss = train.graph_matcher_hard_negative_dustbin_loss(
+            logits,
+            desc_a,
+            desc_b,
+            positive_count=4,
+            negative_topk=2,
+            margin=0.25,
+            points_b_xy=points_b,
+            spatial_min_distance=4.0,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        safer_logits = logits.clone()
+        safer_logits[0, 2] = 0.2
+        self.assertAlmostEqual(
+            float(
+                train.graph_matcher_hard_negative_dustbin_loss(
+                    safer_logits,
+                    desc_a,
+                    desc_b,
+                    positive_count=4,
+                    negative_topk=2,
+                    margin=0.25,
+                    points_b_xy=points_b,
+                    spatial_min_distance=4.0,
+                )
+            ),
+            0.0,
+        )
+
     def test_apply_graph_metadata_mode_can_remove_xy_prior(self):
         metadata = torch.arange(28, dtype=torch.float32).view(2, 14)
 
@@ -1342,6 +1393,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "12",
             "--graph-matcher-hard-negative-dustbin-margin",
             "0.35",
+            "--graph-matcher-hard-negative-dustbin-spatial-min-distance",
+            "4.5",
             "--training-weak-texture-fraction",
             "0.25",
             "--hard-pair-glob",
@@ -1362,6 +1415,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.3)
         self.assertEqual(args.graph_matcher_hard_negative_dustbin_topk, 12)
         self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_margin, 0.35)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_spatial_min_distance, 4.5)
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
 
