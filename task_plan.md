@@ -158,6 +158,16 @@
   - 新 v2.1-full 默认是 `base_channels=64`、`descriptor_dim=256`、`graph_hidden_dim=512`、`graph_keypoint_meta_dim=16`。旧 v2-lite checkpoint 仍可加载，但继续训练时会按 checkpoint 配置实例化，不能自动变成 full 256。
 
 ## 当前阶段
+
+## 2026-05-31 training spatial balance optimization
+- 阶段：complete。
+- 目标：针对用户反馈“弱纹理匹配点少、空间分布旱涝不均”，在完整炼丹前先优化训练 correspondence 采样，让每个训练 step 的监督点覆盖更多空间网格，同时保留弱纹理 quota 与 GraphMatcher semi-dense no-match 训练。
+- 计划：
+  1. 为 `sample_feature_correspondences()` 增加空间均衡采样 RED 测试。（complete）
+  2. 实现 `--training-spatial-bins`，默认 0 保持旧行为；训练命令中启用 8x8 网格。（complete）
+  3. 跑 focused/full Python 单测与 CUDA smoke。（complete）
+  4. 用三组现有训练 cache 跑一轮完整训练并生成报告。（complete）
+  5. 同步源码到 GitHub；训练产物保留在本地 `runs/`。（pending）
 - 阶段 1：runtime BlockingQueue/ThreadPool（complete）
 - 阶段 2：dataloader sampler/split/collator/pinned memory（complete）
 - 阶段 3：AsyncDataLoader 稳定性修复（complete）
@@ -576,3 +586,28 @@
 当前决策：
 - 空间门控没有超过上一轮 best balanced `100/125=0.800000`，暂不作为推荐配置。
 - 该入口保留用于后续更细 hard negative 分层，例如弱纹理、重复纹理、低重叠边界分别设置不同的惩罚策略。
+
+## 2026-05-31 训练监督点空间均衡
+
+目标：解决用户指出的弱纹理区域匹配点少、全图匹配分布不均的问题。先不改大模型结构，优先修训练监督点采样，让每个训练 pair 的 512 个对应点同时覆盖弱纹理和空间网格。
+
+已完成：
+- [complete] 新增 `--training-spatial-bins`，训练正样本 correspondence 可按源图坐标做网格均衡采样。
+- [complete] 弱纹理 quota 与空间均衡合并：先在弱纹理候选内均衡取样，再从剩余候选中空间均衡补足。
+- [complete] 保持默认 `spatial_bins=0` 兼容旧训练行为。
+- [complete] 增加 focused TDD 测试和 CLI 测试。
+- [complete] 完整测试通过：`156 tests OK, 1 skipped`。
+- [complete] CUDA smoke 通过。
+- [complete] 完成 1 epoch 正式炼丹并生成 raw/graph 两套中文报告。
+
+本轮结果：
+- Run：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414`。
+- 训练：`10635` step，`samples_per_pair=512`，`training_weak_texture_fraction=0.5`，`training_spatial_bins=8`，`skip=0`。
+- 验证：`eval_after top1=0.999222`，后 100 step 平均 loss `0.909142`。
+- GraphMatcher filtered 24 样本：`11854/11860=0.999494`，weak texture `3068/3068=1.000000`。
+- 指定极端样本从 raw `88/512=0.171875` 变为 GraphMatcher filtered `78/84=0.928571`。
+
+当前判断：
+- 这轮解决的是“接受的匹配更干净、更均匀”，而不是极端样本召回最大化。
+- GraphMatcher 现在在硬样本上主要承担过滤器角色：它显著提高 precision，但会拒掉大量不确定点。
+- 下一步如果继续优化，应专门提高极端跨位置的 accepted recall，同时保持 weak texture precision 和 coverage 不回退。

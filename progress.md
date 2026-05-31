@@ -758,3 +758,34 @@
   - 未过滤 GraphMatcher：micro `7996/8151=0.980984`，weak `4011/4081=0.982847`，extreme `2114/2194=0.963537`，指定极端样本 `101/136=0.742647`。
   - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7981/8121=0.982761`，weak `4010/4071=0.985016`，extreme `2105/2176=0.967371`，指定极端样本 `101/132=0.765152`。
   - 结论：空间门控保留了更多正确匹配，但 false matches 增长更快，未超过上一轮非空间 hard-negative dustbin 的 best balanced 口径 `100/125=0.800000`。当前不推荐替代 best balanced，只保留为后续分层 hard negative 的诊断入口。
+# 2026-05-31 training spatial balance optimization
+- 收到用户要求：优化后做一次完整炼丹。
+- 选择本轮优化目标：训练 correspondence 采样空间均衡，解决弱纹理/分布不均问题。
+- 已添加 RED 测试：
+  - `test_sample_feature_correspondences_can_cover_spatial_bins`
+  - `test_sample_feature_correspondences_combines_weak_texture_and_spatial_bins`
+  - parse args 接受 `--training-spatial-bins`
+- RED 验证结果：失败原因符合预期，当前代码缺少 `spatial_bins` 参数和 CLI。
+- 实现完成并验证：
+  - focused spatial/weak/CLI tests 通过。
+  - 完整 Python 训练相关测试通过：156 tests OK, 1 skipped。
+  - CUDA smoke 通过：`runs/smoke_spatial_semidense_graph_20260531_163241`，1 step，loss=3.002254，eval before/after top1=1.0。
+- 正式训练配置决策：
+  - 起点：`runs/graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916/pytorch_pfm_state.pt`。
+  - 数据：same/cross/extreme 三个 train cache，共 10635 train pairs，val 共 3079 pairs。
+  - 训练：`--epochs 1`，batch_pairs=1，samples_per_pair=512，1024 crop，balanced cache sampling。
+  - 新增优化：`--training-weak-texture-fraction 0.5`、`--training-spatial-bins 8`、semi-dense no-match=64。
+- 完整炼丹完成：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414`。
+- 训练结果：
+  - `steps=10635`，`skip_sum=0`，每个 pair 采样 `512` 个监督匹配点。
+  - `eval_before top1=0.999176 loss=0.025660`。
+  - `eval_after top1=0.999222 loss=0.049786`，`mean_positive_score=0.933957`，`mean_negative_score=0.022942`。
+  - 前 100 step 平均 loss `1.270365`，后 100 step 平均 loss `0.909142`。
+- 视觉报告：
+  - GraphMatcher：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414/visual_report/graph_matcher_filter_s04_m001/training_report_zh.pdf`。
+  - Raw descriptor：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414/visual_report/raw_descriptor/training_report_zh.pdf`。
+  - GraphMatcher 分层：`graph_match_error_strata.csv`。
+- 24 样本报告结果：
+  - GraphMatcher filtered：`11854/11860=0.999494`，weak texture `3068/3068=1.000000`，平均覆盖格占用 `0.883464`。
+  - Raw descriptor：`11863/12288=0.965413`，weak texture `3298/3353=0.983597`，平均覆盖格占用 `0.886719`。
+  - 指定极端样本 `pair_004541_cross_off008_s00109_s00119.pt`：raw `88/512=0.171875`；GraphMatcher filtered `78/84=0.928571`，weak texture `50/50=1.000000`。

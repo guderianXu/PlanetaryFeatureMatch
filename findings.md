@@ -1,5 +1,10 @@
 # 发现记录
 
+## 2026-05-31 training spatial balance optimization
+- 当前训练采样已有 `training_weak_texture_fraction`，但 `sample_feature_correspondences()` 在非弱纹理填充阶段仍主要随机采样，不能保证每步 512 个监督点覆盖整幅 1024 crop。
+- 新优化方向：增加 `training_spatial_bins`，在 source image 坐标上按网格先覆盖每个非空 cell，再随机填充剩余点；与 weak texture quota 同时使用时，先从弱纹理池做空间均衡选择，再从剩余点做空间均衡补足。
+- 这属于训练数据采样优化，不改变模型推理接口；预期提升弱纹理和大图空间覆盖，不直接保证单步 loss 更低。
+
 ## PFM v2.1 architecture migration (2026-05-27)
 - 本轮实现优先同步 PyTorch 训练/评估主路径，因为当前训练、报告、cache evaluator 和模型迭代都依赖 `python/pfm_model.py`；C++/LibTorch 推理端暂未同步，不能把新结构权重直接视为 C++ 推理可用。
 - 旧 checkpoint 兼容需要两层处理：`graph_keypoint_meta_dim` 从 payload/config 中读取并 fallback 到 2；新增模块参数通过默认模型 state 自动补齐。这样旧 2 维 GraphMatcher keypoint projection 不会被新默认 4 维结构强行加载。
@@ -286,3 +291,7 @@
 - 更轻的 hard-negative dustbin continuation 是当前更好的 balanced 方向。`weight=0.05` 从 raw-preservation probe 继续训练后，配合 `graph_min_raw_score=0.4` 和 `graph_min_raw_margin=0.01`，指定极端样本达到 `100/125=0.8000`，相对 high-precision baseline 多 11 个正确匹配。
 - 当前 GraphMatcher 应明确分成两档发布：默认 high_precision 仍用 `nm128/w0.5 no_xy dustbin` checkpoint；balanced experimental 使用 `graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916` + `graph_min_raw_score=0.4` + `graph_min_raw_margin=0.01`。后者增加召回但会牺牲总体 precision。
 - Spatial hard-negative gating is not yet better than the simpler hard-negative dustbin loss. With `spatial_min_distance=4.0`, the required hard sample improved recall to `101/132` after raw filtering, but precision was only `0.7652`; the non-spatial balanced setting remains better at `100/125=0.8000`. Keep the spatial gate as a diagnostic/ablation tool, not as the current default.
+- Training-time spatially balanced correspondence sampling is a useful stability/coverage change and does not damage the full-256 descriptor. The full 1 epoch run `spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414` completed 10635 steps with `skip=0`, `samples_per_pair=512`, and `eval_after top1=0.999222`.
+- Combining weak-texture quota with spatial bins makes the accepted GraphMatcher report much cleaner on the current validation sample. With `graph_min_raw_score=0.4`, `graph_min_raw_margin=0.01`, and `no_xy` metadata, the 24-sample report reached `11854/11860=0.999494` micro precision and `3068/3068=1.000000` weak-texture precision.
+- The same report confirms GraphMatcher is now acting as a high-precision filter on the tracked hard extreme pair: raw descriptor gave `88/512=0.171875`, while GraphMatcher filtered gave `78/84=0.928571` with weak texture `50/50=1.000000`. This fixes the earlier "GraphMatcher压坏descriptor" failure mode for this pair, but recall is still conservative.
+- The next bottleneck is accepted recall on extreme cross-position samples, not weak-texture precision on accepted matches. Future work should add a recall-preserving confidence objective or a second balanced route, while guarding `weak_texture_precision`, `coverage_occupied_fraction`, and the hard-pair false-match count.

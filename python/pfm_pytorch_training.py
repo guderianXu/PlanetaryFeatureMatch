@@ -506,6 +506,7 @@ def sample_feature_correspondences(
     count: int,
     min_intensity: float,
     weak_texture_fraction: float = 0.0,
+    spatial_bins: int = 0,
     generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if count <= 0:
@@ -514,6 +515,8 @@ def sample_feature_correspondences(
         raise ValueError("feature size must be positive")
     if weak_texture_fraction < 0.0 or weak_texture_fraction > 1.0:
         raise ValueError("weak_texture_fraction must be in [0, 1]")
+    if spatial_bins < 0:
+        raise ValueError("spatial_bins must be non-negative")
     _, height_a, width_a = pair.view_a.shape
     _, height_b, width_b = pair.view_b.shape
     yy, xx = torch.meshgrid(
@@ -541,13 +544,23 @@ def sample_feature_correspondences(
 
     take = min(count, points_a.size(0))
     if weak_texture_fraction > 0.0 and take > 1:
-        order = weak_texture_balanced_order(
+        order = weak_texture_spatially_balanced_order(
             pair.view_a,
             pair.view_b,
             points_a,
             points_b,
             take=take,
             weak_fraction=weak_texture_fraction,
+            spatial_bins=spatial_bins,
+            generator=generator,
+        )
+    elif spatial_bins > 0:
+        order = spatially_balanced_order(
+            points_a,
+            take=take,
+            spatial_bins=spatial_bins,
+            image_height=height_a,
+            image_width=width_a,
             generator=generator,
         )
     else:
@@ -623,6 +636,123 @@ def weak_texture_balanced_order(
         remaining = torch.nonzero(~used, as_tuple=False).reshape(-1)
         fill = torch.randperm(remaining.numel(), generator=generator, device=remaining.device)[: take - selected.numel()]
         selected = torch.cat([selected, remaining.index_select(0, fill)], dim=0)
+    order = torch.randperm(selected.numel(), generator=generator, device=selected.device)
+    return selected.index_select(0, order)[:take].contiguous()
+
+
+def spatially_balanced_order(
+    points_xy: torch.Tensor,
+    *,
+    take: int,
+    spatial_bins: int,
+    image_height: int,
+    image_width: int,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if take <= 0:
+        return torch.empty(0, dtype=torch.long, device=points_xy.device)
+    total = points_xy.size(0)
+    if total <= take:
+        return torch.arange(total, dtype=torch.long, device=points_xy.device)
+    if spatial_bins <= 0:
+        return torch.randperm(total, generator=generator, device=points_xy.device)[:take]
+    bins = int(spatial_bins)
+    x_bin = torch.clamp((points_xy[:, 0] * bins / max(1, image_width)).floor().to(torch.long), 0, bins - 1)
+    y_bin = torch.clamp((points_xy[:, 1] * bins / max(1, image_height)).floor().to(torch.long), 0, bins - 1)
+    cell_ids = y_bin * bins + x_bin
+    cell_order = torch.randperm(bins * bins, generator=generator, device=points_xy.device)
+    chosen: list[torch.Tensor] = []
+    leftovers: list[torch.Tensor] = []
+    for cell_id in cell_order:
+        members = torch.nonzero(cell_ids == cell_id, as_tuple=False).reshape(-1)
+        if members.numel() == 0:
+            continue
+        perm = torch.randperm(members.numel(), generator=generator, device=members.device)
+        shuffled = members.index_select(0, perm)
+        chosen.append(shuffled[:1])
+        if shuffled.numel() > 1:
+            leftovers.append(shuffled[1:])
+        if len(chosen) >= take:
+            break
+    if not chosen:
+        return torch.randperm(total, generator=generator, device=points_xy.device)[:take]
+    selected = torch.cat(chosen, dim=0)
+    if selected.numel() < take:
+        if leftovers:
+            remaining = torch.cat(leftovers, dim=0)
+        else:
+            used = torch.zeros(total, dtype=torch.bool, device=points_xy.device)
+            used[selected] = True
+            remaining = torch.nonzero(~used, as_tuple=False).reshape(-1)
+        if remaining.numel() > 0:
+            fill_order = torch.randperm(remaining.numel(), generator=generator, device=remaining.device)
+            fill = remaining.index_select(0, fill_order[: take - selected.numel()])
+            selected = torch.cat([selected, fill], dim=0)
+    order = torch.randperm(selected.numel(), generator=generator, device=selected.device)
+    return selected.index_select(0, order)[:take].contiguous()
+
+
+def weak_texture_spatially_balanced_order(
+    image_a: torch.Tensor,
+    image_b: torch.Tensor,
+    points_a: torch.Tensor,
+    points_b: torch.Tensor,
+    *,
+    take: int,
+    weak_fraction: float,
+    spatial_bins: int,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if spatial_bins <= 0:
+        return weak_texture_balanced_order(
+            image_a,
+            image_b,
+            points_a,
+            points_b,
+            take=take,
+            weak_fraction=weak_fraction,
+            generator=generator,
+        )
+    total = points_a.size(0)
+    if total <= take:
+        return torch.arange(total, dtype=torch.long, device=points_a.device)
+    weak_target = min(take, int(round(float(take) * float(weak_fraction))))
+    if weak_target <= 0:
+        return spatially_balanced_order(
+            points_a,
+            take=take,
+            spatial_bins=spatial_bins,
+            image_height=image_a.size(1),
+            image_width=image_a.size(2),
+            generator=generator,
+        )
+    texture = 0.5 * (
+        image_local_texture_scores(image_a, points_a) + image_local_texture_scores(image_b, points_b)
+    )
+    weak_pool_size = min(total, max(weak_target, int(math.ceil(float(total) * 0.25))))
+    weak_pool = torch.argsort(texture, stable=True)[:weak_pool_size]
+    weak_local_order = spatially_balanced_order(
+        points_a.index_select(0, weak_pool),
+        take=min(weak_target, weak_pool.numel()),
+        spatial_bins=spatial_bins,
+        image_height=image_a.size(1),
+        image_width=image_a.size(2),
+        generator=generator,
+    )
+    selected = weak_pool.index_select(0, weak_local_order)
+    if selected.numel() < take:
+        used = torch.zeros(total, dtype=torch.bool, device=points_a.device)
+        used[selected] = True
+        remaining = torch.nonzero(~used, as_tuple=False).reshape(-1)
+        fill_local_order = spatially_balanced_order(
+            points_a.index_select(0, remaining),
+            take=min(take - selected.numel(), remaining.numel()),
+            spatial_bins=spatial_bins,
+            image_height=image_a.size(1),
+            image_width=image_a.size(2),
+            generator=generator,
+        )
+        selected = torch.cat([selected, remaining.index_select(0, fill_local_order)], dim=0)
     order = torch.randperm(selected.numel(), generator=generator, device=selected.device)
     return selected.index_select(0, order)[:take].contiguous()
 
@@ -1526,6 +1656,7 @@ def train_step(
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
+    training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
@@ -1603,6 +1734,7 @@ def train_step(
                     count=samples_per_pair,
                     min_intensity=min_intensity,
                     weak_texture_fraction=training_weak_texture_fraction,
+                    spatial_bins=training_spatial_bins,
                     generator=generator,
                 )
                 pair_losses: list[torch.Tensor] = []
@@ -2322,6 +2454,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-pairs", type=int, default=2)
     parser.add_argument("--samples-per-pair", type=int, default=256)
     parser.add_argument("--training-weak-texture-fraction", type=float, default=0.0)
+    parser.add_argument("--training-spatial-bins", type=int, default=0)
     parser.add_argument("--learning-rate", type=float, default=3.0e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--teacher-weight", type=float, default=1.0)
@@ -2436,6 +2569,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gradient-accumulation-steps must be positive")
     if args.training_weak_texture_fraction < 0.0 or args.training_weak_texture_fraction > 1.0:
         parser.error("--training-weak-texture-fraction must be in [0, 1]")
+    if args.training_spatial_bins < 0:
+        parser.error("--training-spatial-bins must be nonnegative")
     if args.pair_cache_size < 0:
         parser.error("--pair-cache-size must be nonnegative")
     if args.prefetch_batches < 0:
@@ -2946,6 +3081,7 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,

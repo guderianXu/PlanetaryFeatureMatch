@@ -116,6 +116,49 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreaterEqual(int((points_a[:, 0] < 4.0).sum()), 4)
 
+    def test_sample_feature_correspondences_can_cover_spatial_bins(self):
+        view = torch.ones(1, 8, 8)
+        yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+        warp = torch.stack([xx.to(torch.float32), yy.to(torch.float32)], dim=-1)
+        pair = SyntheticPair(view_a=view, view_b=view, warp_a_to_b=warp, valid_mask=torch.ones(8, 8, dtype=torch.bool))
+
+        points_a, _ = train.sample_feature_correspondences(
+            pair,
+            feature_height=8,
+            feature_width=8,
+            count=4,
+            min_intensity=0.0,
+            spatial_bins=2,
+            generator=torch.Generator().manual_seed(17),
+        )
+
+        cell_ids = (points_a[:, 0] >= 4.0).to(torch.long) + 2 * (points_a[:, 1] >= 4.0).to(torch.long)
+        self.assertEqual(set(cell_ids.tolist()), {0, 1, 2, 3})
+
+    def test_sample_feature_correspondences_combines_weak_texture_and_spatial_bins(self):
+        view_a = torch.full((1, 8, 8), 0.5)
+        view_b = torch.full((1, 8, 8), 0.5)
+        view_a[:, :, 4:] = torch.tensor([0.0, 1.0, 0.0, 1.0]).repeat(8, 1)
+        view_b[:, :, 4:] = torch.tensor([0.0, 1.0, 0.0, 1.0]).repeat(8, 1)
+        yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+        warp = torch.stack([xx.to(torch.float32), yy.to(torch.float32)], dim=-1)
+        pair = SyntheticPair(view_a=view_a, view_b=view_b, warp_a_to_b=warp, valid_mask=torch.ones(8, 8, dtype=torch.bool))
+
+        points_a, _ = train.sample_feature_correspondences(
+            pair,
+            feature_height=8,
+            feature_width=8,
+            count=8,
+            min_intensity=0.0,
+            weak_texture_fraction=0.5,
+            spatial_bins=2,
+            generator=torch.Generator().manual_seed(19),
+        )
+
+        cell_ids = (points_a[:, 0] >= 4.0).to(torch.long) + 2 * (points_a[:, 1] >= 4.0).to(torch.long)
+        self.assertEqual(set(cell_ids.tolist()), {0, 1, 2, 3})
+        self.assertGreaterEqual(int((points_a[:, 0] < 4.0).sum()), 4)
+
     def test_resize_pair_for_training_scales_images_warp_and_mask(self):
         view = torch.arange(16, dtype=torch.float32).view(1, 4, 4)
         yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
@@ -1423,6 +1466,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.02",
             "--training-weak-texture-fraction",
             "0.25",
+            "--training-spatial-bins",
+            "8",
             "--hard-pair-glob",
             "*pair_004541*.pt",
         ]
@@ -1445,6 +1490,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_semi_dense_no_match_points, 24)
         self.assertAlmostEqual(args.graph_matcher_semi_dense_min_score, 0.02)
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
+        self.assertEqual(args.training_spatial_bins, 8)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
 
     def test_parse_args_accepts_gradient_accumulation_steps(self):
