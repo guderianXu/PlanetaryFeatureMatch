@@ -17,10 +17,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import cv2
@@ -29,6 +32,16 @@ import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_DIR = PROJECT_ROOT / "python"
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
+
+from compact_pair_cache import (  # noqa: E402
+    is_compact_pair_payload,
+    load_shared_image,
+    resolve_compact_image_path,
+)
+
 SIM_ROOT = PROJECT_ROOT / "辅助软件" / "数据模拟"
 DEFAULT_SAT_SIM = SIM_ROOT / "build" / "sat_sim_cuda"
 DEFAULT_DEM = SIM_ROOT / "dem" / "mar.tif"
@@ -123,7 +136,22 @@ def parse_tsai(path: Path) -> Camera:
 
 
 def load_archive(path: Path):
-    return torch.jit.load(str(path), map_location="cpu")
+    try:
+        return torch.jit.load(str(path), map_location="cpu")
+    except RuntimeError as jit_error:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="'torch.load' received a zip file")
+            payload = torch.load(path, map_location="cpu")
+        if not is_compact_pair_payload(payload):
+            raise jit_error
+        image_a = resolve_compact_image_path(path, str(payload["image_a"]))
+        image_b = resolve_compact_image_path(path, str(payload["image_b"]))
+        return SimpleNamespace(
+            view_a=load_shared_image(image_a),
+            view_b=load_shared_image(image_b),
+            warp_a_to_b=payload["warp_a_to_b"].detach().cpu().to(torch.float32).contiguous(),
+            valid_mask=payload["valid_mask"].detach().cpu().to(torch.bool).contiguous(),
+        )
 
 
 def normalize_view(view: torch.Tensor) -> torch.Tensor:
