@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PFM 仿真影像制作记录</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #5f6b7a;
+      --line: #d8dee6;
+      --accent: #2563eb;
+      --accent-soft: #e8f0ff;
+      --warn: #b45309;
+      --warn-soft: #fff4df;
+      --ok: #047857;
+      --ok-soft: #e8f7f0;
+      --code: #111827;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+
+    header {
+      background: #111827;
+      color: #ffffff;
+      padding: 36px 24px 30px;
+    }
+
+    header .wrap,
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    header p {
+      margin: 0;
+      color: #cbd5e1;
+      max-width: 880px;
+    }
+
+    main {
+      padding: 24px;
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      margin-bottom: 18px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      margin: 18px 0 8px;
+      font-size: 17px;
+    }
+
+    p {
+      margin: 8px 0;
+    }
+
+    ul,
+    ol {
+      margin: 8px 0 8px 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1f5f9;
+      font-weight: 700;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      background: #eef2f7;
+      color: var(--code);
+      border-radius: 4px;
+      padding: 1px 4px;
+      word-break: break-all;
+    }
+
+    pre {
+      margin: 12px 0;
+      padding: 14px 16px;
+      overflow-x: auto;
+      background: #0f172a;
+      color: #e5e7eb;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      word-break: normal;
+    }
+
+    .note,
+    .warning,
+    .ok {
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin: 12px 0;
+    }
+
+    .note {
+      background: var(--accent-soft);
+      border: 1px solid #bfd3ff;
+    }
+
+    .warning {
+      background: var(--warn-soft);
+      border: 1px solid #f0c678;
+      color: #5f370e;
+    }
+
+    .ok {
+      background: var(--ok-soft);
+      border: 1px solid #a7e3c3;
+      color: #064e3b;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fafafa;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 800px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      header {
+        padding: 28px 18px 24px;
+      }
+
+      main {
+        padding: 16px;
+      }
+
+      section {
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>PFM 仿真影像制作记录</h1>
+      <p>记录当前行星影像仿真训练数据的制作状态、原始输入、生成脚本、复现步骤和后续扩展注意事项。更新时间：2026-05-31。</p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. 当前结论</h2>
+      <div class="grid">
+        <div class="metric">
+          <strong>10635</strong>
+          <span>当前训练 pair 数</span>
+        </div>
+        <div class="metric">
+          <strong>3079</strong>
+          <span>当前验证 pair 数</span>
+        </div>
+        <div class="metric">
+          <strong>1348</strong>
+          <span>当前测试 pair 数</span>
+        </div>
+      </div>
+      <p>当前数据已经足够继续训练和做模型消融，特别是 256 维特征提取器、GraphMatcher、弱纹理采样、空间均衡采样等方向。但它还不能算最终数据集，主要短板是普通 <code>cross_position</code> 没有 test split，且 train/val/test 是否真正按地形区域隔离还需要进一步严格化。</p>
+      <div class="warning">
+        当前评估指标已经很高，说明普通验证样本偏容易。后续不能只看随机验证集平均值，应固定保留 cross-position、extreme cross-position、低重叠、弱纹理和真实影像压力测试。
+      </div>
+    </section>
+
+    <section>
+      <h2>2. 当前数据集位置与规模</h2>
+      <p>当前主训练数据统一放在：</p>
+      <pre><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据</code></pre>
+
+      <table>
+        <thead>
+          <tr>
+            <th>数据集</th>
+            <th>用途</th>
+            <th>train</th>
+            <th>val</th>
+            <th>test</th>
+            <th>大小</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>pose_sim_2048_gap30_views10_721</code></td>
+            <td>same_position</td>
+            <td>5235</td>
+            <td>1495</td>
+            <td>749</td>
+            <td>约 492G</td>
+            <td>同一相机位置下，不同姿态/焦距/视角扰动。</td>
+          </tr>
+          <tr>
+            <td><code>pose_sim_cross_position_rendered_2048_gap30_views10</code></td>
+            <td>普通 cross_position</td>
+            <td>1200</td>
+            <td>384</td>
+            <td>0</td>
+            <td>约 76G</td>
+            <td>不同相机位置，使用真实 rendered depth。当前缺少 test split。</td>
+          </tr>
+          <tr>
+            <td><code>pose_sim_cross_position_rendered_extreme_2048_gap30_views10_721_v2</code></td>
+            <td>extreme_cross_position</td>
+            <td>4200</td>
+            <td>1200</td>
+            <td>599</td>
+            <td>约 248G</td>
+            <td>更大相机位置 offset，覆盖 <code>1,2,4,8,12,16,20,24,32</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>目录含义</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>目录</th>
+            <th>含义</th>
+            <th>是否建议保留</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>cache/train</code>、<code>cache/val</code>、<code>cache/test</code></td>
+            <td>训练脚本直接读取的 <code>pair_*.pt</code>。</td>
+            <td>必须保留</td>
+          </tr>
+          <tr>
+            <td><code>manifests</code></td>
+            <td>生成清单、划分、pair 来源、offset、overlap 等记录。</td>
+            <td>必须保留</td>
+          </tr>
+          <tr>
+            <td><code>image_store</code></td>
+            <td>compact 后共享保存的影像 tensor，避免每个 pair 重复存图。</td>
+            <td>必须保留</td>
+          </tr>
+          <tr>
+            <td><code>tsai_tracks</code></td>
+            <td>由轨迹 CSV 生成的 TSAI 相机参数。</td>
+            <td>建议保留</td>
+          </tr>
+          <tr>
+            <td><code>depth_cache</code></td>
+            <td>cross-position 生成用的真实 depth 渲染结果。</td>
+            <td>建议保留，后续复用可省大量时间</td>
+          </tr>
+          <tr>
+            <td><code>dataset_metadata.json</code></td>
+            <td>记录 DEM/DOM、sat_sim、offset、split、min-overlap 等生成配置。</td>
+            <td>必须保留</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. 原始输入数据</h2>
+
+      <h3>相机轨迹 CSV</h3>
+      <pre><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/相机轨迹/Orbiter_InfoCSV_20251215_110km.csv
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/相机轨迹/Orbiter_InfoCSV_20251215_340km.csv
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/相机轨迹/Orbiter_InfoCSV_20251216_110km.csv
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/相机轨迹/Orbiter_InfoCSV_20251216_340km.csv</code></pre>
+
+      <h3>DEM / DOM</h3>
+      <p>脚本默认读取：</p>
+      <pre><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/dem/mar.tif
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif</code></pre>
+      <div class="warning">
+        当前默认目录下的 DEM/DOM 文件不在，应该是之前腾空间时移走了。重新生成数据前需要复制或软链回来，或者在命令中显式传入 <code>--dem</code> 和 <code>--dom</code>。
+      </div>
+      <p>当前查到的可用归档位置：</p>
+      <pre><code>/media/xjw/8T/深度学习数据/归档/PlanetaryFeatureMatch/辅助软件/数据模拟/dem/mar.tif
+/media/xjw/8T/深度学习数据/归档/PlanetaryFeatureMatch/辅助软件/数据模拟/dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif
+/home/xjw/simplt/data/mar.tif
+/media/xjw/8T/火星dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif</code></pre>
+
+      <h3>SPICE kernel</h3>
+      <pre><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/kernel/lsk/naif0012.tls.pc
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/kernel/pck/pck00010.tpc
+/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟/kernel/spk/planets/de430.bsp</code></pre>
+    </section>
+
+    <section>
+      <h2>4. 关键脚本和职责</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>辅助软件/数据模拟/mars_orbit_to_tsai.py</code></td>
+            <td>把轨迹 CSV 转成 TSAI 相机文件，支持相机姿态扰动、焦距缩放、渲染脚本生成。</td>
+          </tr>
+          <tr>
+            <td><code>辅助软件/数据模拟/batch_pose_sim_dataset.py</code></td>
+            <td>批量生成 same-position 数据：渲染 CameraA 与同位置虚拟相机，转成 PFM pair cache。</td>
+          </tr>
+          <tr>
+            <td><code>辅助软件/数据模拟/pose_sim_to_pfm_cache.py</code></td>
+            <td>把 image、depth、TSAI 转成 <code>pair_*.pt</code>，写入 <code>view_a/view_b/warp_a_to_b/valid_mask</code>。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/generate_cross_position_pose_pairs.py</code></td>
+            <td>基于 same-position 数据和 CameraA depth，生成不同相机位置的 cross/extreme pair。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/compact_pose_sim_pair_cache.py</code></td>
+            <td>把 pair 中重复影像移动到共享 <code>image_store</code>，减少重复存储。</td>
+          </tr>
+          <tr>
+            <td><code>辅助软件/数据模拟/build/sat_sim_cuda</code></td>
+            <td>CUDA 版渲染程序，输入 DEM、DOM、TSAI，输出仿真影像和 depth。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>5. 制作链路</h2>
+      <ol>
+        <li>准备 DEM、DOM、SPICE kernel、相机轨迹 CSV。</li>
+        <li>用 <code>mars_orbit_to_tsai.py</code> 生成各轨迹、各扰动视角的 TSAI 相机文件。</li>
+        <li>用 <code>sat_sim_cuda --write-depth</code> 渲染仿真影像和 depth。</li>
+        <li>用 <code>pose_sim_to_pfm_cache.py</code> 把影像、depth、TSAI 转成 PFM 训练 pair。</li>
+        <li>用 <code>generate_cross_position_pose_pairs.py</code> 基于真实 rendered depth 生成跨相机位置 pair。</li>
+        <li>检查 manifest、valid fraction、pair 数量、corrupt pair。</li>
+        <li>必要时用 <code>compact_pose_sim_pair_cache.py</code> 去重影像存储。</li>
+        <li>把最终 <code>cache/train|val|test</code> 加入训练命令。</li>
+      </ol>
+
+      <div class="note">
+        cross-position 数据必须优先使用 <code>--depth-mode rendered</code>。早期的 <code>sphere</code> 或 <code>warp-or-sphere</code> 只适合作为历史对照，不建议作为正式训练 GT。
+      </div>
+    </section>
+
+    <section>
+      <h2>6. 复现命令模板</h2>
+
+      <h3>6.1 恢复 DEM / DOM 默认路径</h3>
+      <p>如果默认 <code>dem/</code>、<code>dom/</code> 目录为空，可用软链恢复：</p>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟
+ln -s /media/xjw/8T/深度学习数据/归档/PlanetaryFeatureMatch/辅助软件/数据模拟/dem/mar.tif dem/mar.tif
+ln -s /media/xjw/8T/深度学习数据/归档/PlanetaryFeatureMatch/辅助软件/数据模拟/dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif</code></pre>
+
+      <h3>6.2 编译 sat_sim_cuda</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟
+cmake -S . -B build
+cmake --build build -j</code></pre>
+
+      <h3>6.3 生成 same-position 数据</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟
+/home/xjw/anaconda3/envs/asp36/bin/python batch_pose_sim_dataset.py \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据 \
+  --dataset-name pose_sim_2048_gap30_views10_next \
+  --render-gap 30 \
+  --image-size 2048 \
+  --sat-sim-jobs 4 \
+  --run-name full \
+  --max-pairs 0 \
+  --min-free-gb 500</code></pre>
+
+      <h3>6.4 生成普通 cross-position 数据</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+/home/xjw/anaconda3/envs/pfm-train/bin/python scripts/generate_cross_position_pose_pairs.py \
+  --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_721 \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_next \
+  --train-pairs 5000 \
+  --val-pairs 1000 \
+  --test-pairs 1000 \
+  --train-offsets 1,2,4,8 \
+  --val-offsets 1,2,4,8 \
+  --test-offsets 1,2,4,8 \
+  --depth-mode rendered \
+  --min-overlap 0.05 \
+  --sat-sim-jobs 2 \
+  --depth-render-workers 4</code></pre>
+
+      <h3>6.5 生成 extreme cross-position 数据</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+/home/xjw/anaconda3/envs/pfm-train/bin/python scripts/generate_cross_position_pose_pairs.py \
+  --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_721 \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_next \
+  --train-pairs 5000 \
+  --val-pairs 1500 \
+  --test-pairs 1500 \
+  --train-offsets 1,2,4,8,12,16,20,24,32 \
+  --val-offsets 1,2,4,8,12,16,20,24,32 \
+  --test-offsets 1,2,4,8,12,16,20,24,32 \
+  --depth-mode rendered \
+  --min-overlap 0.02 \
+  --sat-sim-jobs 2 \
+  --depth-render-workers 4 \
+  --reuse-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_2048_gap30_views10_721_v2</code></pre>
+
+      <h3>6.6 检查数量</h3>
+      <pre><code>DATA=/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_next
+find "$DATA/cache/train" -name 'pair_*.pt' | wc -l
+find "$DATA/cache/val" -name 'pair_*.pt' | wc -l
+find "$DATA/cache/test" -name 'pair_*.pt' | wc -l
+sed -n '1,120p' "$DATA/dataset_metadata.json"</code></pre>
+
+      <h3>6.7 压缩重复影像存储</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+/home/xjw/anaconda3/envs/pfm-train/bin/python scripts/compact_pose_sim_pair_cache.py \
+  /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_next</code></pre>
+    </section>
+
+    <section>
+      <h2>7. 当前训练命令使用的数据</h2>
+      <p>最近完整炼丹使用的是以下 train cache：</p>
+      <pre><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_721/cache/train
+/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_2048_gap30_views10/cache/train
+/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_2048_gap30_views10_721_v2/cache/train</code></pre>
+      <p>验证使用对应的 <code>cache/val</code>。训练时每个 pair 当前采样 <code>512</code> 个监督对应点，训练 crop 使用 <code>1024</code>，原始 pair 是 <code>2048</code>。</p>
+    </section>
+
+    <section>
+      <h2>8. 质量检查清单</h2>
+      <ul>
+        <li>检查 <code>dataset_metadata.json</code>，确认 DEM、DOM、sat_sim、offset、min-overlap、split 数量正确。</li>
+        <li>检查 <code>manifests/*.csv</code>，确认 train/val/test 划分符合 7:2:1 或本轮设计目标。</li>
+        <li>检查 <code>low_overlap</code> 数量。极端数据允许较多低重叠候选被丢弃，但最终 kept pair 必须满足阈值。</li>
+        <li>检查 <code>corrupt_pairs</code>。发现半写坏文件后必须移走，不要混入训练。</li>
+        <li>每次新增数据至少抽样生成 10-20 张匹配可视化，看绿线/红线是否符合 GT。</li>
+        <li>cross-position 必须用真实 depth 和 TSAI 重投影生成 <code>warp_a_to_b</code>，不要用 RANSAC 或 matcher 输出反推 GT。</li>
+        <li>训练前确认数据位于高速盘或已做缓存；机械盘会让 GPU 利用率上下波动。</li>
+        <li>不要只看随机验证集平均 precision，要固定追踪难样本，例如 <code>pair_004541_cross_off008_s00109_s00119.pt</code>。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>9. 重要注意事项</h2>
+      <div class="warning">
+        不要删除 <code>image_store</code>。compact 后的 <code>pair_*.pt</code> 可能引用共享影像文件，删除后 cache 会不可用。
+      </div>
+      <div class="warning">
+        不要把 <code>runs/</code>、<code>训练数据/</code>、大体积 <code>.pt/.pth/.tif/.pdf/.png</code> 推到 GitHub。GitHub 只保存脚本、文档和小型测试。
+      </div>
+      <div class="warning">
+        当前普通 <code>cross_position</code> 缺少 test split。下次扩数据时应优先补齐，而不是只继续加 extreme。
+      </div>
+      <div class="note">
+        <code>pose_sim_cross_position_rendered_extreme_2048_gap30_views10_721_v2</code> 的 metadata 记录 test 目标为 600，但当前实际 find 到 599 个 pair，可能有一个坏 pair 被移走或未同步。后续正式报告前应核对 manifests 与实际文件数量。
+      </div>
+      <div class="ok">
+        当前使用的 <code>rendered depth</code> 链路是正确方向：DEM/DOM + TSAI 生成物理一致的影像和 GT warp，比人工造点或 matcher 输出更可靠。
+      </div>
+    </section>
+
+    <section>
+      <h2>10. 后续建议</h2>
+      <ol>
+        <li>优先补普通 <code>cross_position</code> 的 test split，至少 300-500 pair，最好 1000 pair。</li>
+        <li>把普通 <code>cross_position</code> train 从 1200 提高到 3000-5000 pair。</li>
+        <li>建立 terrain-heldout 测试集：测试地貌区域不要和训练区域重叠。</li>
+        <li>保留固定 hard case 报告：低重叠、off012/off016/off020/off024/off032、弱纹理、真实 TIFF。</li>
+        <li>如果继续扩到 30000-50000 pair，必须先做好去重、manifest、硬盘空间和训练读取缓存，否则 GPU 会被 IO 拖慢。</li>
+      </ol>
+    </section>
+  </main>
+</body>
+</html>
