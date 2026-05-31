@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a split-ratio view of an existing PFM pair cache using symlinks."""
+"""Create a split-ratio PFM pair cache view using links, copies, or moves."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import os
 import random
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,25 +81,140 @@ def safe_symlink(source: Path, target: Path) -> None:
     target.symlink_to(source.resolve())
 
 
+def remove_existing(target: Path) -> None:
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.exists():
+        shutil.rmtree(target)
+
+
+def materialize_file(source: Path, target: Path, *, mode: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    remove_existing(target)
+    if mode == "symlink":
+        target.symlink_to(source.resolve())
+    elif mode == "hardlink":
+        os.link(source, target)
+    elif mode == "copy":
+        shutil.copy2(source, target)
+    elif mode == "move":
+        shutil.move(str(source), str(target))
+    else:
+        raise ValueError(f"unsupported link mode: {mode}")
+
+
+def tree_files(source: Path) -> list[Path]:
+    return [path for path in source.rglob("*") if path.is_file()]
+
+
+def copy_tree_parallel(source: Path, target: Path, *, mode: str, workers: int) -> None:
+    files = tree_files(source)
+    for child in source.rglob("*"):
+        if child.is_dir():
+            (target / child.relative_to(source)).mkdir(parents=True, exist_ok=True)
+
+    def materialize_child(child: Path) -> None:
+        out = target / child.relative_to(source)
+        if mode == "hardlink":
+            out.parent.mkdir(parents=True, exist_ok=True)
+            remove_existing(out)
+            os.link(child, out)
+        elif mode == "copy":
+            out.parent.mkdir(parents=True, exist_ok=True)
+            remove_existing(out)
+            shutil.copy2(child, out)
+        else:
+            raise ValueError(f"unsupported parallel tree mode: {mode}")
+
+    if workers <= 1 or len(files) <= 1:
+        for child in files:
+            materialize_child(child)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(materialize_child, child) for child in files]
+        for future in as_completed(futures):
+            future.result()
+
+
+def materialize_tree(source: Path, target: Path, *, mode: str, workers: int) -> None:
+    remove_existing(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "symlink":
+        target.symlink_to(source.resolve(), target_is_directory=True)
+    elif mode == "hardlink":
+        target.mkdir(parents=True, exist_ok=True)
+        copy_tree_parallel(source, target, mode=mode, workers=workers)
+    elif mode == "copy":
+        target.mkdir(parents=True, exist_ok=True)
+        copy_tree_parallel(source, target, mode=mode, workers=workers)
+    elif mode == "move":
+        shutil.move(str(source), str(target))
+    else:
+        raise ValueError(f"unsupported link mode: {mode}")
+
+
+def materialize_path(source: Path, target: Path, *, mode: str, workers: int) -> None:
+    if source.is_dir():
+        materialize_tree(source, target, mode=mode, workers=workers)
+    else:
+        materialize_file(source, target, mode=mode)
+
+
+def materialize_pair_record(
+    *,
+    output_root: Path,
+    split: str,
+    index: int,
+    record: PairRecord,
+    link_mode: str,
+) -> dict[str, str]:
+    source_name = f"source_repart_{index:06d}_{record.old_split}_{record.source_dir}"
+    target = output_root / "cache" / split / source_name / record.pair_path.name
+    materialize_file(record.pair_path, target, mode=link_mode)
+    sidecar = record.pair_path.with_suffix(".json")
+    if sidecar.exists():
+        materialize_file(sidecar, target.with_suffix(".json"), mode=link_mode)
+    row = dict(record.row or {})
+    row["split"] = split
+    row["pair_path"] = str(target.resolve(strict=False))
+    return row
+
+
 def write_split(
     *,
     output_root: Path,
     split: str,
     records: list[PairRecord],
+    link_mode: str,
+    workers: int,
 ) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for index, record in enumerate(records):
-        source_name = f"source_repart_{index:06d}_{record.old_split}_{record.source_dir}"
-        target = output_root / "cache" / split / source_name / record.pair_path.name
-        safe_symlink(record.pair_path, target)
-        sidecar = record.pair_path.with_suffix(".json")
-        if sidecar.exists():
-            safe_symlink(sidecar, target.with_suffix(".json"))
-        row = dict(record.row or {})
-        row["split"] = split
-        row["pair_path"] = str(target.resolve(strict=False))
-        rows.append(row)
-    return rows
+    if workers <= 1 or len(records) <= 1:
+        return [
+            materialize_pair_record(
+                output_root=output_root,
+                split=split,
+                index=index,
+                record=record,
+                link_mode=link_mode,
+            )
+            for index, record in enumerate(records)
+        ]
+    rows: list[dict[str, str] | None] = [None] * len(records)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                materialize_pair_record,
+                output_root=output_root,
+                split=split,
+                index=index,
+                record=record,
+                link_mode=link_mode,
+            ): index
+            for index, record in enumerate(records)
+        }
+        for future in as_completed(futures):
+            rows[futures[future]] = future.result()
+    return [row for row in rows if row is not None]
 
 
 def write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
@@ -125,17 +241,29 @@ def parse_ratio(value: str) -> tuple[int, int, int]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Repartition a PFM pair cache into train/val/test symlink splits.")
+    parser = argparse.ArgumentParser(description="Repartition a PFM pair cache into train/val/test splits.")
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--ratio", type=parse_ratio, default=parse_ratio("7:2:1"))
     parser.add_argument("--seed", type=int, default=20260528)
+    parser.add_argument(
+        "--link-mode",
+        choices=("symlink", "hardlink", "copy", "move"),
+        default="symlink",
+        help=(
+            "How to materialize pair files and shared assets. Use copy/move when "
+            "the repartitioned cache must be self-contained on another disk."
+        ),
+    )
+    parser.add_argument("--workers", type=int, default=1, help="Parallel file workers for pair files and copied trees.")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.workers <= 0:
+        raise ValueError("--workers must be positive")
     input_root = args.input_root.resolve()
     output_root = args.output_root.resolve()
     if output_root.exists() and args.overwrite:
@@ -157,16 +285,24 @@ def main() -> int:
 
     all_rows: list[dict[str, str]] = []
     for split, split_items in split_records.items():
-        rows = write_split(output_root=output_root, split=split, records=split_items)
+        rows = write_split(
+            output_root=output_root,
+            split=split,
+            records=split_items,
+            link_mode=args.link_mode,
+            workers=args.workers,
+        )
         write_manifest(output_root / "manifests" / f"repartition_{split}.csv", rows)
         all_rows.extend(rows)
     write_manifest(output_root / "manifests" / "repartition_all.csv", all_rows)
 
-    for name in ("tsai_tracks", "dataset_metadata.json"):
+    # Compact pair payloads store image paths relative to each pair file, so the
+    # shared image store must exist at the same relative dataset-root location.
+    for name in ("tsai_tracks", "dataset_metadata.json", "image_store"):
         source = input_root / name
         target = output_root / name
         if source.exists():
-            safe_symlink(source, target)
+            materialize_path(source, target, mode=args.link_mode, workers=args.workers)
 
     metadata = {
         "source_dataset_root": str(input_root),
@@ -174,7 +310,8 @@ def main() -> int:
         "seed": args.seed,
         "total_pairs": len(records),
         "splits": {split: len(items) for split, items in split_records.items()},
-        "link_type": "symlink",
+        "link_type": args.link_mode,
+        "workers": args.workers,
     }
     (output_root / "repartition_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",

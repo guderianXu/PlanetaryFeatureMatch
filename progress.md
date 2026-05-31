@@ -784,8 +784,20 @@
 - 视觉报告：
   - GraphMatcher：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414/visual_report/graph_matcher_filter_s04_m001/training_report_zh.pdf`。
   - Raw descriptor：`runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414/visual_report/raw_descriptor/training_report_zh.pdf`。
-  - GraphMatcher 分层：`graph_match_error_strata.csv`。
+- GraphMatcher 分层：`graph_match_error_strata.csv`。
 - 24 样本报告结果：
   - GraphMatcher filtered：`11854/11860=0.999494`，weak texture `3068/3068=1.000000`，平均覆盖格占用 `0.883464`。
   - Raw descriptor：`11863/12288=0.965413`，weak texture `3298/3353=0.983597`，平均覆盖格占用 `0.886719`。
   - 指定极端样本 `pair_004541_cross_off008_s00109_s00119.pt`：raw `88/512=0.171875`；GraphMatcher filtered `78/84=0.928571`，weak texture `50/50=1.000000`。
+
+## 2026-06-01 仿真数据增量生成状态
+
+- 07:51 CST 检查：`sim_same_position_continue_20260531` 仍在运行，主进程 PID `900660`，当前子进程为 `sat_sim_cuda`。
+- 输出数据集：`/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_2048_gap30_views10`。
+- 本轮目标：从原 `7479` 个 pair 继续新增 `3000` 个，目标总数 `10479`。
+- 当前统计：total `9954`，train `4986`，val `2484`，test `2484`；manifest 行数 `2476`，其中数据记录约 `2475`。
+- 当前进度约 `2475/3000`，剩余约 `525` 个 pair；日志最新进度行为 `kept=2475 last_candidate=9953 free_gb=3889.0`。
+- 磁盘状态：`/media/xjw/8T` 可用约 `3.8T`，`/media/xjw/xjw2T` 可用约 `1012G`。用户已确认 xjw2T 空间充足，后续新增仿真数据优先转到 xjw2T 生成。
+- 并行检查发现 `runs/sim_ultra_cross_20260531.pid` 指向的进程已结束；`pose_sim_cross_position_rendered_ultra_2048_gap30_views10_721_20260531` 当前只有约 `5.0G` depth cache，`cache/train|val|test` 均为 `0`，不能作为训练数据使用。后续需要在 xjw2T 上重新生成或修复该极端跨位置数据集。
+- 为后续训练数据整理修复了 `scripts/repartition_pair_cache.py`：从仅支持 symlink 扩展为 `symlink|hardlink|copy|move`，并支持 `--workers` 并行搬运 pair/sidecar/共享资产；同时把 compact cache 必需的 `image_store` 一起带到输出 root，避免相对路径失效。
+- 新增测试 `python/test_repartition_pair_cache.py`，验证 `--link-mode copy --workers 2` 下 10 个 pair 能按 `7:2:1` 生成实体 split，且 `image_store`/`tsai_tracks` 被正确复制。验证命令通过：`py_compile scripts/repartition_pair_cache.py python/test_repartition_pair_cache.py`；`python -m unittest python/test_repartition_pair_cache.py`。

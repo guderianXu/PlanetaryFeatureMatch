@@ -611,3 +611,23 @@
 - 这轮解决的是“接受的匹配更干净、更均匀”，而不是极端样本召回最大化。
 - GraphMatcher 现在在硬样本上主要承担过滤器角色：它显著提高 precision，但会拒掉大量不确定点。
 - 下一步如果继续优化，应专门提高极端跨位置的 accepted recall，同时保持 weak texture precision 和 coverage 不回退。
+
+## 2026-06-01 数据生成与 7:2:1 split 整理
+
+目标：当前 8T 同位置 3000 增量仿真收尾后，把可训练 cache 以 7:2:1 的实体 split 整理到 xjw2T，并基于更新数据进入下一轮 1024 crop 训练。
+
+已完成：
+- [complete] 检查确认 `sim_same_position_continue_20260531` 正在继续运行，目标为 `7479 -> 10479` 个 pair。
+- [complete] 查明 `batch_pose_sim_dataset.py` 当前按 4 条轨迹硬编码 split：2 条 train、1 条 val、1 条 test，约等于 `50/25/25`，不能作为最终训练划分。
+- [complete] 扩展 `scripts/repartition_pair_cache.py`，支持 `symlink|hardlink|copy|move` 和 `--workers`，用于并行生成自包含的 7:2:1 split。
+- [complete] 修复 compact cache 自包含问题：重划分时同步处理 `image_store`，避免 pair 内相对路径失效。
+- [complete] 增加 `python/test_repartition_pair_cache.py`，覆盖 `copy` 模式、并行 workers、7:2:1 计数和共享资产复制。
+
+待完成：
+- [pending] 等待当前 3000 增量达到 `10479` 总 pair。
+- [pending] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers N` 在 xjw2T 创建实体训练入口。
+- [pending] 重新检查 train/val/test 数量和 compact image path 可读性。
+- [pending] 基于新 split 启动下一轮训练与 raw/graph 报告。
+
+注意：
+- `sim_ultra_cross_20260531` 已结束但没有生成 pair cache，只有 depth cache；不能混入训练。后续极端跨位置数据需要在 xjw2T 重新生成。
