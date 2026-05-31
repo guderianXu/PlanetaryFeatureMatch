@@ -1252,6 +1252,45 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.0)
 
+    def test_graph_matcher_hard_negative_dustbin_loss_penalizes_raw_confusable_edges(self):
+        desc_a = torch.eye(3)
+        desc_b = torch.eye(3)
+        desc_b[1] = torch.tensor([0.96, 0.28, 0.0])
+        desc_b = torch.nn.functional.normalize(desc_b, dim=1)
+        logits = torch.zeros(4, 4)
+        logits[0, 0] = 3.0
+        logits[1, 1] = 3.0
+        logits[2, 2] = 3.0
+        logits[0, 1] = 2.0
+        logits[:3, 3] = 1.0
+        logits[3, :3] = 1.0
+
+        loss = train.graph_matcher_hard_negative_dustbin_loss(
+            logits,
+            desc_a,
+            desc_b,
+            positive_count=3,
+            negative_topk=1,
+            margin=0.25,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        safer_logits = logits.clone()
+        safer_logits[0, 1] = 0.2
+        self.assertAlmostEqual(
+            float(
+                train.graph_matcher_hard_negative_dustbin_loss(
+                    safer_logits,
+                    desc_a,
+                    desc_b,
+                    positive_count=3,
+                    negative_topk=1,
+                    margin=0.25,
+                )
+            ),
+            0.0,
+        )
+
     def test_apply_graph_metadata_mode_can_remove_xy_prior(self):
         metadata = torch.arange(28, dtype=torch.float32).view(2, 14)
 
@@ -1297,6 +1336,12 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "1.5",
             "--graph-matcher-raw-preservation-raw-margin",
             "0.04",
+            "--graph-matcher-hard-negative-dustbin-weight",
+            "0.3",
+            "--graph-matcher-hard-negative-dustbin-topk",
+            "12",
+            "--graph-matcher-hard-negative-dustbin-margin",
+            "0.35",
             "--training-weak-texture-fraction",
             "0.25",
             "--hard-pair-glob",
@@ -1314,6 +1359,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_weight, 0.1)
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_margin, 1.5)
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_raw_margin, 0.04)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.3)
+        self.assertEqual(args.graph_matcher_hard_negative_dustbin_topk, 12)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_margin, 0.35)
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
 

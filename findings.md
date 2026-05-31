@@ -282,3 +282,6 @@
 - 更保守的 raw-preservation + stronger dustbin 方向更可靠。`no accept + no_match_weight=0.7 + raw_preservation=0.30` 的 probe 让指定极端样本变成 `101/138=0.7319`，weak texture 为 `100/115=0.8696`；micro 仍有 `0.9804`。它未达到目标，但比 accept-head probe 更接近可用 balanced 模式。
 - 对 raw-preservation probe 加 raw score/margin 过滤只能小幅改善 precision：指定极端样本最好约 `101/134=0.7537`，仍不到 `0.80`。这说明剩余错误不是简单低 raw-score 噪声，后续需要更细的 hard-negative 设计，例如按同地貌重复纹理、弱纹理区域、低重叠边界分别采负样本。
 - 当前模型选择应分为三档：`high_precision` 继续用 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`；`balanced experimental` 可参考 raw-preservation probe；`accept-head` 暂不作为推荐模型，只保留代码入口用于后续更保守训练。
+- Hard-negative dustbin loss 能有效抑制 raw-confusable false matches，但权重很敏感。`weight=0.20` 会把模型推回 high-precision/low-recall 行为，指定极端样本为 `89/105=0.8476`；它提升精度但没有增加正确数。
+- 更轻的 hard-negative dustbin continuation 是当前更好的 balanced 方向。`weight=0.05` 从 raw-preservation probe 继续训练后，配合 `graph_min_raw_score=0.4` 和 `graph_min_raw_margin=0.01`，指定极端样本达到 `100/125=0.8000`，相对 high-precision baseline 多 11 个正确匹配。
+- 当前 GraphMatcher 应明确分成两档发布：默认 high_precision 仍用 `nm128/w0.5 no_xy dustbin` checkpoint；balanced experimental 使用 `graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916` + `graph_min_raw_score=0.4` + `graph_min_raw_margin=0.01`。后者增加召回但会牺牲总体 precision。

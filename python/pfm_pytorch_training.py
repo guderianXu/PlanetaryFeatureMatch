@@ -928,6 +928,9 @@ def graph_matcher_correspondence_loss(
     raw_preservation_weight: float = 0.0,
     raw_preservation_margin: float = 1.0,
     raw_preservation_raw_margin: float = 0.05,
+    hard_negative_dustbin_weight: float = 0.0,
+    hard_negative_dustbin_topk: int = 8,
+    hard_negative_dustbin_margin: float = 0.25,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
@@ -1005,6 +1008,15 @@ def graph_matcher_correspondence_loss(
             target_margin=raw_preservation_margin,
             raw_margin_threshold=raw_preservation_raw_margin,
         )
+    if hard_negative_dustbin_weight > 0.0:
+        loss = loss + float(hard_negative_dustbin_weight) * graph_matcher_hard_negative_dustbin_loss(
+            output.logits,
+            desc_a[:count],
+            desc_b[:count],
+            positive_count=count,
+            negative_topk=hard_negative_dustbin_topk,
+            margin=hard_negative_dustbin_margin,
+        )
     return loss
 
 
@@ -1074,6 +1086,31 @@ def graph_matcher_raw_preservation_loss(
     row_loss = (float(target_margin) - (logit_diag - row_hard)).clamp_min(0.0).pow(2)
     col_loss = (float(target_margin) - (logit_diag - col_hard)).clamp_min(0.0).pow(2)
     return 0.5 * (row_loss[confident].mean() + col_loss[confident].mean())
+
+
+def graph_matcher_hard_negative_dustbin_loss(
+    logits: torch.Tensor,
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    *,
+    positive_count: int,
+    negative_topk: int = 8,
+    margin: float = 0.25,
+) -> torch.Tensor:
+    count = min(int(positive_count), desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1)
+    if count <= 1 or negative_topk <= 0:
+        return logits.new_zeros(())
+    raw_similarity = normalize_descriptor_batch(desc_a[:count]) @ normalize_descriptor_batch(desc_b[:count]).T
+    diagonal = torch.eye(count, dtype=torch.bool, device=raw_similarity.device)
+    masked_similarity = raw_similarity.masked_fill(diagonal, -float("inf"))
+    k = min(int(negative_topk), count - 1)
+    hard_indices = masked_similarity.topk(k, dim=1).indices
+    pair_logits = logits[:count, :count]
+    hard_logits = pair_logits.gather(1, hard_indices)
+    row_dustbin = logits[:count, -1].unsqueeze(1).expand_as(hard_logits)
+    col_dustbin = logits[-1, :count].index_select(0, hard_indices.reshape(-1)).view_as(hard_logits)
+    dustbin_floor = torch.minimum(row_dustbin, col_dustbin)
+    return (hard_logits - dustbin_floor + float(margin)).clamp_min(0.0).pow(2).mean()
 
 
 def hard_negative_margin_loss(desc_a: torch.Tensor, desc_b: torch.Tensor, *, margin: float = 0.2) -> torch.Tensor:
@@ -1417,6 +1454,9 @@ def train_step(
     graph_matcher_raw_preservation_weight: float = 0.0,
     graph_matcher_raw_preservation_margin: float = 1.0,
     graph_matcher_raw_preservation_raw_margin: float = 0.05,
+    graph_matcher_hard_negative_dustbin_weight: float = 0.0,
+    graph_matcher_hard_negative_dustbin_topk: int = 8,
+    graph_matcher_hard_negative_dustbin_margin: float = 0.25,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
@@ -1546,6 +1586,9 @@ def train_step(
                             raw_preservation_weight=graph_matcher_raw_preservation_weight,
                             raw_preservation_margin=graph_matcher_raw_preservation_margin,
                             raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
+                            hard_negative_dustbin_weight=graph_matcher_hard_negative_dustbin_weight,
+                            hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
+                            hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
                             generator=generator,
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
@@ -2285,6 +2328,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
     parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-margin", type=float, default=0.25)
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -2367,6 +2413,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-raw-preservation-margin must be nonnegative")
     if args.graph_matcher_raw_preservation_raw_margin < 0.0:
         parser.error("--graph-matcher-raw-preservation-raw-margin must be nonnegative")
+    if args.graph_matcher_hard_negative_dustbin_weight < 0.0:
+        parser.error("--graph-matcher-hard-negative-dustbin-weight must be nonnegative")
+    if args.graph_matcher_hard_negative_dustbin_topk < 0:
+        parser.error("--graph-matcher-hard-negative-dustbin-topk must be nonnegative")
+    if args.graph_matcher_hard_negative_dustbin_margin < 0.0:
+        parser.error("--graph-matcher-hard-negative-dustbin-margin must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -2807,6 +2859,9 @@ def main() -> int:
                 graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
                 graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
                 graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
+                graph_matcher_hard_negative_dustbin_weight=args.graph_matcher_hard_negative_dustbin_weight,
+                graph_matcher_hard_negative_dustbin_topk=args.graph_matcher_hard_negative_dustbin_topk,
+                graph_matcher_hard_negative_dustbin_margin=args.graph_matcher_hard_negative_dustbin_margin,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,

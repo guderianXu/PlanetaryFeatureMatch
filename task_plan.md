@@ -535,3 +535,26 @@
 - 继续冻结 extractor，只训 GraphMatcher。
 - 以 raw-preservation 探针为起点，调小接受范围、强化 hard negative 和 no-match，而不是直接增大 accept-head 权重。
 - 下一轮报告必须同时看 micro precision、extreme precision、required hard pair correct/accepted、weak texture precision，不能只看平均值。
+
+## 2026-05-31 GraphMatcher hard-negative dustbin 优化
+
+目标：在 raw-preservation 增加召回的基础上，专门压制 raw descriptor 最容易混淆的 off-diagonal hard negatives，避免 GraphMatcher 把重复纹理/弱纹理候选误接受。
+
+已完成：
+- [complete] 增加 `graph_matcher_hard_negative_dustbin_loss`，训练排序目标为 `positive logit > dustbin logit > hard negative logit`。
+- [complete] 增加 CLI 参数：`--graph-matcher-hard-negative-dustbin-weight/topk/margin`。
+- [complete] 增加单元测试并跑 focused 验证：`146 tests OK, 1 skipped`。
+- [complete] 运行强权重 probe：`graphmatcher_hardnegdustbin_rawpreserve_v21full256_b1_1000_s512_20260531_101030`。
+- [complete] 运行轻权重 continuation probe：`graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916`。
+- [complete] 对轻权重 probe 增加 raw score/margin 过滤报告：`visual_report/graph_matcher_filter_s04_m001`。
+
+结果：
+- high_precision baseline：micro `7896/7973=0.990342`，extreme `2069/2104=0.983365`，指定极端样本 `89/106=0.839623`。
+- raw-preservation probe：micro `7999/8159=0.980390`，extreme `2117/2201=0.961836`，指定极端样本 `101/138=0.731884`。
+- hard-negative dustbin 强权重：micro `7892/7966=0.990711`，extreme `2067/2101=0.983817`，指定极端样本 `89/105=0.847619`。
+- hard-negative dustbin 轻权重 + `raw_score>=0.4` + `raw_margin>=0.01`：micro `7970/8096=0.984437`，extreme `2099/2159=0.972209`，指定极端样本 `100/125=0.800000`。
+
+当前决策：
+- 默认高精度模型仍是 `graphmatcher_no_xy_dustbin_v21full256_b1_1epoch_s512_nm128_eval512_20260530_164330`。
+- 当前最好的 balanced experimental 模型是 `graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916`，推理/报告使用 `graph_min_raw_score=0.4` 和 `graph_min_raw_margin=0.01`。
+- 下一阶段若继续优化，应围绕 hard negative 的类别分层做，不再简单调大/调小一个全局 dustbin 权重。

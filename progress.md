@@ -727,3 +727,23 @@
   - 指定极端样本：`101/138=0.731884`，weak `100/115=0.869565`。
   - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7983/8127=0.982281`，extreme `2107/2181=0.966071`，指定极端样本 `101/134=0.753731`。
   - 结论：raw-preservation + stronger dustbin 是更可用的 balanced 方向，但仍未达到目标 `120~160 accepted 且 precision >=0.80`。当前主模型仍应保留 high-precision baseline；Probe B 可作为下一轮继续调参起点。
+
+## 2026-05-31 GraphMatcher hard-negative dustbin probes
+
+- 已实现 `graph_matcher_hard_negative_dustbin_loss`：对 raw descriptor 最相似的 off-diagonal hard negatives，约束其 GraphMatcher logit 低于对应 row/column dustbin，目标是形成 `正匹配 > dustbin > 相似但错误候选` 的排序。
+- 新 CLI：
+  - `--graph-matcher-hard-negative-dustbin-weight`
+  - `--graph-matcher-hard-negative-dustbin-topk`
+  - `--graph-matcher-hard-negative-dustbin-margin`
+- TDD 验证：新增 hard-negative dustbin loss 单测，先确认缺失函数失败，再实现后通过。
+- focused 验证通过：`py_compile` 通过；`python -m unittest python/test_pfm_model.py python/test_pfm_pytorch_training.py python/test_pytorch_cache_match_eval.py` 为 `146 tests OK, 1 skipped`。
+- Probe C：`runs/graphmatcher_hardnegdustbin_rawpreserve_v21full256_b1_1000_s512_20260531_101030`。
+  - 配置：从 high-precision baseline 起训，`raw_preservation=0.30`，`hard_negative_dustbin_weight=0.20`，1000 steps。
+  - 结果：micro `7892/7966=0.990711`，weak `3945/3971=0.993453`，extreme `2067/2101=0.983817`。
+  - 指定极端样本：`89/105=0.847619`，weak `88/92=0.956522`。
+  - 结论：权重 0.20 太保守，precision 略高但正确数没有提升，基本退回 high-precision 行为。
+- Probe D：`runs/graphmatcher_hardnegdustbin_light_from_rawpreserve_v21full256_b1_600_s512_20260531_101916`。
+  - 配置：从 raw-preservation probe 继续，LR `5e-6`，600 steps，`raw_preservation=0.10`，`hard_negative_dustbin_weight=0.05`。
+  - 未过滤 GraphMatcher：micro `7986/8121=0.983376`，weak `4003/4059=0.986203`，extreme `2108/2174=0.969641`，指定极端样本 `100/129=0.775194`。
+  - 加 `graph_min_raw_score=0.4, graph_min_raw_margin=0.01` 后：micro `7970/8096=0.984437`，weak `4000/4050=0.987654`，extreme `2099/2159=0.972209`，指定极端样本 `100/125=0.800000`，weak `99/108=0.916667`。
+  - 结论：这是当前最好的 balanced experimental 口径；比 high-precision baseline 多 74 个正确匹配，指定极端样本多 11 个正确匹配，但总体 precision 低于 high-precision baseline。
