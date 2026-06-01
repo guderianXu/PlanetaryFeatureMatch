@@ -828,3 +828,12 @@
   - PID 文件：`runs/repartition_pose_sim_10479_721.pid`
   - 日志文件：`runs/repartition_pose_sim_10479_721_20260601_094247.log`
   - 预期 split：train `7335` / val `2095` / test `1049`
+- 10:35 左右重分区失败：日志报 `OSError: [Errno 5] Input/output error`，出错源文件为 8T 上的 `pair_001146_mid_xp12.pt`，目标为 xjw2T 输出目录。
+- 失败后 `/media/xjw/xjw2T` 挂载点消失，`lsblk` 当前只显示 `/media/xjw/8T`，不再显示 xjw2T 设备；这更像磁盘/连接掉线，不是普通目录缺失。
+- 已停止继续向 xjw2T 写入；由于挂载点消失，之前已复制到 xjw2T 盘上的部分数据需要等磁盘重新出现后再检查。
+- 为避免磁盘恢复后从 0 重拷，已增强 `scripts/repartition_pair_cache.py`：
+  - 新增 `--skip-existing`，完整目标文件按 size/link 检查后跳过。
+  - 截断或大小不一致的目标文件会被重新复制。
+  - shared tree 复制同样支持跳过已完整文件。
+  - 新增单测 `test_skip_existing_resumes_complete_files_and_recopies_truncated_files`。
+- 验证通过：`py_compile scripts/repartition_pair_cache.py python/test_repartition_pair_cache.py`；`python -m unittest python/test_repartition_pair_cache.py`。

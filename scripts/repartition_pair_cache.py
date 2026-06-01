@@ -88,8 +88,25 @@ def remove_existing(target: Path) -> None:
         shutil.rmtree(target)
 
 
-def materialize_file(source: Path, target: Path, *, mode: str) -> None:
+def file_looks_complete(source: Path, target: Path, *, mode: str) -> bool:
+    if not target.exists() and not target.is_symlink():
+        return False
+    if mode == "symlink":
+        return target.is_symlink() and target.resolve(strict=False) == source.resolve(strict=False)
+    if not target.is_file():
+        return False
+    if mode == "hardlink":
+        try:
+            return source.samefile(target)
+        except FileNotFoundError:
+            return False
+    return target.stat().st_size == source.stat().st_size
+
+
+def materialize_file(source: Path, target: Path, *, mode: str, skip_existing: bool = False) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    if skip_existing and file_looks_complete(source, target, mode=mode):
+        return
     remove_existing(target)
     if mode == "symlink":
         target.symlink_to(source.resolve())
@@ -107,7 +124,7 @@ def tree_files(source: Path) -> list[Path]:
     return [path for path in source.rglob("*") if path.is_file()]
 
 
-def copy_tree_parallel(source: Path, target: Path, *, mode: str, workers: int) -> None:
+def copy_tree_parallel(source: Path, target: Path, *, mode: str, workers: int, skip_existing: bool = False) -> None:
     files = tree_files(source)
     for child in source.rglob("*"):
         if child.is_dir():
@@ -115,6 +132,8 @@ def copy_tree_parallel(source: Path, target: Path, *, mode: str, workers: int) -
 
     def materialize_child(child: Path) -> None:
         out = target / child.relative_to(source)
+        if skip_existing and file_looks_complete(child, out, mode=mode):
+            return
         if mode == "hardlink":
             out.parent.mkdir(parents=True, exist_ok=True)
             remove_existing(out)
@@ -136,28 +155,35 @@ def copy_tree_parallel(source: Path, target: Path, *, mode: str, workers: int) -
             future.result()
 
 
-def materialize_tree(source: Path, target: Path, *, mode: str, workers: int) -> None:
-    remove_existing(target)
+def materialize_tree(source: Path, target: Path, *, mode: str, workers: int, skip_existing: bool = False) -> None:
+    if not skip_existing:
+        remove_existing(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     if mode == "symlink":
+        if skip_existing and target.is_symlink() and target.resolve(strict=False) == source.resolve(strict=False):
+            return
+        remove_existing(target)
         target.symlink_to(source.resolve(), target_is_directory=True)
     elif mode == "hardlink":
         target.mkdir(parents=True, exist_ok=True)
-        copy_tree_parallel(source, target, mode=mode, workers=workers)
+        copy_tree_parallel(source, target, mode=mode, workers=workers, skip_existing=skip_existing)
     elif mode == "copy":
         target.mkdir(parents=True, exist_ok=True)
-        copy_tree_parallel(source, target, mode=mode, workers=workers)
+        copy_tree_parallel(source, target, mode=mode, workers=workers, skip_existing=skip_existing)
     elif mode == "move":
+        if skip_existing and target.exists():
+            return
+        remove_existing(target)
         shutil.move(str(source), str(target))
     else:
         raise ValueError(f"unsupported link mode: {mode}")
 
 
-def materialize_path(source: Path, target: Path, *, mode: str, workers: int) -> None:
+def materialize_path(source: Path, target: Path, *, mode: str, workers: int, skip_existing: bool = False) -> None:
     if source.is_dir():
-        materialize_tree(source, target, mode=mode, workers=workers)
+        materialize_tree(source, target, mode=mode, workers=workers, skip_existing=skip_existing)
     else:
-        materialize_file(source, target, mode=mode)
+        materialize_file(source, target, mode=mode, skip_existing=skip_existing)
 
 
 def materialize_pair_record(
@@ -167,13 +193,14 @@ def materialize_pair_record(
     index: int,
     record: PairRecord,
     link_mode: str,
+    skip_existing: bool,
 ) -> dict[str, str]:
     source_name = f"source_repart_{index:06d}_{record.old_split}_{record.source_dir}"
     target = output_root / "cache" / split / source_name / record.pair_path.name
-    materialize_file(record.pair_path, target, mode=link_mode)
+    materialize_file(record.pair_path, target, mode=link_mode, skip_existing=skip_existing)
     sidecar = record.pair_path.with_suffix(".json")
     if sidecar.exists():
-        materialize_file(sidecar, target.with_suffix(".json"), mode=link_mode)
+        materialize_file(sidecar, target.with_suffix(".json"), mode=link_mode, skip_existing=skip_existing)
     row = dict(record.row or {})
     row["split"] = split
     row["pair_path"] = str(target.resolve(strict=False))
@@ -187,6 +214,7 @@ def write_split(
     records: list[PairRecord],
     link_mode: str,
     workers: int,
+    skip_existing: bool,
 ) -> list[dict[str, str]]:
     if workers <= 1 or len(records) <= 1:
         return [
@@ -196,6 +224,7 @@ def write_split(
                 index=index,
                 record=record,
                 link_mode=link_mode,
+                skip_existing=skip_existing,
             )
             for index, record in enumerate(records)
         ]
@@ -209,6 +238,7 @@ def write_split(
                 index=index,
                 record=record,
                 link_mode=link_mode,
+                skip_existing=skip_existing,
             ): index
             for index, record in enumerate(records)
         }
@@ -257,6 +287,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--workers", type=int, default=1, help="Parallel file workers for pair files and copied trees.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Resume a previous materialization by keeping complete existing target files.",
+    )
     return parser.parse_args()
 
 
@@ -291,6 +326,7 @@ def main() -> int:
             records=split_items,
             link_mode=args.link_mode,
             workers=args.workers,
+            skip_existing=args.skip_existing,
         )
         write_manifest(output_root / "manifests" / f"repartition_{split}.csv", rows)
         all_rows.extend(rows)
@@ -302,7 +338,7 @@ def main() -> int:
         source = input_root / name
         target = output_root / name
         if source.exists():
-            materialize_path(source, target, mode=args.link_mode, workers=args.workers)
+            materialize_path(source, target, mode=args.link_mode, workers=args.workers, skip_existing=args.skip_existing)
 
     metadata = {
         "source_dataset_root": str(input_root),
@@ -312,6 +348,7 @@ def main() -> int:
         "splits": {split: len(items) for split, items in split_records.items()},
         "link_type": args.link_mode,
         "workers": args.workers,
+        "skip_existing": args.skip_existing,
     }
     (output_root / "repartition_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
