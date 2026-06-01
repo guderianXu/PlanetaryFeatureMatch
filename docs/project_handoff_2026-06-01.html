@@ -1,0 +1,858 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlanetaryFeatureMatch 项目交接记录 2026-06-01</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #152033;
+      --muted: #5d697a;
+      --line: #d9e0ea;
+      --head: #111827;
+      --blue: #2563eb;
+      --blue-soft: #e8f0ff;
+      --green: #057a55;
+      --green-soft: #e8f7ef;
+      --amber: #a15c07;
+      --amber-soft: #fff5db;
+      --red: #b42318;
+      --red-soft: #fff0ef;
+      --code: #0f172a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.62;
+    }
+
+    header {
+      background: var(--head);
+      color: #fff;
+      padding: 34px 24px 30px;
+    }
+
+    header .wrap,
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 30px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 980px;
+      color: #cbd5e1;
+    }
+
+    main {
+      padding: 24px;
+    }
+
+    section {
+      margin: 0 0 18px;
+      padding: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      margin: 18px 0 8px;
+      font-size: 17px;
+      line-height: 1.35;
+    }
+
+    p {
+      margin: 8px 0;
+    }
+
+    ul,
+    ol {
+      margin: 8px 0 8px 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f1f5f9;
+      font-weight: 700;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      color: var(--code);
+      background: #eef2f7;
+      border-radius: 4px;
+      padding: 1px 4px;
+      word-break: break-all;
+    }
+
+    pre {
+      margin: 12px 0;
+      padding: 14px 16px;
+      overflow-x: auto;
+      background: #0f172a;
+      color: #e5e7eb;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    pre code {
+      padding: 0;
+      color: inherit;
+      background: transparent;
+      word-break: normal;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      padding: 13px 14px;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 21px;
+      line-height: 1.2;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .ok,
+    .note,
+    .warn,
+    .bad {
+      margin: 12px 0;
+      padding: 12px 14px;
+      border-radius: 8px;
+    }
+
+    .ok {
+      color: #064e3b;
+      background: var(--green-soft);
+      border: 1px solid #a7e3c3;
+    }
+
+    .note {
+      background: var(--blue-soft);
+      border: 1px solid #bdd2ff;
+    }
+
+    .warn {
+      color: #5f370e;
+      background: var(--amber-soft);
+      border: 1px solid #efc36f;
+    }
+
+    .bad {
+      color: #7a271a;
+      background: var(--red-soft);
+      border: 1px solid #f0b8b1;
+    }
+
+    .tag {
+      display: inline-block;
+      margin: 0 4px 4px 0;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #e5e7eb;
+      color: #374151;
+      white-space: nowrap;
+    }
+
+    .tag.done {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .tag.todo {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .tag.stop {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 640px) {
+      header {
+        padding: 28px 18px 24px;
+      }
+
+      main {
+        padding: 16px;
+      }
+
+      section {
+        padding: 16px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>PlanetaryFeatureMatch 项目交接记录</h1>
+      <p>生成时间：2026-06-01。用途：下次切换电脑或恢复工作时，快速确认当前做了什么、还没做什么、已经生成了哪些仿真训练数据、这些数据怎么来的，以及下一步还应该造哪些数据。</p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>一眼看懂当前状态</h2>
+      <div class="grid">
+        <div class="metric">
+          <strong>10479</strong>
+          <span>同位置姿态/焦距仿真 pair 已导入 xjw2T</span>
+        </div>
+        <div class="metric">
+          <strong>7:2:1</strong>
+          <span>新同位置数据已按 train/val/test 重新划分</span>
+        </div>
+        <div class="metric">
+          <strong>2048</strong>
+          <span>仿真 pair 原始图像尺寸，训练时通常裁到 1024</span>
+        </div>
+        <div class="metric">
+          <strong>256D</strong>
+          <span>PFM v2.1-full PyTorch 主路径描述子维度</span>
+        </div>
+      </div>
+
+      <div class="ok">
+        当前没有发现 <code>pfm_pytorch_training.py</code>、<code>repartition_pair_cache.py</code> 或仿真生成进程在跑。上一轮误启动的训练进程已经停掉。
+      </div>
+
+      <div class="warn">
+        重要：用户最后明确要求“不要训练了，先看 xjw2T 空间和数据导入”。因此后续不要自动继续炼丹，除非用户再次明确要求开始训练。
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>项目</th>
+            <th>当前结论</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>代码架构</td>
+            <td>PyTorch 主路径已迁移到 PFM v2.1-full：Dual-FPN、256 维 descriptor、illumination robust texture branch、adaptive fusion、quality/geometry metadata、GraphMatcherV2、raw/graph 双报告。C++/LibTorch 推理端仍不是当前主训练路径。</td>
+          </tr>
+          <tr>
+            <td>最新可用训练数据</td>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721</code>，已完整拷贝并验证。</td>
+          </tr>
+          <tr>
+            <td>最近完整训练</td>
+            <td><code>runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414</code> 是最近完成的空间均衡/弱纹理采样训练和报告。它没有使用刚导入的 10479 xjw2T 新划分跑完完整训练。</td>
+          </tr>
+          <tr>
+            <td>未完成训练</td>
+            <td><code>runs/same10479_cross_extreme_xjw2t_v21full256_1epoch_s512_20260601_152126</code> 是误启动后被停掉的 run，只能当作命令草稿和中断日志，不是有效结果。</td>
+          </tr>
+          <tr>
+            <td>硬盘空间</td>
+            <td>xjw2T 当前约剩 <code>214G</code>，8T 当前约剩 <code>3.8T</code>。继续大规模生成应优先放 8T，训练前再同步必要子集到 xjw2T。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>已经做了什么</h2>
+      <h3>1. PFM v2.1-full 模型架构</h3>
+      <ul>
+        <li><span class="tag done">已完成</span>PyTorch 模型主路径升级到 256 维描述子，不是从 192 维投影到 256，而是 full 配置重新输出 256D descriptor。</li>
+        <li><span class="tag done">已完成</span>加入 Dual-FPN-Lite，将 keypoint 定位特征和 descriptor 上下文特征分开。</li>
+        <li><span class="tag done">已完成</span>Texture branch 改为更适合行星影像的光照鲁棒纹理特征，包括 local normalized intensity、local contrast、DoG/LoG、梯度方向、ring contrast、soft census-like 特征。</li>
+        <li><span class="tag done">已完成</span>DescriptorFusionAdapter 改为局部 adaptive texture gate，不再只靠固定 texture weight。</li>
+        <li><span class="tag done">已完成</span>GraphMatcherV2 支持 richer metadata、dustbin/no-match、raw preservation、hard-negative dustbin、semi-dense no-match 训练选项。</li>
+        <li><span class="tag done">已完成</span>训练报告支持 <code>raw_descriptor</code> 与 <code>graph_matcher</code> 双口径，避免只看其中一种口径误判。</li>
+      </ul>
+
+      <h3>2. 训练流程与报告</h3>
+      <ul>
+        <li><span class="tag done">已完成</span>训练报告已能生成中文 PDF、训练曲线、匹配质量图、覆盖率诊断图和匹配样例。</li>
+        <li><span class="tag done">已完成</span>加入弱纹理 quota 和空间均衡采样：<code>--training-weak-texture-fraction</code>、<code>--training-spatial-bins</code>，用于缓解“旱的旱死，涝的涝死”。</li>
+        <li><span class="tag done">已完成</span>训练 pair 每步监督点数已改到 <code>--samples-per-pair 512</code>。</li>
+        <li><span class="tag done">已完成</span>增加数据集校验脚本 <code>scripts/verify_pair_cache_dataset.py</code>，训练前可检查 split 数量、比例和样本是否能加载。</li>
+      </ul>
+
+      <h3>3. 当前关键结论</h3>
+      <ul>
+        <li>模型不是完全没学到东西；raw descriptor 在很多同位置/普通仿真 pair 上已经很准。</li>
+        <li>GraphMatcher 曾经明显“压坏” descriptor，特别是在极端跨位置样本上，因此后续训练要继续保留 raw/graph 双报告。</li>
+        <li>弱纹理和空间均匀性已经开始通过训练采样解决，但这需要在新 10479 + cross/extreme 混合数据上再跑完整训练验证。</li>
+        <li>传统 RootSIFT/ORB/AKAZE + 几何过滤在部分人工仿真对上非常强，因此它们更适合作为教师标签或 fallback 参考，不能把外部 matcher 的结果误报成 PFM 本身进步。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>还没做什么</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>状态</th>
+            <th>事项</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="tag todo">未完成</span></td>
+            <td>用 xjw2T 新 10479 数据完整训练</td>
+            <td>新同位置数据已经导入并验证，但还没有按“同位置 + cross position + extreme”完整跑完一轮训练。</td>
+          </tr>
+          <tr>
+            <td><span class="tag stop">中断</span></td>
+            <td>误启动的 <code>same10479_cross_extreme_xjw2t...</code> run</td>
+            <td>进程已经停止。该目录只记录命令和中断日志，不应作为训练结果分析。</td>
+          </tr>
+          <tr>
+            <td><span class="tag todo">未完成</span></td>
+            <td>新权重的六组固定评估图</td>
+            <td>原目标里的“两类影像风格 × Rotate/Viewpoint/Compound 三个 gate，每组两个匹配对”需要在下一次完整训练完成后重新生成。</td>
+          </tr>
+          <tr>
+            <td><span class="tag todo">未完成</span></td>
+            <td>Ultra/extreme 跨位置数据 pair cache</td>
+            <td>8T 上目前主要是 depth cache/probe，尚未形成可训练的 train/val/test pair cache。</td>
+          </tr>
+          <tr>
+            <td><span class="tag todo">未完成</span></td>
+            <td>terrain-heldout 泛化评估</td>
+            <td>目前多数 split 仍偏 pair/random 或 track 规则。最终应按地形区域/轨迹段留出测试，避免训练和测试看到太相近地貌。</td>
+          </tr>
+          <tr>
+            <td><span class="tag todo">未完成</span></td>
+            <td>C++/LibTorch 推理端同步</td>
+            <td>当前炼丹、报告、诊断主要走 PyTorch。若后续要正式部署 C++ 推理，需要单独同步 v2.1 模型结构。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>当前已有数据集</h2>
+      <h3>xjw2T：训练优先盘</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>路径</th>
+            <th>大小</th>
+            <th>train</th>
+            <th>val</th>
+            <th>test</th>
+            <th>用途和备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721</code></td>
+            <td>795G</td>
+            <td>7335</td>
+            <td>2095</td>
+            <td>1049</td>
+            <td><strong>当前主同位置训练集。</strong>从 8T 的 10479 pair 重分区并完整 copy 到 xjw2T，比例严格为 7:2:1。已用 <code>verify_pair_cache_dataset.py</code> 验证 <code>ok: true</code>。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_721</code></td>
+            <td>492G</td>
+            <td>5235</td>
+            <td>1495</td>
+            <td>749</td>
+            <td>旧版同位置 721 split，包含 <code>image_store</code> 8310 个共享图像。现在优先用 10479_721，新版用完确认后可考虑归档旧版。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_2048_gap30_views10</code></td>
+            <td>76G</td>
+            <td>1200</td>
+            <td>384</td>
+            <td>0</td>
+            <td>真实 DEM depth 反投影生成的普通跨相机位置数据。适合混合训练，但当前没有 test split。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_2048_gap30_views10_721_v2</code></td>
+            <td>248G</td>
+            <td>4200</td>
+            <td>1200</td>
+            <td>599</td>
+            <td>更极端的跨位置数据，包含 rendered depth cache。当前是训练困难样本的重要来源。</td>
+          </tr>
+          <tr>
+            <td><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721_symlink</code></td>
+            <td>很小</td>
+            <td>链接视图</td>
+            <td>链接视图</td>
+            <td>链接视图</td>
+            <td>本地项目里的软链接视图，不是自包含拷贝。训练时如果直接走 xjw2T 绝对路径更清楚。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>8T：生成和归档优先盘</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>路径</th>
+            <th>大小</th>
+            <th>train</th>
+            <th>val</th>
+            <th>test</th>
+            <th>用途和备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_2048_gap30_views10</code></td>
+            <td>697G</td>
+            <td>5241</td>
+            <td>2619</td>
+            <td>2619</td>
+            <td>原始同位置仿真输出，track split。后来通过 <code>repartition_pair_cache.py</code> 重新生成 xjw2T 的 7:2:1 自包含 copy。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_cross_position_rendered_ultra_2048_gap30_views10_721_20260531</code></td>
+            <td>5.0G</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>目前主要是 ultra cross-position 的 depth cache，1563 个 depth 文件；还不是训练 pair cache。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_cross_position_rendered_offset28_probe_20260531</code></td>
+            <td>87M</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>offset=28 方向的 probe/depth 测试目录，不是训练集。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_cross_position_rendered_ultra_probe_20260531</code></td>
+            <td>87M</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>ultra cross-position probe/depth 测试目录，不是训练集。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="note">
+        xjw2T 目前约剩 <code>214G</code>，不适合再直接导入一个几百 GB 的完整大数据集。8T 约剩 <code>3.8T</code>，更适合继续生成，训练前再挑选/重分区/压缩同步到 xjw2T。
+      </div>
+    </section>
+
+    <section>
+      <h2>这些仿真数据是怎么生成的</h2>
+      <h3>1. 原始仿真软件和输入数据</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>内容</th>
+            <th>路径</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>仿真程序</td>
+            <td><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/辅助软件/数据模拟</code></td>
+            <td>从 <code>/home/xjw/code/stasim</code> 复制并修复路径后放入项目，核心可执行文件是 <code>build/sat_sim_cuda</code>。</td>
+          </tr>
+          <tr>
+            <td>DEM</td>
+            <td><code>辅助软件/数据模拟/dem/mar.tif</code></td>
+            <td>火星全局 DEM。脚本会为经度 0 连续性生成 lon0-shifted VRT。</td>
+          </tr>
+          <tr>
+            <td>DOM</td>
+            <td><code>辅助软件/数据模拟/dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif</code></td>
+            <td>火星全局 DOM，用于渲染影像纹理。</td>
+          </tr>
+          <tr>
+            <td>SPICE kernel</td>
+            <td><code>辅助软件/数据模拟/kernel</code></td>
+            <td>用户已复制 kernel 到该目录，脚本使用本地 kernel。</td>
+          </tr>
+          <tr>
+            <td>相机轨迹</td>
+            <td><code>辅助软件/数据模拟/相机轨迹/*.csv</code></td>
+            <td>当前 4 条轨迹：20251215/20251216 × 110km/340km。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>2. 同位置姿态/焦距仿真数据</h3>
+      <p>同位置数据用 <code>batch_pose_sim_dataset.py</code> 生成。基础设定是 2048×2048、采样间隔 <code>render_gap=30</code>、每个真实相机位置生成 10 个视角：1 个 base + 9 个扰动视角。</p>
+
+      <pre><code>conda activate asp36
+cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+
+python 辅助软件/数据模拟/batch_pose_sim_dataset.py \
+  --output-root /media/xjw/8T/深度学习数据/仿真训练集 \
+  --dataset-name pose_sim_2048_gap30_views10 \
+  --render-gap 30 \
+  --image-size 2048 \
+  --sat-sim-jobs 2 \
+  --frame-workers 1 \
+  --split-mode track \
+  --min-free-gb 100</code></pre>
+
+      <p>当前 metadata 记录的视角扰动如下：</p>
+      <pre><code>base=0,0,0
+basic_xp5=5,0,0
+basic_xn5=-5,0,0
+basic_yp5r8=0,5,8
+mid_xp12=12,0,0
+mid_yn12r15=0,-12,15
+mid_diag=-10,10,-20
+ext_xp22=22,0,0
+ext_yn22r25=0,-22,25
+ext_diag=-18,18,-35</code></pre>
+
+      <p>4 条轨迹在 metadata 中的帧数如下：</p>
+      <table>
+        <thead>
+          <tr>
+            <th>轨迹</th>
+            <th>默认 split</th>
+            <th>frames</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>Orbiter_InfoCSV_20251215_110km</code></td><td>train</td><td>1693</td></tr>
+          <tr><td><code>Orbiter_InfoCSV_20251215_340km</code></td><td>train</td><td>1823</td></tr>
+          <tr><td><code>Orbiter_InfoCSV_20251216_110km</code></td><td>val</td><td>1644</td></tr>
+          <tr><td><code>Orbiter_InfoCSV_20251216_340km</code></td><td>test</td><td>1823</td></tr>
+        </tbody>
+      </table>
+
+      <h3>3. 重分区并导入 xjw2T</h3>
+      <p>8T 原始同位置输出是 track split。为了训练更均匀，已经把 10479 个 pair 按 7:2:1 重新划分并 self-contained copy 到 xjw2T。</p>
+
+      <pre><code>conda activate pfm-train
+cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+
+python scripts/repartition_pair_cache.py \
+  --input-root /media/xjw/8T/深度学习数据/仿真训练集/pose_sim_2048_gap30_views10 \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721 \
+  --ratio 7:2:1 \
+  --seed 20260528 \
+  --link-mode copy \
+  --workers 1 \
+  --skip-existing</code></pre>
+
+      <p>校验命令：</p>
+      <pre><code>python scripts/verify_pair_cache_dataset.py \
+  --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721 \
+  --expected-total 10479 \
+  --expected-ratio 7:2:1 \
+  --samples-per-split 1</code></pre>
+
+      <p>最近一次校验结果：<code>ok: true</code>，样本可加载，<code>view_a/view_b</code> shape 为 <code>[1, 2048, 2048]</code>。</p>
+
+      <h3>4. 跨相机位置数据</h3>
+      <p>跨位置数据用 <code>scripts/generate_cross_position_pose_pairs.py</code>。核心逻辑是复用已有同位置仿真 archive，读取 CameraA 的真实渲染 depth，再把 A 时刻的地表点反投影到世界坐标，并重投影到另一个相机位置，形成 dense warp。</p>
+
+      <pre><code>conda activate pfm-train
+cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+
+python scripts/generate_cross_position_pose_pairs.py \
+  --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_721 \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_2048_gap30_views10 \
+  --depth-mode rendered \
+  --train-offsets 1,2,4,8 \
+  --val-offsets 1,2,4,8 \
+  --test-offsets 1,2,4,8 \
+  --sat-sim 辅助软件/数据模拟/build/sat_sim_cuda \
+  --dem 辅助软件/数据模拟/dem/mar.tif \
+  --dom 辅助软件/数据模拟/dom/HX1_GRAS_MoRIC_DOM_076m_Global_A.tif</code></pre>
+
+      <div class="warn">
+        上面是可复用模板，具体 offset、pair 数量和 output-root 要按本轮目标调整。跨位置数据必须用 <code>--depth-mode rendered</code>，不要退回球面近似，否则远基线 GT 会不准。
+      </div>
+    </section>
+
+    <section>
+      <h2>训练数据内部格式</h2>
+      <p>每个训练 pair 通常是一个 <code>pair_*.pt</code>，旁边有对应 <code>pair_*.json</code>。目录结构一般是：</p>
+
+      <pre><code>cache/
+  train/
+    source_xxx/
+      pair_xxx.pt
+      pair_xxx.json
+  val/
+    source_xxx/
+      pair_xxx.pt
+      pair_xxx.json
+  test/
+    source_xxx/
+      pair_xxx.pt
+      pair_xxx.json
+manifests/
+  *.csv</code></pre>
+
+      <table>
+        <thead>
+          <tr>
+            <th>字段</th>
+            <th>作用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>view_a</code>, <code>view_b</code></td>
+            <td>灰度影像张量，目前 2048×2048；训练时通过参数裁剪/缩放到 1024。</td>
+          </tr>
+          <tr>
+            <td><code>warp_a_to_b</code></td>
+            <td>A 图像像素到 B 图像像素的真值对应，用于采样监督点和判断匹配正确/错误。</td>
+          </tr>
+          <tr>
+            <td><code>valid_mask</code></td>
+            <td>哪些 A 像素有有效投影和可监督对应。</td>
+          </tr>
+          <tr>
+            <td><code>pair_*.json</code></td>
+            <td>记录 pair 名称、视角、轨迹、难度等辅助信息。训练和报告会用它做 difficulty/pose 诊断。</td>
+          </tr>
+          <tr>
+            <td><code>manifests/*.csv</code></td>
+            <td>记录 split、pair 路径和生成元信息，重分区/校验/追踪数据来源时使用。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>下一次恢复时建议怎么做</h2>
+      <ol>
+        <li>先确认没有残留训练或生成任务：</li>
+      </ol>
+      <pre><code>pgrep -af '[p]fm_pytorch_training.py|[r]epartition_pair_cache.py|[s]at_sim|[g]enerate_cross_position_pose_pairs.py' || true
+nvidia-smi</code></pre>
+
+      <ol start="2">
+        <li>确认 xjw2T 主训练数据仍然可用：</li>
+      </ol>
+      <pre><code>python scripts/verify_pair_cache_dataset.py \
+  --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721 \
+  --expected-total 10479 \
+  --expected-ratio 7:2:1 \
+  --samples-per-split 1</code></pre>
+
+      <ol start="3">
+        <li>如果用户要求继续炼丹，再从上一个有效 checkpoint 开始，而不是从中断目录判断结果。</li>
+      </ol>
+
+      <p>上一个有效训练 checkpoint 可优先考虑：</p>
+      <pre><code>runs/spatial_weak_semidense_v21full256_1epoch_s512_20260531_163414/pytorch_pfm_state.pt</code></pre>
+
+      <p>中断 run 的命令草稿在：</p>
+      <pre><code>runs/same10479_cross_extreme_xjw2t_v21full256_1epoch_s512_20260601_152126/command.sh</code></pre>
+
+      <div class="warn">
+        该命令草稿可以参考，但不要直接后台启动。需要先确认用户同意训练，并按当时硬盘/GPU 状态调整 batch、workers、prefetch。
+      </div>
+    </section>
+
+    <section>
+      <h2>后续还应该造什么数据</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>优先级</th>
+            <th>数据类型</th>
+            <th>为什么需要</th>
+            <th>建议做法</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>P0</td>
+            <td>跨相机位置 train/val/test 完整版</td>
+            <td>实际任务不会只发生在同一个相机位置。不同位置能提供更真实的视差、尺度和可见性变化。</td>
+            <td>基于 10479 同位置源数据继续生成 cross-position rendered depth pair，保留 7:2:1 split，确保 train/val/test 都有数据。</td>
+          </tr>
+          <tr>
+            <td>P0</td>
+            <td>更极端 cross-position / ultra offset</td>
+            <td>当前模型在极端跨位置上仍是短板，需要覆盖更大 baseline、低重叠、局部可见性变化。</td>
+            <td>把 8T 上已有 ultra depth/probe 转成正式 pair cache；offset 可以覆盖 8、16、28 或按轨迹间距分桶。</td>
+          </tr>
+          <tr>
+            <td>P0</td>
+            <td>弱纹理/低对比区域专项</td>
+            <td>用户指出弱纹理匹配点仍少且空间分布不均。只靠随机采样容易被强纹理地貌主导。</td>
+            <td>按 local contrast / gradient energy / valid area 分桶采样，专门保留低纹理平原、阴影内部、低梯度区域。</td>
+          </tr>
+          <tr>
+            <td>P1</td>
+            <td>光照差异专项</td>
+            <td>行星影像强光照差异来自太阳高度角、方位角、坡面阴影，普通亮度增强不够。</td>
+            <td>如果仿真程序支持不同太阳方向，生成 same geometry + different illumination；否则先做 photometric transform 压力集。</td>
+          </tr>
+          <tr>
+            <td>P1</td>
+            <td>terrain-heldout 测试集</td>
+            <td>随机 pair split 容易让训练和验证看到相近地貌，平均指标会偏乐观。</td>
+            <td>按轨迹段、经纬度 tile 或 DEM/DOM 地理区域划分，留出完全未见区域做 test。</td>
+          </tr>
+          <tr>
+            <td>P1</td>
+            <td>no-match / low-overlap / occlusion 数据</td>
+            <td>GraphMatcher 的 dustbin/no-match 需要真实拒配监督，否则会过度拒配或乱匹配。</td>
+            <td>生成部分非重叠、低重叠、阴影遮挡、目标区域不可见 pair；训练时单独统计 accepted/rejected precision。</td>
+          </tr>
+          <tr>
+            <td>P2</td>
+            <td>RootSIFT-HRANSAC 高置信伪标签</td>
+            <td>传统 matcher 在很多仿真全局几何场景很强，可作为 teacher，但不能替代 PFM 指标。</td>
+            <td>只从 train split 生成，过滤到高 precision、足够 inlier 的 pair；训练报告必须把 teacher/fallback 和 pure-PFM 指标分开。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>数据空间和重复存储注意事项</h2>
+      <ul>
+        <li>xjw2T 当前剩余约 <code>214G</code>，不足以再放一个 700G 级完整同位置数据集。不要直接继续往 xjw2T 大量生成。</li>
+        <li>8T 当前剩余约 <code>3.8T</code>，可以继续作为生成盘和中间缓存盘。</li>
+        <li>同一批影像如果既保存 full pair archive，又保存 <code>image_store</code>，会产生明显重复。后续应优先用 compact cache / shared image store / hardlink / symlink 方案，最终训练盘需要自包含时再 copy。</li>
+        <li>跨盘不能可靠 hardlink；同盘归档可用 hardlink 或 symlink，跨盘训练拷贝建议用 <code>repartition_pair_cache.py --link-mode copy --skip-existing</code> 做可恢复 copy。</li>
+        <li>xjw2T 之前多线程 copy 出现过 I/O 问题，最终是 <code>workers=1 --skip-existing</code> 完成的。后续如果复制不稳定，先降低 workers，不要重复从头拷贝。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>关键文件索引</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>文件/目录</th>
+            <th>作用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>PFM_v2_model_architecture.md</code></td>
+            <td>PFM v2.1 模型设计文档。</td>
+          </tr>
+          <tr>
+            <td><code>python/pfm_model.py</code></td>
+            <td>PyTorch PFM v2.1 模型实现主文件。</td>
+          </tr>
+          <tr>
+            <td><code>python/pfm_pytorch_training.py</code></td>
+            <td>PyTorch 训练脚本，包含 weak texture、spatial bins、GraphMatcher loss 等训练开关。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/training_visual_report.py</code></td>
+            <td>训练后生成中文 PDF、曲线、匹配样例和指标图。</td>
+          </tr>
+          <tr>
+            <td><code>辅助软件/数据模拟/batch_pose_sim_dataset.py</code></td>
+            <td>同位置姿态/焦距仿真 pair 生成入口。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/generate_cross_position_pose_pairs.py</code></td>
+            <td>跨相机位置 pair cache 生成入口。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/repartition_pair_cache.py</code></td>
+            <td>把已有 pair cache 重新划分并 copy/hardlink/symlink/move 到新目录。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/verify_pair_cache_dataset.py</code></td>
+            <td>训练前校验数据集数量、比例和样本可加载性。</td>
+          </tr>
+          <tr>
+            <td><code>docs/simulation_data_generation_status.html</code></td>
+            <td>较早的仿真影像制作记录。当前文件是更完整的切换电脑交接版。</td>
+          </tr>
+          <tr>
+            <td><code>task_plan.md</code>、<code>progress.md</code>、<code>findings.md</code></td>
+            <td>持续迭代记录、实验结论和踩坑记录。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

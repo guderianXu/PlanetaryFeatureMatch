@@ -1,5 +1,12 @@
 # 进度日志
 
+## 2026-06-01 切换电脑交接 HTML
+- 用户要求把当前做了什么、没做什么、已经生成的数据集、生成方式和后续造数计划写成 HTML，便于下次切换电脑后快速回顾。
+- 已新增交接文档：`docs/project_handoff_2026-06-01.html`。
+- 文档记录了当前主数据集 `/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721`，其 split 为 train 7335 / val 2095 / test 1049，总计 10479，且 `verify_pair_cache_dataset.py` 校验为 `ok: true`。
+- 文档也标明 `runs/same10479_cross_extreme_xjw2t_v21full256_1epoch_s512_20260601_152126` 是误启动后中断的 run，不是有效炼丹结果；当前不应自动训练，除非用户再次明确要求。
+- 同步记录了 xjw2T 与 8T 上已有数据集、同位置和跨位置仿真生成命令模板、数据内部格式、空间/重复存储注意事项，以及下一步应优先生成 cross-position、ultra/extreme、弱纹理、光照差异和 terrain-heldout 数据。
+
 ## 2026-05-27 PFM v2.1 架构迁移
 - 根据用户确认的新架构文档，已完成 PyTorch 主路径的 PFM v2.1 代码迁移。
 - `python/pfm_model.py` 默认模型升级为 64 base channels、256 维 descriptor、512 hidden GraphMatcher、8 层 graph attention，并在 checkpoint config 中记录 `graph_keypoint_meta_dim`。
