@@ -801,3 +801,6 @@
 - 并行检查发现 `runs/sim_ultra_cross_20260531.pid` 指向的进程已结束；`pose_sim_cross_position_rendered_ultra_2048_gap30_views10_721_20260531` 当前只有约 `5.0G` depth cache，`cache/train|val|test` 均为 `0`，不能作为训练数据使用。后续需要在 xjw2T 上重新生成或修复该极端跨位置数据集。
 - 为后续训练数据整理修复了 `scripts/repartition_pair_cache.py`：从仅支持 symlink 扩展为 `symlink|hardlink|copy|move`，并支持 `--workers` 并行搬运 pair/sidecar/共享资产；同时把 compact cache 必需的 `image_store` 一起带到输出 root，避免相对路径失效。
 - 新增测试 `python/test_repartition_pair_cache.py`，验证 `--link-mode copy --workers 2` 下 10 个 pair 能按 `7:2:1` 生成实体 split，且 `image_store`/`tsai_tracks` 被正确复制。验证命令通过：`py_compile scripts/repartition_pair_cache.py python/test_repartition_pair_cache.py`；`python -m unittest python/test_repartition_pair_cache.py`。
+- 代码已推送 GitHub：`d531274 Support parallel self-contained cache repartition`。
+- 继续修复生成端 split：`辅助软件/数据模拟/batch_pose_sim_dataset.py` 新增 `--split-mode track|ratio`、`--split-ratio 7:2:1`、`--split-seed`。默认仍是旧的 track split，后续 xjw2T 新仿真可显式用 ratio 直接生成 7:2:1。
+- 新增 `python/test_batch_pose_sim_dataset.py` 覆盖 ratio split 精确计数和 `output_pair_path()` 使用 candidate split。首次测试因 Python 3.12 dataclass 动态导入未注册 `sys.modules` 失败，已修复测试 loader；最终 `py_compile` 和 `python -m unittest python/test_batch_pose_sim_dataset.py python/test_repartition_pair_cache.py` 均通过。

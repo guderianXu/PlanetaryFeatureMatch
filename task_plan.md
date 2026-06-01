@@ -622,6 +622,8 @@
 - [complete] 扩展 `scripts/repartition_pair_cache.py`，支持 `symlink|hardlink|copy|move` 和 `--workers`，用于并行生成自包含的 7:2:1 split。
 - [complete] 修复 compact cache 自包含问题：重划分时同步处理 `image_store`，避免 pair 内相对路径失效。
 - [complete] 增加 `python/test_repartition_pair_cache.py`，覆盖 `copy` 模式、并行 workers、7:2:1 计数和共享资产复制。
+- [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--split-mode ratio --split-ratio 7:2:1 --split-seed`，后续新生成数据可直接按 7:2:1 输出；默认 `track` 模式保持兼容。
+- [complete] 增加 `python/test_batch_pose_sim_dataset.py`，覆盖 ratio split 精确计数和输出路径使用 candidate split。
 
 待完成：
 - [pending] 等待当前 3000 增量达到 `10479` 总 pair。
@@ -631,3 +633,6 @@
 
 注意：
 - `sim_ultra_cross_20260531` 已结束但没有生成 pair cache，只有 depth cache；不能混入训练。后续极端跨位置数据需要在 xjw2T 重新生成。
+
+错误记录：
+- 首次运行 `python/test_batch_pose_sim_dataset.py` 时，动态 import 没有提前注册 `sys.modules`，导致 Python 3.12 dataclass 装饰器报 `AttributeError: 'NoneType' object has no attribute '__dict__'`。已在测试 loader 中注册 `sys.modules[spec.name] = module`，复测通过。
