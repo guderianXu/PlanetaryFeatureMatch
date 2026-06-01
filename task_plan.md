@@ -625,6 +625,7 @@
 - [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--split-mode ratio --split-ratio 7:2:1 --split-seed`，后续新生成数据可直接按 7:2:1 输出；默认 `track` 模式保持兼容。
 - [complete] 增加 `python/test_batch_pose_sim_dataset.py`，覆盖 ratio split 精确计数和输出路径使用 candidate split。
 - [complete] 新增 `scripts/verify_pair_cache_dataset.py`，可校验 split 数量、7:2:1 期望值，并抽样加载 compact/legacy pair 检查 `image_store` 路径与 tensor shape。
+- [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--frame-workers`，后续可并行处理多个 frame batch；默认 1 不影响旧命令。
 
 待完成：
 - [pending] 等待当前 3000 增量达到 `10479` 总 pair。

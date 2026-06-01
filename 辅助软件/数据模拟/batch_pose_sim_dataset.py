@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
@@ -366,6 +367,35 @@ def append_manifest(path: Path, rows: list[dict[str, str | int | float]]) -> Non
         writer.writerows(rows)
 
 
+def process_frame_group(
+    *,
+    dataset_root: Path,
+    key: tuple[str, int],
+    group: list[Candidate],
+    image_size: int,
+    sat_sim_jobs: int,
+    run_name: str,
+    keep_rendered: bool,
+) -> dict[str, object]:
+    missing = [candidate for candidate in group if not output_pair_path(dataset_root, candidate).exists()]
+    if not missing:
+        return {"key": key, "rows": [], "kept": 0, "skipped": len(group), "rendered": 0}
+    render_dir = render_frame_views(dataset_root, missing, image_size=image_size, jobs=sat_sim_jobs, run_name=run_name)
+    rows: list[dict[str, str | int | float]] = []
+    skipped = 0
+    try:
+        for candidate in missing:
+            pair_path = output_pair_path(dataset_root, candidate)
+            if pair_path.exists():
+                skipped += 1
+                continue
+            rows.append(convert_pair(dataset_root, candidate, render_dir, run_name=run_name))
+    finally:
+        if not keep_rendered:
+            shutil.rmtree(render_dir.parent, ignore_errors=True)
+    return {"key": key, "rows": rows, "kept": len(rows), "skipped": skipped, "rendered": 1}
+
+
 def write_dataset_metadata(dataset_root: Path, args: argparse.Namespace, tracks: list[TrackInfo], total_candidates: int) -> None:
     metadata = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -407,7 +437,47 @@ def run_generation(args: argparse.Namespace) -> None:
     kept = 0
     skipped = 0
     rendered = 0
-    for key in sorted(grouped.keys(), key=lambda item: (min(c.index for c in grouped[item]), item[0], item[1])):
+    ordered_keys = sorted(grouped.keys(), key=lambda item: (min(c.index for c in grouped[item]), item[0], item[1]))
+    if args.frame_workers > 1:
+        ensure_dem_vrt(dataset_root)
+        next_progress = args.progress_interval if args.progress_interval > 0 else 0
+        with ThreadPoolExecutor(max_workers=args.frame_workers) as executor:
+            futures = {}
+            for key in ordered_keys:
+                if free_gb(dataset_root) < args.min_free_gb:
+                    print(f"stop: free space below guard {args.min_free_gb:.1f} GB", flush=True)
+                    break
+                futures[
+                    executor.submit(
+                        process_frame_group,
+                        dataset_root=dataset_root,
+                        key=key,
+                        group=grouped[key],
+                        image_size=args.image_size,
+                        sat_sim_jobs=args.sat_sim_jobs,
+                        run_name=args.run_name,
+                        keep_rendered=args.keep_rendered,
+                    )
+                ] = key
+            for future in as_completed(futures):
+                result = future.result()
+                key = result["key"]
+                rows = result["rows"]
+                kept += int(result["kept"])
+                skipped += int(result["skipped"])
+                rendered += int(result["rendered"])
+                append_manifest(manifest_path, rows)
+                with state_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"track": key[0], "seq": key[1], "kept": kept, "skipped": skipped}) + "\n")
+                if rows and args.progress_interval > 0:
+                    last_candidate = max(int(row["candidate_index"]) for row in rows)
+                    while next_progress and kept >= next_progress:
+                        print(f"kept={kept} last_candidate={last_candidate} free_gb={free_gb(dataset_root):.1f}", flush=True)
+                        next_progress += args.progress_interval
+        print(f"done run={args.run_name} kept={kept} skipped={skipped} rendered_frames={rendered} manifest={manifest_path}")
+        return
+
+    for key in ordered_keys:
         if free_gb(dataset_root) < args.min_free_gb:
             print(f"stop: free space below guard {args.min_free_gb:.1f} GB", flush=True)
             break
@@ -449,6 +519,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pairs", type=int, default=0, help="0 means run to the end of the candidate range.")
     parser.add_argument("--run-name", type=str, default="run")
     parser.add_argument("--sat-sim-jobs", type=int, default=4, help="Internal sat_sim_cuda rendering workers per frame batch.")
+    parser.add_argument("--frame-workers", type=int, default=1, help="Independent frame batches to render/convert concurrently.")
     parser.add_argument("--split-mode", choices=("track", "ratio"), default="track")
     parser.add_argument("--split-ratio", type=parse_split_ratio, default=parse_split_ratio("7:2:1"))
     parser.add_argument("--split-seed", type=int, default=20260601)
@@ -469,6 +540,8 @@ def main() -> int:
         raise ValueError("--start-pair-index must be >= 0")
     if args.sat_sim_jobs <= 0:
         raise ValueError("--sat-sim-jobs must be positive")
+    if args.frame_workers <= 0:
+        raise ValueError("--frame-workers must be positive")
     run_generation(args)
     return 0
 

@@ -53,6 +53,28 @@ class BatchPoseSimDatasetTests(unittest.TestCase):
         self.assertIn("/cache/test/", path.as_posix())
         self.assertTrue(path.name.startswith("pair_000003_ext_diag"))
 
+    def test_parse_args_accepts_frame_workers_and_ratio_split(self):
+        module = load_batch_module()
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "batch_pose_sim_dataset.py",
+                "--output-root",
+                "/tmp/out",
+                "--split-mode",
+                "ratio",
+                "--split-ratio",
+                "7:2:1",
+                "--frame-workers",
+                "3",
+            ]
+            args = module.parse_args()
+        finally:
+            sys.argv = original_argv
+        self.assertEqual(args.split_mode, "ratio")
+        self.assertEqual(args.split_ratio, (7, 2, 1))
+        self.assertEqual(args.frame_workers, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
