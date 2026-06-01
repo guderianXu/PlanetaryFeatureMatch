@@ -629,14 +629,14 @@
 - [complete] 修复 `fixed_six_group_matcher_comparison.py`，支持缺失旧 split-root 时从 `/media/xjw/8T/深度学习数据/img/*_1024` 读取固定六组样本，并支持用 `--pfm-state` 直接评估当前 checkpoint。
 
 - [complete] 当前 3000 增量已达到 `10479` 总 pair；原始 track split 为 train `5241` / val `2619` / test `2619`，需要重排。
-- [blocked] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers 8` 在 xjw2T 创建实体训练入口：xjw2T 盘复制中途从系统消失，`lsblk` 当前看不到该盘。
+- [complete] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers 1 --skip-existing` 在 xjw2T 创建实体训练入口；此前 8 workers/4 workers 均触发 xjw2T I/O error，最终单 worker 稳定完成。
 - [complete] 为重分区脚本增加 `--skip-existing` 恢复模式，xjw2T 恢复后可跳过已完整复制的 pair，只补缺失/截断文件。
-- [pending] 用 `verify_pair_cache_dataset.py --expected-ratio 7:2:1` 重新检查 train/val/test 数量和 compact image path 可读性。
-- [pending] 基于新 split 启动下一轮训练与 raw/graph 报告。
+- [complete] 用 `verify_pair_cache_dataset.py --expected-ratio 7:2:1 --samples-per-split 5` 检查 xjw2T 实体数据，train `7335` / val `2095` / test `1049`，抽样加载通过。
+- [pending] 基于新 split 启动下一轮训练与 raw/graph 报告。用户已要求暂时不要训练，等待再次确认。
 
 注意：
 - `sim_ultra_cross_20260531` 已结束但没有生成 pair cache，只有 depth cache；不能混入训练。后续极端跨位置数据需要在 xjw2T 重新生成。
 
 错误记录：
 - 首次运行 `python/test_batch_pose_sim_dataset.py` 时，动态 import 没有提前注册 `sys.modules`，导致 Python 3.12 dataclass 装饰器报 `AttributeError: 'NoneType' object has no attribute '__dict__'`。已在测试 loader 中注册 `sys.modules[spec.name] = module`，复测通过。
-- xjw2T 重分区复制约到 `5870/10479` pair 时失败，日志报 `OSError: [Errno 5] Input/output error`；随后 `/media/xjw/xjw2T` 路径消失且 `lsblk` 不再显示该盘。处理：停止继续写 xjw2T，新增 `--skip-existing` 恢复模式，等待磁盘恢复后从同一输出目录续拷。
+- xjw2T 重分区复制约到 `5870/10479` pair 时失败，日志报 `OSError: [Errno 5] Input/output error`；随后 `/media/xjw/xjw2T` 路径消失且 `lsblk` 不再显示该盘。处理：停止继续写 xjw2T，新增 `--skip-existing` 恢复模式。磁盘恢复后 4 workers 又在 `6411/10479` 左右触发 I/O error，最终用 1 worker 断点续拷完成。

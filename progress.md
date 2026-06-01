@@ -837,3 +837,19 @@
   - shared tree 复制同样支持跳过已完整文件。
   - 新增单测 `test_skip_existing_resumes_complete_files_and_recopies_truncated_files`。
 - 验证通过：`py_compile scripts/repartition_pair_cache.py python/test_repartition_pair_cache.py`；`python -m unittest python/test_repartition_pair_cache.py`。
+
+## 2026-06-01 xjw2T 实体训练数据导入完成
+
+- 用户要求暂时不要训练后，已停止 `same10479_extreme_archive_v21full256_1epoch_s512_20260601_104957` 训练进程，GPU 释放。
+- xjw2T 恢复挂载后检查：`/media/xjw/xjw2T` 为 exFAT，恢复时可用空间约 `596G`；此前半截导入目录仍存在，已有 `6012/10479` 个 pair，占约 `417G`。
+- 首次恢复续拷使用 `--workers 4 --skip-existing`，但又在 `6411/10479` 左右触发 `OSError: [Errno 5] Input/output error`。
+- 改为 `--workers 1 --skip-existing` 后稳定完成，最终输出：
+  - 路径：`/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721`
+  - split：train `7335` / val `2095` / test `1049`
+  - total：`10479`
+  - 目录大小：约 `795G`
+  - xjw2T 剩余空间：约 `214G`
+- 验证命令通过：
+  - `/home/xjw/anaconda3/envs/pfm-train/bin/python -u scripts/verify_pair_cache_dataset.py --dataset-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721 --expected-total 10479 --expected-ratio 7:2:1 --samples-per-split 5`
+  - 抽样结果：train/val/test 各 5 个样本均可加载，shape 为 `1 x 2048 x 2048`，valid pixels 正常，`ok: true`。
+- 结论：xjw2T 空间足够并且本轮同位置实体数据已完成导入；后续训练应优先使用该 xjw2T 实体路径，避免继续从 8T symlink 直接训练导致 I/O 抖动。
