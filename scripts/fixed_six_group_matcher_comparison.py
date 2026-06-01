@@ -29,6 +29,7 @@ SPLIT_ROOT = (
     / "splits"
     / "test"
 )
+IMG_ROOT = Path("/media/xjw/8T/深度学习数据/img")
 PFM_ROUTE = PROJECT_ROOT / "runs" / "cross_view_1024_keypointonly_multistate_lowcontrast_targetcontrast_postselect_0step_seed1234"
 
 METRIC_FIELDS = [
@@ -77,10 +78,6 @@ class FixedPair:
     source: str
     pair: str
     rotation_deg: str = ""
-
-    @property
-    def path(self) -> Path:
-        return SPLIT_ROOT / self.style / self.gate / self.source / self.pair
 
 
 @dataclass(frozen=True)
@@ -193,6 +190,17 @@ def resolve_project_path(path: Path | str) -> Path:
     return value if value.is_absolute() else PROJECT_ROOT / value
 
 
+def pair_path(pair: FixedPair, *, split_root: Path, img_root: Path) -> Path:
+    split_candidate = split_root / pair.style / pair.gate / pair.source / pair.pair
+    if split_candidate.exists():
+        return split_candidate
+    img_subdir = {"rotate": "Rotate_1024", "viewpoint": "Viewpoint_1024", "compound": "CompoundViewpoint_1024"}[pair.gate]
+    img_candidate = img_root / img_subdir / pair.source / pair.pair
+    if img_candidate.exists():
+        return img_candidate
+    return split_candidate
+
+
 def as_float(row: dict[str, str], key: str, default: float = 0.0) -> float:
     value = row.get(key, "")
     if value in ("", "nan", None):
@@ -200,10 +208,28 @@ def as_float(row: dict[str, str], key: str, default: float = 0.0) -> float:
     return float(value)
 
 
-def load_pfm_route_params(route: Path) -> dict[tuple[str, str], PFMRouteParams]:
+def direct_pfm_route_params(args: argparse.Namespace) -> dict[tuple[str, str], PFMRouteParams]:
+    return {
+        (style, gate): PFMRouteParams(
+            style=style,
+            gate=gate,
+            texture_blend_weight=args.pfm_texture_blend_weight,
+            keypoint_score_mode=args.pfm_keypoint_score_mode,
+            min_margin=args.pfm_min_margin,
+            min_target_gradient=args.pfm_min_target_gradient,
+            min_target_local_contrast=args.pfm_min_target_local_contrast,
+            pytorch_state_label="direct",
+            pytorch_state=resolve_project_path(args.pfm_state),
+        )
+        for style in ("numeric", "timestamp")
+        for gate in ("rotate", "viewpoint", "compound")
+    }
+
+
+def load_pfm_route_params(route: Path, args: argparse.Namespace) -> dict[tuple[str, str], PFMRouteParams]:
     path = route / "calibration" / "selected_weights.csv"
     if not path.exists():
-        raise FileNotFoundError(path)
+        return direct_pfm_route_params(args)
     params: dict[tuple[str, str], PFMRouteParams] = {}
     with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
@@ -239,14 +265,15 @@ def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> N
             writer.writerow({key: format_value(row.get(key, "")) for key in fields})
 
 
-def pfm_summary_row(pair: FixedPair) -> MetricRow:
+def pfm_summary_row(pair: FixedPair, args: argparse.Namespace) -> MetricRow:
     summary_path = PFM_ROUTE / "eval" / pair.style / pair.gate / "summary.csv"
     if not summary_path.exists():
         raise FileNotFoundError(summary_path)
-    rel = pair.path.relative_to(PROJECT_ROOT).as_posix()
+    path = pair_path(pair, split_root=args.split_root, img_root=args.img_root)
+    rel = path.relative_to(PROJECT_ROOT).as_posix()
     with summary_path.open(newline="", encoding="utf-8") as handle:
         rows = {row["pair_pt"]: row for row in csv.DictReader(handle)}
-    row = rows.get(rel) or rows.get(pair.path.as_posix())
+    row = rows.get(rel) or rows.get(path.as_posix())
     if row is None:
         raise KeyError(f"{rel} not found in {summary_path}")
     vis_name = f"{pair.sample}_{pair.source}_{Path(pair.pair).stem}.png"
@@ -255,7 +282,7 @@ def pfm_summary_row(pair: FixedPair) -> MetricRow:
         style=pair.style,
         gate=pair.gate,
         sample=pair.sample,
-        pair_pt=pair.path.as_posix(),
+        pair_pt=path.as_posix(),
         algorithm="PlanetaryFeatureMatch-current",
         family="pfm",
         status="ok",
@@ -355,7 +382,7 @@ def pfm_match_points(args: argparse.Namespace, pair: FixedPair, params: PFMRoute
     model = load_pfm_model(params, model_cache, args.device)
     _, _, points_a, points_b = exp.evaluated_match_tensors(
         model,
-        pair.path,
+        pair_path(pair, split_root=args.split_root, img_root=args.img_root),
         device=torch.device(args.device),
         mode="blend",
         texture_blend_weight=params.texture_blend_weight,
@@ -388,7 +415,8 @@ def evaluate_pfm_pair(
     vis_dir: Path,
 ) -> MetricRow:
     try:
-        image_a, image_b, warp_a_to_b, valid_mask = A4.load_pair(pair.path)
+        path = pair_path(pair, split_root=args.split_root, img_root=args.img_root)
+        image_a, image_b, warp_a_to_b, valid_mask = A4.load_pair(path)
         points_a, points_b = pfm_match_points(args, pair, params, model_cache)
         matches, correct, wrong, precision, mean_error, median_error, correct_by_match = metric_from_points(
             points_a,
@@ -403,7 +431,7 @@ def evaluate_pfm_pair(
             style=pair.style,
             gate=pair.gate,
             sample=pair.sample,
-            pair_pt=pair.path.as_posix(),
+            pair_pt=path.as_posix(),
             algorithm="PlanetaryFeatureMatch-current",
             family="pfm",
             status="ok",
@@ -428,7 +456,7 @@ def evaluate_pfm_pair(
             style=pair.style,
             gate=pair.gate,
             sample=pair.sample,
-            pair_pt=pair.path.as_posix(),
+            pair_pt=pair_path(pair, split_root=args.split_root, img_root=args.img_root).as_posix(),
             algorithm="PlanetaryFeatureMatch-current",
             family="pfm",
             status="error",
@@ -447,7 +475,8 @@ def evaluate_pfm_pair(
 
 def evaluate_pair_raw(args: argparse.Namespace, pair: FixedPair, algorithm, vis_dir: Path) -> MetricRow:
     try:
-        image_a, image_b, warp_a_to_b, valid_mask = A4.load_pair(pair.path)
+        path = pair_path(pair, split_root=args.split_root, img_root=args.img_root)
+        image_a, image_b, warp_a_to_b, valid_mask = A4.load_pair(path)
         raw = algorithm.matcher.match(image_a, image_b)
         matches, correct, wrong, precision, mean_error, median_error, correct_by_match = metric_from_points(
             raw.points_a,
@@ -462,7 +491,7 @@ def evaluate_pair_raw(args: argparse.Namespace, pair: FixedPair, algorithm, vis_
             style=pair.style,
             gate=pair.gate,
             sample=pair.sample,
-            pair_pt=pair.path.as_posix(),
+            pair_pt=path.as_posix(),
             algorithm=algorithm.name,
             family=algorithm.family,
             status="ok",
@@ -483,7 +512,7 @@ def evaluate_pair_raw(args: argparse.Namespace, pair: FixedPair, algorithm, vis_
             style=pair.style,
             gate=pair.gate,
             sample=pair.sample,
-            pair_pt=pair.path.as_posix(),
+            pair_pt=pair_path(pair, split_root=args.split_root, img_root=args.img_root).as_posix(),
             algorithm=algorithm.name,
             family=algorithm.family,
             status="error",
@@ -603,6 +632,8 @@ def write_markdown(output_dir: Path, rows: list[MetricRow], summary: list[dict[s
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "对比文档")
+    parser.add_argument("--split-root", type=Path, default=SPLIT_ROOT)
+    parser.add_argument("--img-root", type=Path, default=IMG_ROOT)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--max-keypoints", type=int, default=1024)
@@ -610,6 +641,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-matches", type=int, default=256)
     parser.add_argument("--sift-contrast", type=float, default=0.01)
     parser.add_argument("--pfm-route", type=Path, default=PFM_ROUTE)
+    parser.add_argument("--pfm-texture-blend-weight", type=float, default=1.0)
+    parser.add_argument("--pfm-keypoint-score-mode", choices=["texture", "learned"], default="texture")
     parser.add_argument("--pfm-max-keypoints", type=int, default=4096)
     parser.add_argument("--pfm-max-matches", type=int, default=512)
     parser.add_argument("--pfm-descriptor-topk", type=int, default=32)
@@ -619,6 +652,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pfm-min-intensity", type=float, default=0.01)
     parser.add_argument("--pfm-min-score", type=float, default=-1.0)
     parser.add_argument("--pfm-min-margin", type=float, default=0.0)
+    parser.add_argument("--pfm-min-target-gradient", type=float, default=0.0)
+    parser.add_argument("--pfm-min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--no-lightglue", action="store_true")
     parser.add_argument("--limit-algorithms", nargs="*")
     return parser.parse_args(argv)
@@ -635,15 +670,15 @@ def main(argv: list[str] | None = None) -> int:
     if raw_figures_dir.exists():
         shutil.rmtree(raw_figures_dir)
     pairs = fixed_pairs()
-    for pair in pairs:
-        if not pair.path.exists():
-            raise FileNotFoundError(pair.path)
-    pfm_params = load_pfm_route_params(args.pfm_route)
+    pfm_params = load_pfm_route_params(args.pfm_route, args)
     pfm_model_cache: dict[Path, object] = {}
     algorithms, skipped = make_algorithms(args)
     rows: list[MetricRow] = []
     for pair in pairs:
-        print(f"group={pair.style}/{pair.gate} sample={pair.sample} pair={pair.path}", flush=True)
+        path = pair_path(pair, split_root=args.split_root, img_root=args.img_root)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        print(f"group={pair.style}/{pair.gate} sample={pair.sample} pair={path}", flush=True)
         pfm_row = evaluate_pfm_pair(args, pair, pfm_params[(pair.style, pair.gate)], pfm_model_cache, args.output_dir / "figures")
         rows.append(pfm_row)
         print(
@@ -662,7 +697,11 @@ def main(argv: list[str] | None = None) -> int:
     summary = aggregate(rows)
     write_csv(
         args.output_dir / "fixed_pairs.csv",
-        [asdict(pair) | {"pair_pt": pair.path.as_posix()} for pair in pairs],
+        [
+            asdict(pair)
+            | {"pair_pt": pair_path(pair, split_root=args.split_root, img_root=args.img_root).as_posix()}
+            for pair in pairs
+        ],
         ["style", "gate", "sample", "source", "pair", "rotation_deg", "pair_pt"],
     )
     write_csv(args.output_dir / "metrics.csv", [asdict(row) for row in rows], METRIC_FIELDS)

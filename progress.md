@@ -809,3 +809,6 @@
 - 08:05 CST 检查：同位置增量总数 `10006`，manifest 行数 `2521`，日志最新 `kept=2525 last_candidate=10003 free_gb=3885.7`；距离目标总数 `10479` 还差约 `473`。
 - 为后续仿真提效，`batch_pose_sim_dataset.py` 新增 `--frame-workers`，可并行处理多个独立 frame batch；默认 `1` 保持当前行为。建议 xjw2T 新生成使用 `--frame-workers 2 --sat-sim-jobs 2`，避免单个 frame 顺序渲染成为瓶颈。`python/test_batch_pose_sim_dataset.py` 已覆盖参数解析，`py_compile` 和 unittest 通过。
 - 08:26 CST 检查：同位置增量总数 `10080`，train `5040` / val `2520` / test `2520`，日志最新 `kept=2600 last_candidate=10078 free_gb=3880.7`；距离目标总数 `10479` 还差约 `399`。当前进程仍在旧脚本顺序模式下运行，新 `--frame-workers` 只影响后续新启动任务。
+- 修复六组对比入口 `scripts/fixed_six_group_matcher_comparison.py`：新增 `--split-root` 和 `--img-root`，当旧 `runs/cross_view_*/splits/test` 不存在时可直接从 `/media/xjw/8T/深度学习数据/img/{Rotate_1024,Viewpoint_1024,CompoundViewpoint_1024}` 读取固定样本；当旧 route 的 `selected_weights.csv` 不存在时，可用 `--pfm-state` 和统一 PFM 参数直接评估当前 checkpoint。
+- 新增 `python/test_fixed_six_group_matcher_comparison.py`，覆盖 img-root fallback 和 direct PFM 参数 fallback；`py_compile` 与 unittest 通过。
+- 08:32 CST 检查：同位置增量总数 `10107`，train `5058` / val `2529` / test `2520`，日志最新 `kept=2625 last_candidate=10103 free_gb=3879.1`；距离目标总数 `10479` 还差约 `372`。

@@ -626,6 +626,7 @@
 - [complete] 增加 `python/test_batch_pose_sim_dataset.py`，覆盖 ratio split 精确计数和输出路径使用 candidate split。
 - [complete] 新增 `scripts/verify_pair_cache_dataset.py`，可校验 split 数量、7:2:1 期望值，并抽样加载 compact/legacy pair 检查 `image_store` 路径与 tensor shape。
 - [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--frame-workers`，后续可并行处理多个 frame batch；默认 1 不影响旧命令。
+- [complete] 修复 `fixed_six_group_matcher_comparison.py`，支持缺失旧 split-root 时从 `/media/xjw/8T/深度学习数据/img/*_1024` 读取固定六组样本，并支持用 `--pfm-state` 直接评估当前 checkpoint。
 
 待完成：
 - [pending] 等待当前 3000 增量达到 `10479` 总 pair。
