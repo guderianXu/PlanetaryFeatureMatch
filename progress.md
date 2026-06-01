@@ -812,3 +812,19 @@
 - 修复六组对比入口 `scripts/fixed_six_group_matcher_comparison.py`：新增 `--split-root` 和 `--img-root`，当旧 `runs/cross_view_*/splits/test` 不存在时可直接从 `/media/xjw/8T/深度学习数据/img/{Rotate_1024,Viewpoint_1024,CompoundViewpoint_1024}` 读取固定样本；当旧 route 的 `selected_weights.csv` 不存在时，可用 `--pfm-state` 和统一 PFM 参数直接评估当前 checkpoint。
 - 新增 `python/test_fixed_six_group_matcher_comparison.py`，覆盖 img-root fallback 和 direct PFM 参数 fallback；`py_compile` 与 unittest 通过。
 - 08:32 CST 检查：同位置增量总数 `10107`，train `5058` / val `2529` / test `2520`，日志最新 `kept=2625 last_candidate=10103 free_gb=3879.1`；距离目标总数 `10479` 还差约 `372`。
+
+## 2026-06-01 同位置仿真补齐与 xjw2T 重分区
+
+- 用户提醒后切换为并行补算：旧进程 `sim_same_position_continue_20260531` 仍是单 frame 循环，已安全终止；重新启动 `continue_7479_3000_parallel_20260601_084808`，参数为 `--frame-workers 2 --sat-sim-jobs 2`。
+- 并行补算利用已存在 `pair_*.pt` 跳过逻辑，只补缺失候选；最终日志为 `done ... kept=309 skipped=2691 rendered_frames=35`。
+- 同位置数据集已达到目标总数 `10479`：
+  - 源路径：`/media/xjw/8T/深度学习数据/仿真训练集/pose_sim_2048_gap30_views10`
+  - 当前原始 track split：train `5241` / val `2619` / test `2619`
+  - 旧顺序增量 manifest 数据行约 `2691`，并行补算 manifest 数据行 `309`，合计 `3000`
+  - 源数据集大小约 `697G`，其中 `cache` 约 `696G`
+- 已启动 xjw2T 实体重分区：
+  - 输出路径：`/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721`
+  - 命令核心：`scripts/repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers 8 --overwrite`
+  - PID 文件：`runs/repartition_pose_sim_10479_721.pid`
+  - 日志文件：`runs/repartition_pose_sim_10479_721_20260601_094247.log`
+  - 预期 split：train `7335` / val `2095` / test `1049`

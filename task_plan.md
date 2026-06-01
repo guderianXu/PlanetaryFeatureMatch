@@ -628,9 +628,8 @@
 - [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--frame-workers`，后续可并行处理多个 frame batch；默认 1 不影响旧命令。
 - [complete] 修复 `fixed_six_group_matcher_comparison.py`，支持缺失旧 split-root 时从 `/media/xjw/8T/深度学习数据/img/*_1024` 读取固定六组样本，并支持用 `--pfm-state` 直接评估当前 checkpoint。
 
-待完成：
-- [pending] 等待当前 3000 增量达到 `10479` 总 pair。
-- [pending] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers N` 在 xjw2T 创建实体训练入口。
+- [complete] 当前 3000 增量已达到 `10479` 总 pair；原始 track split 为 train `5241` / val `2619` / test `2619`，需要重排。
+- [in_progress] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers 8` 在 xjw2T 创建实体训练入口。
 - [pending] 用 `verify_pair_cache_dataset.py --expected-ratio 7:2:1` 重新检查 train/val/test 数量和 compact image path 可读性。
 - [pending] 基于新 split 启动下一轮训练与 raw/graph 报告。
 
