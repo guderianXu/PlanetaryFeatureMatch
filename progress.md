@@ -808,3 +808,4 @@
 - 新增 `scripts/verify_pair_cache_dataset.py`，用于重划分后校验 pair 总数、7:2:1 split 数量，并通过 `load_libtorch_pair_archive()` 抽样加载 compact/legacy pair，检查 `image_store` 相对路径、图像/warp/mask shape 和有效像素。新增测试 `python/test_verify_pair_cache_dataset.py`，与 batch/repartition 测试一起通过。
 - 08:05 CST 检查：同位置增量总数 `10006`，manifest 行数 `2521`，日志最新 `kept=2525 last_candidate=10003 free_gb=3885.7`；距离目标总数 `10479` 还差约 `473`。
 - 为后续仿真提效，`batch_pose_sim_dataset.py` 新增 `--frame-workers`，可并行处理多个独立 frame batch；默认 `1` 保持当前行为。建议 xjw2T 新生成使用 `--frame-workers 2 --sat-sim-jobs 2`，避免单个 frame 顺序渲染成为瓶颈。`python/test_batch_pose_sim_dataset.py` 已覆盖参数解析，`py_compile` 和 unittest 通过。
+- 08:26 CST 检查：同位置增量总数 `10080`，train `5040` / val `2520` / test `2520`，日志最新 `kept=2600 last_candidate=10078 free_gb=3880.7`；距离目标总数 `10479` 还差约 `399`。当前进程仍在旧脚本顺序模式下运行，新 `--frame-workers` 只影响后续新启动任务。
