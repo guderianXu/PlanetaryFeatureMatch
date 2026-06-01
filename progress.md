@@ -6,6 +6,7 @@
 - 文档记录了当前主数据集 `/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721`，其 split 为 train 7335 / val 2095 / test 1049，总计 10479，且 `verify_pair_cache_dataset.py` 校验为 `ok: true`。
 - 文档也标明 `runs/same10479_cross_extreme_xjw2t_v21full256_1epoch_s512_20260601_152126` 是误启动后中断的 run，不是有效炼丹结果；当前不应自动训练，除非用户再次明确要求。
 - 同步记录了 xjw2T 与 8T 上已有数据集、同位置和跨位置仿真生成命令模板、数据内部格式、空间/重复存储注意事项，以及下一步应优先生成 cross-position、ultra/extreme、弱纹理、光照差异和 terrain-heldout 数据。
+- 用户随后确认：旧 1024 数据不要，DOM 原始大文件和旧 extreme archive 不需要，仅保存第 4 项 ultra/probe depth cache。已从 8T 复制到 xjw2T 训练数据目录：`pose_sim_cross_position_rendered_ultra_2048_gap30_views10_721_20260531`、`pose_sim_cross_position_rendered_offset28_probe_20260531`、`pose_sim_cross_position_rendered_ultra_probe_20260531`、`pose_sim_cross_position_rendered_ultra_smoke_20260531`。排除了临时 `depth_cache/work` symlink 后校验有效文件数一致：1563/1563、36/36、33/33、30/30；xjw2T 剩余约 208G。
 
 ## 2026-05-27 PFM v2.1 架构迁移
 - 根据用户确认的新架构文档，已完成 PyTorch 主路径的 PFM v2.1 代码迁移。

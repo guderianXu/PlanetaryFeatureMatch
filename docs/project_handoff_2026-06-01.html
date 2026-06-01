@@ -325,7 +325,7 @@
           </tr>
           <tr>
             <td>硬盘空间</td>
-            <td>xjw2T 当前约剩 <code>214G</code>，8T 当前约剩 <code>3.8T</code>。继续大规模生成应优先放 8T，训练前再同步必要子集到 xjw2T。</td>
+            <td>xjw2T 当前约剩 <code>208G</code>，8T 当前约剩 <code>3.8T</code>。第 4 项 ultra/probe depth cache 已从 8T 保存到 xjw2T；旧 1024、DOM、旧 extreme archive 按用户要求不再保留。</td>
           </tr>
         </tbody>
       </table>
@@ -453,6 +453,38 @@
             <td>更极端的跨位置数据，包含 rendered depth cache。当前是训练困难样本的重要来源。</td>
           </tr>
           <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_ultra_2048_gap30_views10_721_20260531</code></td>
+            <td>约 6.2G</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>从 8T 保存过来的 ultra cross-position depth cache，中间数据，尚不是训练 pair cache。有效文件数校验：源 1563 / 目标 1563。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_offset28_probe_20260531</code></td>
+            <td>约 123M</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>从 8T 保存过来的 offset28 probe depth cache。有效文件数校验：源 36 / 目标 36。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_ultra_probe_20260531</code></td>
+            <td>约 117M</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>从 8T 保存过来的 ultra probe depth cache。有效文件数校验：源 33 / 目标 33。</td>
+          </tr>
+          <tr>
+            <td><code>/media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_ultra_smoke_20260531</code></td>
+            <td>约 105M</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+            <td>从 8T 保存过来的 ultra smoke depth cache。有效文件数校验：源 30 / 目标 30。</td>
+          </tr>
+          <tr>
             <td><code>/home/xjw/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721_symlink</code></td>
             <td>很小</td>
             <td>链接视图</td>
@@ -512,7 +544,7 @@
       </table>
 
       <div class="note">
-        xjw2T 目前约剩 <code>214G</code>，不适合再直接导入一个几百 GB 的完整大数据集。8T 约剩 <code>3.8T</code>，更适合继续生成，训练前再挑选/重分区/压缩同步到 xjw2T。
+        xjw2T 目前约剩 <code>208G</code>，不适合再直接导入一个几百 GB 的完整大数据集。8T 约剩 <code>3.8T</code>。用户已确认旧 1024 数据、DOM 原始大文件和旧 extreme archive 不需要保留；第 4 项 ultra/probe depth cache 已保存到 xjw2T。
       </div>
     </section>
 
