@@ -490,7 +490,12 @@ cmake --build build -j</code></pre>
 find "$DATA/cache/train" -name 'pair_*.pt' | wc -l
 find "$DATA/cache/val" -name 'pair_*.pt' | wc -l
 find "$DATA/cache/test" -name 'pair_*.pt' | wc -l
-sed -n '1,120p' "$DATA/dataset_metadata.json"</code></pre>
+sed -n '1,120p' "$DATA/dataset_metadata.json"
+
+/home/xjw/anaconda3/envs/pfm-train/bin/python scripts/verify_pair_cache_dataset.py \
+  --dataset-root "$DATA" \
+  --expected-ratio 7:2:1 \
+  --samples-per-split 3</code></pre>
 
       <h3>6.7 旧 same-position 数据重划分到 xjw2T</h3>
       <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch

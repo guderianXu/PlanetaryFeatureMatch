@@ -805,3 +805,5 @@
 - 继续修复生成端 split：`辅助软件/数据模拟/batch_pose_sim_dataset.py` 新增 `--split-mode track|ratio`、`--split-ratio 7:2:1`、`--split-seed`。默认仍是旧的 track split，后续 xjw2T 新仿真可显式用 ratio 直接生成 7:2:1。
 - 新增 `python/test_batch_pose_sim_dataset.py` 覆盖 ratio split 精确计数和 `output_pair_path()` 使用 candidate split。首次测试因 Python 3.12 dataclass 动态导入未注册 `sys.modules` 失败，已修复测试 loader；最终 `py_compile` 和 `python -m unittest python/test_batch_pose_sim_dataset.py python/test_repartition_pair_cache.py` 均通过。
 - `docs/simulation_data_generation_status.html` 已同步更新：same-position 新生成命令使用 `--split-mode ratio --split-ratio 7:2:1`；新增旧数据并行重划分到 xjw2T 的 `repartition_pair_cache.py --link-mode copy --workers 8` 命令。
+- 新增 `scripts/verify_pair_cache_dataset.py`，用于重划分后校验 pair 总数、7:2:1 split 数量，并通过 `load_libtorch_pair_archive()` 抽样加载 compact/legacy pair，检查 `image_store` 相对路径、图像/warp/mask shape 和有效像素。新增测试 `python/test_verify_pair_cache_dataset.py`，与 batch/repartition 测试一起通过。
+- 08:05 CST 检查：同位置增量总数 `10006`，manifest 行数 `2521`，日志最新 `kept=2525 last_candidate=10003 free_gb=3885.7`；距离目标总数 `10479` 还差约 `473`。

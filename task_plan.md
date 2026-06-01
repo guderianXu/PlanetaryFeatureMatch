@@ -624,11 +624,12 @@
 - [complete] 增加 `python/test_repartition_pair_cache.py`，覆盖 `copy` 模式、并行 workers、7:2:1 计数和共享资产复制。
 - [complete] 扩展 `batch_pose_sim_dataset.py`，新增 `--split-mode ratio --split-ratio 7:2:1 --split-seed`，后续新生成数据可直接按 7:2:1 输出；默认 `track` 模式保持兼容。
 - [complete] 增加 `python/test_batch_pose_sim_dataset.py`，覆盖 ratio split 精确计数和输出路径使用 candidate split。
+- [complete] 新增 `scripts/verify_pair_cache_dataset.py`，可校验 split 数量、7:2:1 期望值，并抽样加载 compact/legacy pair 检查 `image_store` 路径与 tensor shape。
 
 待完成：
 - [pending] 等待当前 3000 增量达到 `10479` 总 pair。
 - [pending] 用 `repartition_pair_cache.py --ratio 7:2:1 --link-mode copy --workers N` 在 xjw2T 创建实体训练入口。
-- [pending] 重新检查 train/val/test 数量和 compact image path 可读性。
+- [pending] 用 `verify_pair_cache_dataset.py --expected-ratio 7:2:1` 重新检查 train/val/test 数量和 compact image path 可读性。
 - [pending] 基于新 split 启动下一轮训练与 raw/graph 报告。
 
 注意：
