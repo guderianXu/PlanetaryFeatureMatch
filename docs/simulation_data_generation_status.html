@@ -444,9 +444,13 @@ cmake --build build -j</code></pre>
   --render-gap 30 \
   --image-size 2048 \
   --sat-sim-jobs 4 \
+  --split-mode ratio \
+  --split-ratio 7:2:1 \
+  --split-seed 20260601 \
   --run-name full \
   --max-pairs 0 \
   --min-free-gb 500</code></pre>
+      <p>旧版脚本按轨迹分配 split，比例约为 50/25/25；新生成数据建议显式使用 <code>--split-mode ratio</code>，保证训练/验证/测试为 7:2:1。</p>
 
       <h3>6.4 生成普通 cross-position 数据</h3>
       <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
@@ -488,7 +492,18 @@ find "$DATA/cache/val" -name 'pair_*.pt' | wc -l
 find "$DATA/cache/test" -name 'pair_*.pt' | wc -l
 sed -n '1,120p' "$DATA/dataset_metadata.json"</code></pre>
 
-      <h3>6.7 压缩重复影像存储</h3>
+      <h3>6.7 旧 same-position 数据重划分到 xjw2T</h3>
+      <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
+/home/xjw/anaconda3/envs/pfm-train/bin/python scripts/repartition_pair_cache.py \
+  --input-root /media/xjw/8T/深度学习数据/仿真训练集/pose_sim_2048_gap30_views10 \
+  --output-root /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_2048_gap30_views10_10479_721 \
+  --ratio 7:2:1 \
+  --link-mode copy \
+  --workers 8 \
+  --overwrite</code></pre>
+      <p>如果确认 8T 源数据不再需要，可以把 <code>--link-mode copy</code> 改为 <code>--link-mode move</code>。跨硬盘 move 仍然会复制再删除，建议先用 copy 完成校验。</p>
+
+      <h3>6.8 压缩重复影像存储</h3>
       <pre><code>cd /home/xjw/code/deeplearning/PlanetaryFeatureMatch
 /home/xjw/anaconda3/envs/pfm-train/bin/python scripts/compact_pose_sim_pair_cache.py \
   /media/xjw/xjw2T/code/deeplearning/PlanetaryFeatureMatch/训练数据/pose_sim_cross_position_rendered_extreme_next</code></pre>

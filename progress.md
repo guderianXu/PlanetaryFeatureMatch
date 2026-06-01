@@ -804,3 +804,4 @@
 - 代码已推送 GitHub：`d531274 Support parallel self-contained cache repartition`。
 - 继续修复生成端 split：`辅助软件/数据模拟/batch_pose_sim_dataset.py` 新增 `--split-mode track|ratio`、`--split-ratio 7:2:1`、`--split-seed`。默认仍是旧的 track split，后续 xjw2T 新仿真可显式用 ratio 直接生成 7:2:1。
 - 新增 `python/test_batch_pose_sim_dataset.py` 覆盖 ratio split 精确计数和 `output_pair_path()` 使用 candidate split。首次测试因 Python 3.12 dataclass 动态导入未注册 `sys.modules` 失败，已修复测试 loader；最终 `py_compile` 和 `python -m unittest python/test_batch_pose_sim_dataset.py python/test_repartition_pair_cache.py` 均通过。
+- `docs/simulation_data_generation_status.html` 已同步更新：same-position 新生成命令使用 `--split-mode ratio --split-ratio 7:2:1`；新增旧数据并行重划分到 xjw2T 的 `repartition_pair_cache.py --link-mode copy --workers 8` 命令。
