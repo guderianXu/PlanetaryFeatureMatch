@@ -7,9 +7,11 @@
 #include "infer/feature_codec.h"
 #include "infer/match_codec.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct EvalReport {
+struct EvalReport
+{
     double average_matches = 0.0;
     double average_sparse_score = 0.0;
     double average_dense_confidence = 0.0;
@@ -29,10 +31,8 @@ std::vector<std::pair<std::string, std::string>> loadEvalPairs(const std::string
 /// @param match_sets Match outputs corresponding one-to-one with feature_sets.
 /// @return Average match count, sparse score, dense confidence, and semi-dense coverage.
 /// @throws std::invalid_argument if inputs are empty or sizes differ.
-EvalReport aggregateEvalReport(
-    const std::vector<std::pair<FeatureSet, FeatureSet>>& feature_sets,
-    const std::vector<MatchSet>& match_sets
-);
+EvalReport aggregateEvalReport(const std::vector<std::pair<FeatureSet, FeatureSet>>& feature_sets,
+                               const std::vector<MatchSet>& match_sets);
 
 /// Saves evaluation metrics to a LibTorch archive.
 /// @param path Destination .pt report path.
@@ -40,4 +40,4 @@ EvalReport aggregateEvalReport(
 /// @throws std::invalid_argument if serialization fails.
 void saveEvalReport(const std::string& path, const EvalReport& report);
 
-}  // namespace pfm
+} // namespace pfm

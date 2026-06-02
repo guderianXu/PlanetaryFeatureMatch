@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <vector>
 
-namespace pfm {
+namespace pfm
+{
 
-class Sampler {
-public:
+class Sampler
+{
+  public:
     /// Destroys the sampler.
     virtual ~Sampler() = default;
 
@@ -16,8 +18,9 @@ public:
     virtual std::vector<size_t> indices() const = 0;
 };
 
-class SequentialSampler : public Sampler {
-public:
+class SequentialSampler : public Sampler
+{
+  public:
     /// Creates an ordered sampler for count samples.
     /// \param count Number of samples.
     explicit SequentialSampler(size_t count);
@@ -26,12 +29,13 @@ public:
     /// \return Ordered indices.
     std::vector<size_t> indices() const override;
 
-private:
+  private:
     size_t _count;
 };
 
-class ShuffleSampler : public Sampler {
-public:
+class ShuffleSampler : public Sampler
+{
+  public:
     /// Creates a deterministic shuffled sampler.
     /// \param count Number of samples.
     /// \param seed Random seed.
@@ -41,13 +45,14 @@ public:
     /// \return Deterministically shuffled indices.
     std::vector<size_t> indices() const override;
 
-private:
+  private:
     size_t _count;
     uint64_t _seed;
 };
 
-class SubsetSampler : public Sampler {
-public:
+class SubsetSampler : public Sampler
+{
+  public:
     /// Creates a sampler over an explicit index list.
     /// \param indices Indices to return.
     explicit SubsetSampler(std::vector<size_t> indices);
@@ -56,11 +61,12 @@ public:
     /// \return Subset indices.
     std::vector<size_t> indices() const override;
 
-private:
+  private:
     std::vector<size_t> _indices;
 };
 
-struct DatasetSplit {
+struct DatasetSplit
+{
     std::vector<size_t> train;
     std::vector<size_t> validation;
     std::vector<size_t> test;
@@ -75,12 +81,7 @@ struct DatasetSplit {
 /// \param shuffle Whether to shuffle before splitting.
 /// \return Three disjoint index vectors covering every sample exactly once.
 /// \throws std::invalid_argument if ratios are negative or do not sum to one.
-DatasetSplit make_train_validation_test_split(
-    size_t count,
-    double train_ratio,
-    double validation_ratio,
-    double test_ratio,
-    uint64_t seed,
-    bool shuffle);
+DatasetSplit make_train_validation_test_split(size_t count, double train_ratio, double validation_ratio,
+                                              double test_ratio, uint64_t seed, bool shuffle);
 
-}  // namespace pfm
+} // namespace pfm

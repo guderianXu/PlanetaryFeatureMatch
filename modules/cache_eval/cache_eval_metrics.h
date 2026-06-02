@@ -5,28 +5,30 @@
 #include <string>
 #include <vector>
 
-namespace pfm::cache_eval {
+namespace pfm::cache_eval
+{
 
-struct MatchSummaryRow {
+struct MatchSummaryRow
+{
     int64_t pair_index = 0;
     double precision = 0.0;
     int64_t correct = 0;
     int64_t matches = 0;
 };
 
-struct HardPairMiningOptions {
+struct HardPairMiningOptions
+{
     std::size_t limit = 0;
     int64_t min_matches = 0;
     double max_precision = 1.0;
 };
 
-std::vector<int64_t> selectHardPairIndices(
-    const std::vector<MatchSummaryRow>& rows,
-    const HardPairMiningOptions& options
-);
+std::vector<int64_t> selectHardPairIndices(const std::vector<MatchSummaryRow>& rows,
+                                           const HardPairMiningOptions& options);
 
-class PairMetrics {
-public:
+class PairMetrics
+{
+  public:
     explicit PairMetrics(std::string pair_id);
 
     const std::string& pairId() const;
@@ -37,12 +39,7 @@ public:
     void setFeatureCoverage(int64_t source_features, int64_t valid_warp_features, int64_t covered_features);
     void addDescriptorQuery(bool top1_correct, int64_t one_based_rank);
     void addDescriptorQueries(int64_t queries, int64_t top1_correct, int64_t rank_sum);
-    void addDescriptorQueries(
-        int64_t queries,
-        int64_t top1_correct,
-        int64_t rank_observed,
-        int64_t rank_sum
-    );
+    void addDescriptorQueries(int64_t queries, int64_t top1_correct, int64_t rank_observed, int64_t rank_sum);
 
     int64_t totalMatches() const;
     int64_t correctMatches() const;
@@ -69,7 +66,7 @@ public:
     static std::string csvHeader();
     std::string csvRow() const;
 
-private:
+  private:
     std::string _pair_id;
     int64_t _total_matches = 0;
     int64_t _correct_matches = 0;
@@ -86,8 +83,9 @@ private:
     int64_t _descriptor_rank_sum = 0;
 };
 
-class MetricsAccumulator {
-public:
+class MetricsAccumulator
+{
+  public:
     void addPair(const PairMetrics& pair);
 
     const std::vector<PairMetrics>& pairs() const;
@@ -96,8 +94,8 @@ public:
     std::string csvHeader() const;
     std::string csvTable(bool include_summary) const;
 
-private:
+  private:
     std::vector<PairMetrics> _pairs;
 };
 
-}  // namespace pfm::cache_eval
+} // namespace pfm::cache_eval

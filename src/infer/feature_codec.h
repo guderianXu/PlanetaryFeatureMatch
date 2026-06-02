@@ -4,9 +4,11 @@
 
 #include <torch/torch.h>
 
-namespace pfm {
+namespace pfm
+{
 
-struct FeatureSet {
+struct FeatureSet
+{
     torch::Tensor keypoints;
     torch::Tensor scores;
     torch::Tensor descriptors;
@@ -31,4 +33,4 @@ void save_feature_set(const FeatureSet& feature_set, const std::string& path);
 /// @throws std::invalid_argument if loading fails or any required tensor is missing.
 FeatureSet load_feature_set(const std::string& path);
 
-}  // namespace pfm
+} // namespace pfm

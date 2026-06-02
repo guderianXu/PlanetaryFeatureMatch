@@ -4,9 +4,11 @@
 
 #include "infer/feature_codec.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct RawFeatureMaps {
+struct RawFeatureMaps
+{
     torch::Tensor heatmap;
     torch::Tensor descriptors;
     torch::Tensor scale;
@@ -16,7 +18,8 @@ struct RawFeatureMaps {
 };
 
 /// Controls sparse keypoint and semi-dense feature decoding.
-struct FeatureDecodeConfig {
+struct FeatureDecodeConfig
+{
     /// Maximum sparse keypoints to return.
     int max_keypoints = 1024;
     /// Soft lower sparse keypoint target; 0 disables lower-target refill.
@@ -54,12 +57,8 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, do
 /// @param intensity_mask Optional H x W CPU mask in image coordinates; nonzero values are valid.
 /// @return FeatureSet containing only valid sparse and dense locations.
 /// @throws std::invalid_argument if maps, arguments, or mask shape/device are invalid.
-FeatureSet decode_feature_maps(
-    const RawFeatureMaps& maps,
-    int max_keypoints,
-    double semi_dense_threshold,
-    const torch::Tensor& intensity_mask
-);
+FeatureSet decode_feature_maps(const RawFeatureMaps& maps, int max_keypoints, double semi_dense_threshold,
+                               const torch::Tensor& intensity_mask);
 
 /// Decodes sparse and dense feature tensors using an explicit decode configuration.
 /// @param maps Raw heatmap, descriptor, scale, orientation, affine, and dense confidence maps.
@@ -68,10 +67,7 @@ FeatureSet decode_feature_maps(
 /// @param intensity_mask Optional H x W CPU mask in image coordinates; nonzero values are valid.
 /// @return FeatureSet containing sparse locations after local NMS and dense locations above the configured threshold.
 /// @throws std::invalid_argument if maps, config, or mask shape/device are invalid.
-FeatureSet decode_feature_maps(
-    const RawFeatureMaps& maps,
-    const FeatureDecodeConfig& config,
-    const torch::Tensor& intensity_mask
-);
+FeatureSet decode_feature_maps(const RawFeatureMaps& maps, const FeatureDecodeConfig& config,
+                               const torch::Tensor& intensity_mask);
 
-}  // namespace pfm
+} // namespace pfm

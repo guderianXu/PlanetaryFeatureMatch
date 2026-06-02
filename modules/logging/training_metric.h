@@ -4,14 +4,17 @@
 #include <string>
 #include <unordered_map>
 
-namespace pfm {
+namespace pfm
+{
 
-struct GpuMetrics {
+struct GpuMetrics
+{
     std::optional<double> utilization_percent;
     std::optional<double> power_watts;
 };
 
-struct TrainingMetric {
+struct TrainingMetric
+{
     int epoch = 0;
     int total_epochs = 0;
     int iteration = 0;
@@ -23,8 +26,9 @@ struct TrainingMetric {
     std::unordered_map<std::string, double> values;
 };
 
-class TrainingMetricLogger {
-public:
+class TrainingMetricLogger
+{
+  public:
     /// Destroys the logger.
     virtual ~TrainingMetricLogger() = default;
 
@@ -40,4 +44,4 @@ public:
     virtual void flush() = 0;
 };
 
-}  // namespace pfm
+} // namespace pfm

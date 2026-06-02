@@ -12,18 +12,21 @@
 
 #include <torch/torch.h>
 
-namespace pfm {
+namespace pfm
+{
 
 /// Writes a single training visualization PNG immediately.
 /// @param output_path PNG path to write.
 /// @param image Tensor with shape {3,H,W}, {1,H,W}, or {H,W}, normalized to [0,1].
 /// @param overlay Text drawn in the upper-left corner.
 /// @throws std::invalid_argument if the tensor shape is invalid or PNG write fails.
-void writeVisualizationImage(const std::filesystem::path& output_path, const torch::Tensor& image, const std::string& overlay);
+void writeVisualizationImage(const std::filesystem::path& output_path, const torch::Tensor& image,
+                             const std::string& overlay);
 
 /// Asynchronously writes training diagnostic visualization PNG files.
-class AsyncVisualizationWriter {
-public:
+class AsyncVisualizationWriter
+{
+  public:
     /// Creates a writer with background worker threads and a bounded queue.
     /// @param capacity Maximum queued image jobs before enqueue waits.
     /// @param worker_count Number of background writer threads.
@@ -53,7 +56,7 @@ public:
     /// Flushes queued jobs, joins the background thread, and rethrows writer errors.
     void join();
 
-private:
+  private:
     using VisualizationJob = std::function<void()>;
 
     void run();
@@ -69,4 +72,4 @@ private:
     std::vector<std::thread> _threads;
 };
 
-}  // namespace pfm
+} // namespace pfm

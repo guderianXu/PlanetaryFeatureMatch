@@ -5,47 +5,56 @@
 #include <string>
 #include <thread>
 
-#include <unistd.h>
-
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include "tests/test_harness.h"
 #include "train/training_visualization.h"
 
-namespace {
+namespace
+{
 
-class TempTrainingVisualizationDirectory {
-public:
-    explicit TempTrainingVisualizationDirectory(const std::string& stem) {
-        const auto suffix = std::to_string(static_cast<long long>(getpid())) + "_" +
-                            std::to_string(std::random_device{}());
+class TempTrainingVisualizationDirectory
+{
+  public:
+    explicit TempTrainingVisualizationDirectory(const std::string& stem)
+    {
+        const auto suffix =
+            std::to_string(static_cast<long long>(getpid())) + "_" + std::to_string(std::random_device{}());
         _path = std::filesystem::temp_directory_path() / (stem + "_" + suffix);
         std::filesystem::create_directory(_path);
     }
 
-    ~TempTrainingVisualizationDirectory() {
+    ~TempTrainingVisualizationDirectory()
+    {
         std::error_code ignored;
-        for (const auto& entry : std::filesystem::directory_iterator(_path)) {
+        for (const auto& entry : std::filesystem::directory_iterator(_path))
+        {
             std::filesystem::remove(entry.path(), ignored);
         }
         std::filesystem::remove(_path, ignored);
     }
 
-    const std::filesystem::path& path() const {
+    const std::filesystem::path& path() const
+    {
         return _path;
     }
 
-private:
+  private:
     std::filesystem::path _path;
 };
 
-bool has_text_pixels(const cv::Mat& image) {
-    for (int y = 0; y < std::min(14, image.rows); ++y) {
-        for (int x = 0; x < std::min(96, image.cols); ++x) {
+bool has_text_pixels(const cv::Mat& image)
+{
+    for (int y = 0; y < std::min(14, image.rows); ++y)
+    {
+        for (int x = 0; x < std::min(96, image.cols); ++x)
+        {
             const auto pixel = image.at<cv::Vec3b>(y, x);
-            if (pixel[0] > 180 && pixel[1] > 180 && pixel[2] > 180) {
+            if (pixel[0] > 180 && pixel[1] > 180 && pixel[2] > 180)
+            {
                 return true;
             }
         }
@@ -53,13 +62,15 @@ bool has_text_pixels(const cv::Mat& image) {
     return false;
 }
 
-}  // namespace
+} // namespace
 
-static void async_visualization_writer_flushes_all_queued_pngs() {
+static void async_visualization_writer_flushes_all_queued_pngs()
+{
     TempTrainingVisualizationDirectory temp_dir("pfm_async_train_vis");
     pfm::AsyncVisualizationWriter writer(256);
 
-    for (int index = 0; index < 3; ++index) {
+    for (int index = 0; index < 3; ++index)
+    {
         const auto path = temp_dir.path() / ("image_" + std::to_string(index) + ".png");
         writer.enqueueImage(path, torch::full({1, 16, 16}, static_cast<float>(index) / 3.0F), "features=1");
     }
@@ -70,7 +81,8 @@ static void async_visualization_writer_flushes_all_queued_pngs() {
     PFM_REQUIRE(std::filesystem::exists(temp_dir.path() / "image_2.png"));
 }
 
-static void async_visualization_writer_draws_count_overlay() {
+static void async_visualization_writer_draws_count_overlay()
+{
     TempTrainingVisualizationDirectory temp_dir("pfm_async_train_vis_overlay");
     const auto path = temp_dir.path() / "overlay.png";
     pfm::AsyncVisualizationWriter writer(256);
@@ -83,7 +95,8 @@ static void async_visualization_writer_draws_count_overlay() {
     PFM_REQUIRE(has_text_pixels(image));
 }
 
-static void async_visualization_writer_preserves_rgb_tensor_colors() {
+static void async_visualization_writer_preserves_rgb_tensor_colors()
+{
     TempTrainingVisualizationDirectory temp_dir("pfm_async_train_vis_color");
     const auto path = temp_dir.path() / "color.png";
     pfm::AsyncVisualizationWriter writer(256);
@@ -101,27 +114,43 @@ static void async_visualization_writer_preserves_rgb_tensor_colors() {
     PFM_REQUIRE(pixel[0] < 20);
 }
 
-static void async_visualization_writer_runs_background_jobs() {
+static void async_visualization_writer_runs_background_jobs()
+{
     pfm::AsyncVisualizationWriter writer(256, 2);
     std::atomic<int> rendered{0};
 
-    writer.enqueueJob([&rendered]() { rendered.fetch_add(1); });
-    writer.enqueueJob([&rendered]() { rendered.fetch_add(1); });
+    writer.enqueueJob(
+        [&rendered]()
+        {
+            rendered.fetch_add(1);
+        });
+    writer.enqueueJob(
+        [&rendered]()
+        {
+            rendered.fetch_add(1);
+        });
     writer.join();
 
     PFM_REQUIRE(rendered.load() == 2);
 }
 
-static void async_visualization_writer_fast_jobs_do_not_wait_for_slow_job() {
+static void async_visualization_writer_fast_jobs_do_not_wait_for_slow_job()
+{
     pfm::AsyncVisualizationWriter writer(256, 2);
     std::atomic<bool> slow_done{false};
     std::atomic<bool> fast_done{false};
 
-    writer.enqueueJob([&slow_done]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-        slow_done.store(true);
-    });
-    writer.enqueueJob([&fast_done]() { fast_done.store(true); });
+    writer.enqueueJob(
+        [&slow_done]()
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            slow_done.store(true);
+        });
+    writer.enqueueJob(
+        [&fast_done]()
+        {
+            fast_done.store(true);
+        });
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
     PFM_REQUIRE(fast_done.load());
@@ -129,7 +158,8 @@ static void async_visualization_writer_fast_jobs_do_not_wait_for_slow_job() {
     writer.join();
 }
 
-void register_training_visualization_tests() {
+void register_training_visualization_tests()
+{
     register_test("async_visualization_writer_flushes_all_queued_pngs",
                   async_visualization_writer_flushes_all_queued_pngs);
     register_test("async_visualization_writer_draws_count_overlay", async_visualization_writer_draws_count_overlay);

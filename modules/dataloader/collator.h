@@ -6,10 +6,12 @@
 
 #include "dataloader/tensor_batch.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class TensorBatchCollator {
-public:
+class TensorBatchCollator
+{
+  public:
     /// Creates a collator with required keys and tensor layouts.
     /// \param layouts Required key-layout pairs.
     /// \throws std::invalid_argument if layouts is empty.
@@ -21,8 +23,8 @@ public:
     /// \throws std::invalid_argument if samples are empty, keys are missing, or tensor ranks are invalid.
     TensorBatch collate(const std::vector<TensorBatch>& samples) const;
 
-private:
+  private:
     std::vector<std::pair<std::string, TensorLayout>> _layouts;
 };
 
-}  // namespace pfm
+} // namespace pfm

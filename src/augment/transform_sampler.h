@@ -2,9 +2,11 @@
 
 #include "augment/image_pair_augmentor.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct ImagePairTransformParameters {
+struct ImagePairTransformParameters
+{
     float translation_x = 0.0F;
     float translation_y = 0.0F;
     float rotation_degrees = 0.0F;
@@ -26,4 +28,4 @@ struct ImagePairTransformParameters {
 /// @throws std::invalid_argument if config values are invalid.
 ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentationConfig& config);
 
-}  // namespace pfm
+} // namespace pfm

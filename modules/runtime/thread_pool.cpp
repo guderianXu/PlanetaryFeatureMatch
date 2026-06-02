@@ -3,24 +3,35 @@
 #include <stdexcept>
 #include <utility>
 
-namespace pfm {
+namespace pfm
+{
 
-ThreadPool::ThreadPool(std::size_t worker_count, std::size_t queue_capacity) : _jobs(queue_capacity) {
-    if (worker_count == 0) {
+ThreadPool::ThreadPool(std::size_t worker_count, std::size_t queue_capacity) : _jobs(queue_capacity)
+{
+    if (worker_count == 0)
+    {
         throw std::invalid_argument("thread pool worker count must be positive");
     }
 
     _workers.reserve(worker_count);
-    try {
-        for (std::size_t index = 0; index < worker_count; ++index) {
-            _workers.emplace_back([this]() {
-                workerLoop();
-            });
+    try
+    {
+        for (std::size_t index = 0; index < worker_count; ++index)
+        {
+            _workers.emplace_back(
+                [this]()
+                {
+                    workerLoop();
+                });
         }
-    } catch (...) {
+    }
+    catch (...)
+    {
         close();
-        for (auto& worker : _workers) {
-            if (worker.joinable()) {
+        for (auto& worker : _workers)
+        {
+            if (worker.joinable())
+            {
                 worker.join();
             }
         }
@@ -28,28 +39,38 @@ ThreadPool::ThreadPool(std::size_t worker_count, std::size_t queue_capacity) : _
     }
 }
 
-ThreadPool::~ThreadPool() {
+ThreadPool::~ThreadPool()
+{
     close();
-    try {
+    try
+    {
         join();
-    } catch (...) {
+    }
+    catch (...)
+    {
     }
 }
 
-void ThreadPool::enqueue(std::function<void()> job) {
+void ThreadPool::enqueue(std::function<void()> job)
+{
     _jobs.push(std::move(job));
 }
 
-void ThreadPool::close() {
+void ThreadPool::close()
+{
     _jobs.close();
 }
 
-void ThreadPool::join() {
+void ThreadPool::join()
+{
     {
         std::lock_guard<std::mutex> lock(_join_mutex);
-        if (!_joined) {
-            for (auto& worker : _workers) {
-                if (worker.joinable()) {
+        if (!_joined)
+        {
+            for (auto& worker : _workers)
+            {
+                if (worker.joinable())
+                {
                     worker.join();
                 }
             }
@@ -57,26 +78,34 @@ void ThreadPool::join() {
         }
     }
 
-    if (_first_exception) {
+    if (_first_exception)
+    {
         std::rethrow_exception(_first_exception);
     }
 }
 
-void ThreadPool::workerLoop() {
-    while (auto job = _jobs.pop()) {
-        try {
+void ThreadPool::workerLoop()
+{
+    while (auto job = _jobs.pop())
+    {
+        try
+        {
             (*job)();
-        } catch (...) {
+        }
+        catch (...)
+        {
             captureException();
         }
     }
 }
 
-void ThreadPool::captureException() {
+void ThreadPool::captureException()
+{
     std::lock_guard<std::mutex> lock(_exception_mutex);
-    if (!_first_exception) {
+    if (!_first_exception)
+    {
         _first_exception = std::current_exception();
     }
 }
 
-}  // namespace pfm
+} // namespace pfm

@@ -4,10 +4,12 @@
 
 #include "logging/training_metric.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class GpuMetricProvider {
-public:
+class GpuMetricProvider
+{
+  public:
     /// Destroys the provider.
     virtual ~GpuMetricProvider() = default;
 
@@ -16,8 +18,9 @@ public:
     virtual GpuMetrics sample() = 0;
 };
 
-class NullGpuMetricProvider : public GpuMetricProvider {
-public:
+class NullGpuMetricProvider : public GpuMetricProvider
+{
+  public:
     /// Samples no GPU metrics.
     /// @return Empty metric values.
     GpuMetrics sample() override;
@@ -31,4 +34,4 @@ std::unique_ptr<GpuMetricProvider> makeNvmlGpuMetricProvider();
 /// @return GPU metric provider instance.
 std::unique_ptr<GpuMetricProvider> makeDefaultGpuMetricProvider();
 
-}  // namespace pfm
+} // namespace pfm

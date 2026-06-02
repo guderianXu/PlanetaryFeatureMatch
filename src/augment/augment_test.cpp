@@ -4,9 +4,11 @@
 #include "augment/transform_sampler.h"
 #include "tests/test_harness.h"
 
-namespace {
+namespace
+{
 
-static void transformSamplerIsDeterministic() {
+static void transformSamplerIsDeterministic()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mixed;
     config.source_index = 3;
@@ -21,15 +23,18 @@ static void transformSamplerIsDeterministic() {
     PFM_REQUIRE_CLOSE(first.brightness_delta, second.brightness_delta, 1.0e-6F);
 }
 
-static void transformSamplerMixedIncludesHalfTurnVariants() {
+static void transformSamplerMixedIncludesHalfTurnVariants()
+{
     bool found_half_turn = false;
-    for (int64_t variant = 0; variant < 24; ++variant) {
+    for (int64_t variant = 0; variant < 24; ++variant)
+    {
         pfm::ImagePairAugmentationConfig config;
         config.profile = pfm::AugmentationProfile::Mixed;
         config.source_index = 3;
         config.variant_index = variant;
         const auto params = pfm::sampleImagePairTransform(config);
-        if (std::abs(std::abs(params.rotation_degrees) - 180.0F) <= 5.0F) {
+        if (std::abs(std::abs(params.rotation_degrees) - 180.0F) <= 5.0F)
+        {
             found_half_turn = true;
             break;
         }
@@ -38,7 +43,8 @@ static void transformSamplerMixedIncludesHalfTurnVariants() {
     PFM_REQUIRE(found_half_turn);
 }
 
-static void transformSamplerMixedHalfTurnIsCleanRotationAnchor() {
+static void transformSamplerMixedHalfTurnIsCleanRotationAnchor()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mixed;
     config.source_index = 0;
@@ -54,15 +60,18 @@ static void transformSamplerMixedHalfTurnIsCleanRotationAnchor() {
     PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
 }
 
-static void transformSamplerMixedIncludesQuarterTurnVariants() {
+static void transformSamplerMixedIncludesQuarterTurnVariants()
+{
     bool found_quarter_turn = false;
-    for (int64_t variant = 0; variant < 24; ++variant) {
+    for (int64_t variant = 0; variant < 24; ++variant)
+    {
         pfm::ImagePairAugmentationConfig config;
         config.profile = pfm::AugmentationProfile::Mixed;
         config.source_index = 3;
         config.variant_index = variant;
         const auto params = pfm::sampleImagePairTransform(config);
-        if (std::abs(std::abs(params.rotation_degrees) - 90.0F) <= 5.0F) {
+        if (std::abs(std::abs(params.rotation_degrees) - 90.0F) <= 5.0F)
+        {
             found_quarter_turn = true;
             break;
         }
@@ -71,7 +80,8 @@ static void transformSamplerMixedIncludesQuarterTurnVariants() {
     PFM_REQUIRE(found_quarter_turn);
 }
 
-static void transformSamplerMixedQuarterTurnIsCleanRotationAnchor() {
+static void transformSamplerMixedQuarterTurnIsCleanRotationAnchor()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mixed;
     config.source_index = 0;
@@ -87,7 +97,8 @@ static void transformSamplerMixedQuarterTurnIsCleanRotationAnchor() {
     PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
 }
 
-static void transformSamplerMixedIncludesCleanThirtyDegreeAnchors() {
+static void transformSamplerMixedIncludesCleanThirtyDegreeAnchors()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mixed;
     config.source_index = 0;
@@ -103,7 +114,8 @@ static void transformSamplerMixedIncludesCleanThirtyDegreeAnchors() {
     PFM_REQUIRE_CLOSE(params.shadow_strength, 0.0F, 1.0e-6F);
 }
 
-static void transformSamplerViewpointAddsProjectiveTermsWithoutFullRotationAnchor() {
+static void transformSamplerViewpointAddsProjectiveTermsWithoutFullRotationAnchor()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Viewpoint;
     config.source_index = 2;
@@ -116,7 +128,8 @@ static void transformSamplerViewpointAddsProjectiveTermsWithoutFullRotationAncho
     PFM_REQUIRE(std::abs(params.rotation_degrees) < 75.0F);
 }
 
-static void transformSamplerCompoundViewpointKeepsFullRotationBase() {
+static void transformSamplerCompoundViewpointKeepsFullRotationBase()
+{
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::CompoundViewpoint;
     config.source_index = 2;
@@ -128,7 +141,8 @@ static void transformSamplerCompoundViewpointKeepsFullRotationBase() {
     PFM_REQUIRE(std::abs(params.perspective_x) > 1.0e-7F || std::abs(params.perspective_y) > 1.0e-7F);
 }
 
-static void imagePairAugmentorReturnsCurrentTrainingKeys() {
+static void imagePairAugmentorReturnsCurrentTrainingKeys()
+{
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mild;
@@ -145,7 +159,8 @@ static void imagePairAugmentorReturnsCurrentTrainingKeys() {
     PFM_REQUIRE(sample.view_a.dtype() == torch::kFloat32);
 }
 
-static void imagePairAugmentorMixedHalfTurnWarpCrossesImage() {
+static void imagePairAugmentorMixedHalfTurnWarpCrossesImage()
+{
     const auto image = torch::linspace(0.0, 1.0, 64, torch::kFloat32).reshape({1, 8, 8});
     pfm::ImagePairAugmentationConfig config;
     config.profile = pfm::AugmentationProfile::Mixed;
@@ -161,14 +176,16 @@ static void imagePairAugmentorMixedHalfTurnWarpCrossesImage() {
     PFM_REQUIRE_CLOSE(sample.warp_a_to_b.index({7, 7, 1}).item<float>(), 0.0F, 1.0e-5F);
 }
 
-}  // namespace
+} // namespace
 
-void register_augment_tests() {
+void register_augment_tests()
+{
     register_test("transform sampler is deterministic", transformSamplerIsDeterministic);
     register_test("transform sampler mixed includes half turn variants", transformSamplerMixedIncludesHalfTurnVariants);
     register_test("transform sampler mixed half turn is clean rotation anchor",
                   transformSamplerMixedHalfTurnIsCleanRotationAnchor);
-    register_test("transform sampler mixed includes quarter turn variants", transformSamplerMixedIncludesQuarterTurnVariants);
+    register_test("transform sampler mixed includes quarter turn variants",
+                  transformSamplerMixedIncludesQuarterTurnVariants);
     register_test("transform sampler mixed quarter turn is clean rotation anchor",
                   transformSamplerMixedQuarterTurnIsCleanRotationAnchor);
     register_test("transform sampler mixed includes clean thirty degree anchors",

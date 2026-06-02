@@ -6,10 +6,12 @@
 
 #include "logging/training_metric.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class CsvMetricLogger : public TrainingMetricLogger {
-public:
+class CsvMetricLogger : public TrainingMetricLogger
+{
+  public:
     /// Opens a CSV metric logger.
     /// @param path Output CSV path.
     /// @param value_columns Metric value columns appended after fixed columns.
@@ -27,7 +29,7 @@ public:
     /// Flushes the CSV file.
     void flush() override;
 
-private:
+  private:
     void writeHeader();
 
     std::ofstream _output;
@@ -35,4 +37,4 @@ private:
     bool _header_written = false;
 };
 
-}  // namespace pfm
+} // namespace pfm

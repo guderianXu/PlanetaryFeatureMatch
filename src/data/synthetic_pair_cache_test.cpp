@@ -8,71 +8,84 @@
 #include <thread>
 #include <vector>
 
-#include <unistd.h>
-
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include "data/image_dataset.h"
 #include "data/synthetic_pair_cache.h"
 #include "tests/test_harness.h"
 
-namespace {
+namespace
+{
 
-class TempCacheDirectory {
-public:
-    explicit TempCacheDirectory(const std::string& stem) {
-        const auto suffix = std::to_string(static_cast<long long>(getpid())) + "_" +
-                            std::to_string(std::random_device{}());
+class TempCacheDirectory
+{
+  public:
+    explicit TempCacheDirectory(const std::string& stem)
+    {
+        const auto suffix =
+            std::to_string(static_cast<long long>(getpid())) + "_" + std::to_string(std::random_device{}());
         _path = std::filesystem::temp_directory_path() / (stem + "_" + suffix);
         std::filesystem::create_directory(_path);
     }
 
-    ~TempCacheDirectory() {
+    ~TempCacheDirectory()
+    {
         std::error_code ignored;
         const auto cache_dir = _path / "pair_cache";
-        if (std::filesystem::exists(cache_dir, ignored)) {
-            for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+        if (std::filesystem::exists(cache_dir, ignored))
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(cache_dir))
+            {
                 std::filesystem::remove(entry.path(), ignored);
             }
             std::filesystem::remove(cache_dir, ignored);
         }
-        for (const auto& entry : std::filesystem::directory_iterator(_path)) {
+        for (const auto& entry : std::filesystem::directory_iterator(_path))
+        {
             std::filesystem::remove(entry.path(), ignored);
         }
         std::filesystem::remove(_path, ignored);
     }
 
-    const std::filesystem::path& path() const {
+    const std::filesystem::path& path() const
+    {
         return _path;
     }
 
-    std::filesystem::path file(const std::string& name) const {
+    std::filesystem::path file(const std::string& name) const
+    {
         return _path / name;
     }
 
-private:
+  private:
     std::filesystem::path _path;
 };
 
-void require_image_written(const std::filesystem::path& path, int offset) {
+void require_image_written(const std::filesystem::path& path, int offset)
+{
     cv::Mat image(20, 24, CV_8UC1);
-    for (int y = 0; y < image.rows; ++y) {
-        for (int x = 0; x < image.cols; ++x) {
+    for (int y = 0; y < image.rows; ++y)
+    {
+        for (int x = 0; x < image.cols; ++x)
+        {
             image.at<uint8_t>(y, x) = static_cast<uint8_t>((x * 5 + y * 9 + offset) % 256);
         }
     }
     PFM_REQUIRE(cv::imwrite(path.string(), image));
 }
 
-pfm::ImageDataset make_dataset(const TempCacheDirectory& temp_dir) {
+pfm::ImageDataset make_dataset(const TempCacheDirectory& temp_dir)
+{
     require_image_written(temp_dir.file("image_a.png"), 0);
     require_image_written(temp_dir.file("image_b.png"), 17);
     return pfm::ImageDataset(temp_dir.path().string());
 }
 
-pfm::SyntheticPairCacheConfig make_cache_config(const TempCacheDirectory& temp_dir, std::size_t pair_count) {
+pfm::SyntheticPairCacheConfig make_cache_config(const TempCacheDirectory& temp_dir, std::size_t pair_count)
+{
     pfm::SyntheticPairCacheConfig config;
     config.cache_dir = temp_dir.file("pair_cache").string();
     config.resize = 16;
@@ -84,15 +97,18 @@ pfm::SyntheticPairCacheConfig make_cache_config(const TempCacheDirectory& temp_d
     return config;
 }
 
-std::filesystem::path source_dir(const pfm::SyntheticPairCacheConfig& config, std::size_t source_index, const char* stem) {
+std::filesystem::path source_dir(const pfm::SyntheticPairCacheConfig& config, std::size_t source_index,
+                                 const char* stem)
+{
     std::ostringstream stream;
     stream << "source_" << std::setw(6) << std::setfill('0') << source_index << "_" << stem;
     return std::filesystem::path(config.cache_dir) / stream.str();
 }
 
-}  // namespace
+} // namespace
 
-static void synthetic_pair_cache_generates_pt_manifest_and_png_views() {
+static void synthetic_pair_cache_generates_pt_manifest_and_png_views()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_generate");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 2);
@@ -106,7 +122,8 @@ static void synthetic_pair_cache_generates_pt_manifest_and_png_views() {
     PFM_REQUIRE(std::filesystem::exists(source_dir(config, 1, "image_b") / "pair_000001.pt"));
 }
 
-static void synthetic_pair_cache_writes_named_rotation_tif_and_correspondence() {
+static void synthetic_pair_cache_writes_named_rotation_tif_and_correspondence()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_rotation_named");
     auto dataset = make_dataset(temp_dir);
     auto config = make_cache_config(temp_dir, 4);
@@ -125,16 +142,16 @@ static void synthetic_pair_cache_writes_named_rotation_tif_and_correspondence() 
     pfm::SyntheticPairCacheDataset cache_dataset(config.cache_dir);
     const auto identity_pair = cache_dataset.load(0);
     const auto rotated_pair = cache_dataset.load(2);
-    auto xy = torch::meshgrid(
-        {torch::arange(identity_pair.warp_a_to_b.size(0), torch::kFloat32),
-         torch::arange(identity_pair.warp_a_to_b.size(1), torch::kFloat32)},
-        "ij");
+    auto xy = torch::meshgrid({torch::arange(identity_pair.warp_a_to_b.size(0), torch::kFloat32),
+                               torch::arange(identity_pair.warp_a_to_b.size(1), torch::kFloat32)},
+                              "ij");
     const auto grid = torch::stack({xy[1], xy[0]}, 2);
     PFM_REQUIRE(torch::allclose(identity_pair.warp_a_to_b, grid, 1.0e-4, 1.0e-4));
     PFM_REQUIRE(!torch::allclose(rotated_pair.warp_a_to_b, grid, 1.0e-4, 1.0e-4));
 }
 
-static void synthetic_pair_cache_dataset_loads_cached_pair_shapes() {
+static void synthetic_pair_cache_dataset_loads_cached_pair_shapes()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_load");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 1);
@@ -151,7 +168,8 @@ static void synthetic_pair_cache_dataset_loads_cached_pair_shapes() {
     PFM_REQUIRE(pair.view_a.device().is_cpu());
 }
 
-static void synthetic_pair_cache_generates_multiple_pairs_per_source_image() {
+static void synthetic_pair_cache_generates_multiple_pairs_per_source_image()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_multiple_pairs");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 4);
@@ -166,7 +184,8 @@ static void synthetic_pair_cache_generates_multiple_pairs_per_source_image() {
     PFM_REQUIRE(std::filesystem::exists(source_dir(config, 1, "image_b") / "pair_000003_view_b.png"));
 }
 
-static void synthetic_pair_cache_varies_multiple_pairs_from_same_source_image() {
+static void synthetic_pair_cache_varies_multiple_pairs_from_same_source_image()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_varied_pairs");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 4);
@@ -180,7 +199,8 @@ static void synthetic_pair_cache_varies_multiple_pairs_from_same_source_image() 
     PFM_REQUIRE(torch::allclose(first_source_first_pair.view_a, first_source_second_pair.view_a));
 }
 
-static void synthetic_pair_cache_saves_one_view_a_png_per_source_image() {
+static void synthetic_pair_cache_saves_one_view_a_png_per_source_image()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_single_view_a");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 4);
@@ -188,14 +208,18 @@ static void synthetic_pair_cache_saves_one_view_a_png_per_source_image() {
     pfm::prepare_synthetic_pair_cache(dataset, config);
 
     std::size_t view_a_count = 0;
-    for (const auto& root_entry : std::filesystem::directory_iterator(config.cache_dir)) {
-        if (!root_entry.is_directory()) {
+    for (const auto& root_entry : std::filesystem::directory_iterator(config.cache_dir))
+    {
+        if (!root_entry.is_directory())
+        {
             continue;
         }
-        for (const auto& entry : std::filesystem::directory_iterator(root_entry.path())) {
-        if (entry.path().filename().string().find("view_a.png") != std::string::npos) {
-            ++view_a_count;
-        }
+        for (const auto& entry : std::filesystem::directory_iterator(root_entry.path()))
+        {
+            if (entry.path().filename().string().find("view_a.png") != std::string::npos)
+            {
+                ++view_a_count;
+            }
         }
     }
     PFM_REQUIRE(view_a_count == dataset.size());
@@ -203,7 +227,8 @@ static void synthetic_pair_cache_saves_one_view_a_png_per_source_image() {
     PFM_REQUIRE(std::filesystem::exists(source_dir(config, 1, "image_b") / "source_000001_view_a.png"));
 }
 
-static void synthetic_pair_cache_reuses_complete_matching_cache() {
+static void synthetic_pair_cache_reuses_complete_matching_cache()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_reuse");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 1);
@@ -217,7 +242,8 @@ static void synthetic_pair_cache_reuses_complete_matching_cache() {
     PFM_REQUIRE(std::filesystem::last_write_time(pair_path) == first_write_time);
 }
 
-static void synthetic_pair_cache_rebuilds_when_manifest_config_changes() {
+static void synthetic_pair_cache_rebuilds_when_manifest_config_changes()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_config_rebuild");
     auto dataset = make_dataset(temp_dir);
     auto config = make_cache_config(temp_dir, 1);
@@ -232,7 +258,8 @@ static void synthetic_pair_cache_rebuilds_when_manifest_config_changes() {
     PFM_REQUIRE(std::filesystem::last_write_time(pair_path) != first_write_time);
 }
 
-static void synthetic_pair_cache_rebuilds_when_geometric_config_changes() {
+static void synthetic_pair_cache_rebuilds_when_geometric_config_changes()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_geometric_rebuild");
     auto dataset = make_dataset(temp_dir);
     auto config = make_cache_config(temp_dir, 1);
@@ -247,7 +274,8 @@ static void synthetic_pair_cache_rebuilds_when_geometric_config_changes() {
     PFM_REQUIRE(std::filesystem::last_write_time(pair_path) != first_write_time);
 }
 
-static void synthetic_pair_cache_rebuilds_when_pair_file_is_missing() {
+static void synthetic_pair_cache_rebuilds_when_pair_file_is_missing()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_missing_rebuild");
     auto dataset = make_dataset(temp_dir);
     const auto config = make_cache_config(temp_dir, 1);
@@ -260,7 +288,8 @@ static void synthetic_pair_cache_rebuilds_when_pair_file_is_missing() {
     PFM_REQUIRE(std::filesystem::exists(pair_path));
 }
 
-static void synthetic_pair_cache_rebuilds_when_augmentation_profile_changes() {
+static void synthetic_pair_cache_rebuilds_when_augmentation_profile_changes()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_profile_rebuild");
     auto dataset = make_dataset(temp_dir);
     auto config = make_cache_config(temp_dir, 2);
@@ -276,7 +305,8 @@ static void synthetic_pair_cache_rebuilds_when_augmentation_profile_changes() {
     PFM_REQUIRE(std::filesystem::last_write_time(pair_path) != first_write_time);
 }
 
-static void synthetic_pair_cache_rebuilds_when_extreme_pair_ratio_changes() {
+static void synthetic_pair_cache_rebuilds_when_extreme_pair_ratio_changes()
+{
     TempCacheDirectory temp_dir("pfm_pair_cache_ratio_rebuild");
     auto dataset = make_dataset(temp_dir);
     auto config = make_cache_config(temp_dir, 2);
@@ -292,12 +322,12 @@ static void synthetic_pair_cache_rebuilds_when_extreme_pair_ratio_changes() {
     PFM_REQUIRE(std::filesystem::last_write_time(pair_path) != first_write_time);
 }
 
-void register_synthetic_pair_cache_tests() {
+void register_synthetic_pair_cache_tests()
+{
     register_test("synthetic_pair_cache_generates_pt_manifest_and_png_views",
                   synthetic_pair_cache_generates_pt_manifest_and_png_views);
-    register_test(
-        "synthetic_pair_cache_writes_named_rotation_tif_and_correspondence",
-        synthetic_pair_cache_writes_named_rotation_tif_and_correspondence);
+    register_test("synthetic_pair_cache_writes_named_rotation_tif_and_correspondence",
+                  synthetic_pair_cache_writes_named_rotation_tif_and_correspondence);
     register_test("synthetic_pair_cache_dataset_loads_cached_pair_shapes",
                   synthetic_pair_cache_dataset_loads_cached_pair_shapes);
     register_test("synthetic_pair_cache_generates_multiple_pairs_per_source_image",

@@ -1,4 +1,3 @@
-#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -7,13 +6,13 @@
 #include <string>
 #include <vector>
 
-#include <unistd.h>
-
+#include <cctype>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
-
+#include <torch/script.h>
 #include <torch/serialize.h>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include "cli/commands.h"
 #include "infer/feature_codec.h"
@@ -23,7 +22,8 @@
 #include "tests/test_harness.h"
 #include "train/trainer.h"
 
-namespace pfm::testing {
+namespace pfm::testing
+{
 int64_t descriptor_grid_fallback_min_sparse_matches_for_test();
 bool should_use_descriptor_grid_fallback_for_test(int64_t base_sparse_matches, int64_t grid_sparse_matches);
 bool should_use_high_density_sparse_matches_for_test(int64_t base_sparse_matches, int64_t high_density_sparse_matches);
@@ -32,57 +32,71 @@ bool should_use_balanced_texture_blend_matches_for_test(int64_t base_sparse_matc
 double rotation_invariant_texture_blend_weight_for_test();
 bool sparse_geometry_filter_rotation_only_requested_for_test();
 bool should_skip_expensive_sparse_alternates_for_test(int64_t sparse_matches);
-FeatureSet make_descriptor_grid_feature_set_for_test(
-    const RawFeatureMaps& maps,
-    const FeatureDecodeConfig& config,
-    const torch::Tensor& intensity_mask);
-torch::Tensor make_inference_decode_heatmap_for_test(
-    const torch::Tensor& image,
-    const torch::Tensor& learned_heatmap);
+FeatureSet make_descriptor_grid_feature_set_for_test(const RawFeatureMaps& maps, const FeatureDecodeConfig& config,
+                                                     const torch::Tensor& intensity_mask);
+torch::Tensor make_inference_decode_heatmap_for_test(const torch::Tensor& image, const torch::Tensor& learned_heatmap);
 FeatureDecodeConfig make_high_density_decode_config_for_test(FeatureDecodeConfig decode_config);
-}
+} // namespace pfm::testing
 
-namespace {
+namespace
+{
 
-struct CoutCapture {
+struct CoutCapture
+{
     std::ostringstream stream;
     std::streambuf* old = nullptr;
 
-    CoutCapture() : old(std::cout.rdbuf(stream.rdbuf())) {}
+    CoutCapture() : old(std::cout.rdbuf(stream.rdbuf()))
+    {
+    }
     CoutCapture(const CoutCapture&) = delete;
     CoutCapture& operator=(const CoutCapture&) = delete;
     CoutCapture(CoutCapture&&) = delete;
     CoutCapture& operator=(CoutCapture&&) = delete;
 
-    ~CoutCapture() noexcept {
-        try {
-            if (old != nullptr) {
+    ~CoutCapture() noexcept
+    {
+        try
+        {
+            if (old != nullptr)
+            {
                 std::cout.rdbuf(old);
             }
-        } catch (...) {
+        }
+        catch (...)
+        {
         }
     }
 
-    std::string str() const { return stream.str(); }
+    std::string str() const
+    {
+        return stream.str();
+    }
 };
 
-class TempPipelineDirectory {
-public:
-    explicit TempPipelineDirectory(const std::string& stem) {
-        const auto suffix = std::to_string(static_cast<long long>(getpid())) + "_" +
-                            std::to_string(std::random_device{}());
+class TempPipelineDirectory
+{
+  public:
+    explicit TempPipelineDirectory(const std::string& stem)
+    {
+        const auto suffix =
+            std::to_string(static_cast<long long>(getpid())) + "_" + std::to_string(std::random_device{}());
         _path = std::filesystem::temp_directory_path() / (stem + "_" + suffix);
         std::filesystem::create_directory(_path);
     }
 
-    ~TempPipelineDirectory() {
-        for (const auto& file_path : _files) {
+    ~TempPipelineDirectory()
+    {
+        for (const auto& file_path : _files)
+        {
             std::remove(file_path.string().c_str());
         }
         std::error_code ignored;
         const auto cache_dir = _path / "pair_cache";
-        if (std::filesystem::exists(cache_dir, ignored)) {
-            for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+        if (std::filesystem::exists(cache_dir, ignored))
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(cache_dir))
+            {
                 std::filesystem::remove(entry.path(), ignored);
             }
             std::filesystem::remove(cache_dir, ignored);
@@ -90,41 +104,51 @@ public:
         std::filesystem::remove(_path, ignored);
     }
 
-    const std::filesystem::path& path() const {
+    const std::filesystem::path& path() const
+    {
         return _path;
     }
 
-    std::filesystem::path file(const std::string& name) {
+    std::filesystem::path file(const std::string& name)
+    {
         auto file_path = _path / name;
         _files.push_back(file_path);
         return file_path;
     }
 
-private:
+  private:
     std::filesystem::path _path;
     std::vector<std::filesystem::path> _files;
 };
 
-void write_test_image(const std::filesystem::path& path, int offset) {
+void write_test_image(const std::filesystem::path& path, int offset)
+{
     cv::Mat image(32, 32, CV_8UC1);
-    for (int y = 0; y < image.rows; ++y) {
-        for (int x = 0; x < image.cols; ++x) {
+    for (int y = 0; y < image.rows; ++y)
+    {
+        for (int x = 0; x < image.cols; ++x)
+        {
             image.at<uint8_t>(y, x) = static_cast<uint8_t>((x * 5 + y * 13 + offset) % 256);
         }
     }
     PFM_REQUIRE(cv::imwrite(path.string(), image));
 }
 
-void write_scaled_match_image(const std::filesystem::path& path) {
+void write_scaled_match_image(const std::filesystem::path& path)
+{
     cv::Mat image(32, 40, CV_8UC1, cv::Scalar(40));
     PFM_REQUIRE(cv::imwrite(path.string(), image));
 }
 
-bool has_yellow_pixel_near(const cv::Mat& image, int center_x, int center_y) {
-    for (int y = std::max(0, center_y - 3); y <= std::min(image.rows - 1, center_y + 3); ++y) {
-        for (int x = std::max(0, center_x - 3); x <= std::min(image.cols - 1, center_x + 3); ++x) {
+bool has_yellow_pixel_near(const cv::Mat& image, int center_x, int center_y)
+{
+    for (int y = std::max(0, center_y - 3); y <= std::min(image.rows - 1, center_y + 3); ++y)
+    {
+        for (int x = std::max(0, center_x - 3); x <= std::min(image.cols - 1, center_x + 3); ++x)
+        {
             const auto pixel = image.at<cv::Vec3b>(y, x);
-            if (pixel[0] < 80 && pixel[1] > 150 && pixel[2] > 150) {
+            if (pixel[0] < 80 && pixel[1] > 150 && pixel[2] > 150)
+            {
                 return true;
             }
         }
@@ -132,37 +156,71 @@ bool has_yellow_pixel_near(const cv::Mat& image, int center_x, int center_y) {
     return false;
 }
 
-bool has_formatted_seconds_after_label(const std::string& output, const std::string& label) {
+bool has_formatted_seconds_after_label(const std::string& output, const std::string& label)
+{
     const auto start = output.find(label);
-    if (start == std::string::npos) {
+    if (start == std::string::npos)
+    {
         return false;
     }
     auto index = start + label.size();
-    if (index >= output.size() || !std::isdigit(static_cast<unsigned char>(output[index]))) {
+    if (index >= output.size() || !std::isdigit(static_cast<unsigned char>(output[index])))
+    {
         return false;
     }
-    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index]))) {
+    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index])))
+    {
         ++index;
     }
-    if (index >= output.size() || output[index] != '.') {
+    if (index >= output.size() || output[index] != '.')
+    {
         return false;
     }
     ++index;
     int decimal_count = 0;
-    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index]))) {
+    while (index < output.size() && std::isdigit(static_cast<unsigned char>(output[index])))
+    {
         ++index;
         ++decimal_count;
     }
     return decimal_count >= 3 && index < output.size() && output[index] == 's';
 }
 
-void write_text_file(const std::filesystem::path& path, const std::string& text) {
+void write_text_file(const std::filesystem::path& path, const std::string& text)
+{
     std::ofstream output(path);
     PFM_REQUIRE(static_cast<bool>(output));
     output << text;
 }
 
-pfm::CliOptions make_train_options(TempPipelineDirectory& temp_dir) {
+torch::Tensor make_identity_warp(int64_t height, int64_t width)
+{
+    auto warp = torch::zeros({height, width, 2}, torch::kFloat32);
+    auto values = warp.accessor<float, 3>();
+    for (int64_t y = 0; y < height; ++y)
+    {
+        for (int64_t x = 0; x < width; ++x)
+        {
+            values[y][x][0] = static_cast<float>(x);
+            values[y][x][1] = static_cast<float>(y);
+        }
+    }
+    return warp;
+}
+
+void write_pair_archive_for_training(const std::filesystem::path& path)
+{
+    std::filesystem::create_directories(path.parent_path());
+    torch::jit::Module module("PairArchive");
+    module.register_attribute("view_a", c10::TensorType::get(), torch::ones({1, 32, 32}, torch::kFloat32));
+    module.register_attribute("view_b", c10::TensorType::get(), torch::ones({1, 32, 32}, torch::kFloat32) * 0.9F);
+    module.register_attribute("warp_a_to_b", c10::TensorType::get(), make_identity_warp(32, 32));
+    module.register_attribute("valid_mask", c10::TensorType::get(), torch::ones({32, 32}, torch::kBool));
+    module.save(path.string());
+}
+
+pfm::CliOptions make_train_options(TempPipelineDirectory& temp_dir)
+{
     pfm::CliOptions options;
     options.image_dir = temp_dir.path().string();
     options.checkpoint = temp_dir.file("checkpoint.pt").string();
@@ -174,7 +232,8 @@ pfm::CliOptions make_train_options(TempPipelineDirectory& temp_dir) {
     return options;
 }
 
-std::string write_checkpoint(TempPipelineDirectory& temp_dir) {
+std::string write_checkpoint(TempPipelineDirectory& temp_dir)
+{
     write_test_image(temp_dir.file("train_a.png"), 3);
     write_test_image(temp_dir.file("train_b.png"), 41);
 
@@ -185,11 +244,15 @@ std::string write_checkpoint(TempPipelineDirectory& temp_dir) {
     config.batch_size = 1;
     config.base_channels = 2;
     config.descriptor_dim = 4;
+    config.graph_hidden_dim = 16;
+    config.graph_attention_layers = 1;
+    config.graph_keypoint_meta_dim = 16;
     pfm::train_model(config);
     return config.checkpoint;
 }
 
-std::string write_config_only_checkpoint(TempPipelineDirectory& temp_dir) {
+std::string write_config_only_checkpoint(TempPipelineDirectory& temp_dir)
+{
     const auto checkpoint = temp_dir.file("config_only.pt");
     torch::serialize::OutputArchive archive;
     torch::serialize::OutputArchive config_archive;
@@ -201,38 +264,39 @@ std::string write_config_only_checkpoint(TempPipelineDirectory& temp_dir) {
     return checkpoint.string();
 }
 
-pfm::FeatureSet makeTestFeatureSet(float offset) {
+pfm::FeatureSet makeTestFeatureSet(float offset)
+{
     const auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
-    return pfm::FeatureSet{
-        torch::tensor({{0.0F + offset, 0.0F}, {1.0F + offset, 1.0F}}, float_options),
-        torch::tensor({0.9F, 0.8F}, float_options),
-        torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F, 0.0F}}, float_options),
-        torch::ones({2}, float_options),
-        torch::zeros({2}, float_options),
-        torch::zeros({2, 2, 2}, float_options),
-        torch::tensor({{2.0F + offset, 2.0F}, {3.0F + offset, 3.0F}}, float_options),
-        torch::tensor({0.7F, 0.6F}, float_options)};
+    return pfm::FeatureSet{torch::tensor({{0.0F + offset, 0.0F}, {1.0F + offset, 1.0F}}, float_options),
+                           torch::tensor({0.9F, 0.8F}, float_options),
+                           torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F, 0.0F}}, float_options),
+                           torch::ones({2}, float_options),
+                           torch::zeros({2}, float_options),
+                           torch::zeros({2, 2, 2}, float_options),
+                           torch::tensor({{2.0F + offset, 2.0F}, {3.0F + offset, 3.0F}}, float_options),
+                           torch::tensor({0.7F, 0.6F}, float_options)};
 }
 
-pfm::FeatureSet makeScaledFeatureSet() {
+pfm::FeatureSet makeScaledFeatureSet()
+{
     const auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
-    auto features = pfm::FeatureSet{
-        torch::tensor({{5.0F, 4.0F}}, float_options),
-        torch::tensor({0.9F}, float_options),
-        torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F}}, float_options),
-        torch::ones({1}, float_options),
-        torch::zeros({1}, float_options),
-        torch::zeros({1, 2, 2}, float_options),
-        torch::empty({0, 2}, float_options),
-        torch::empty({0}, float_options)};
+    auto features = pfm::FeatureSet{torch::tensor({{5.0F, 4.0F}}, float_options),
+                                    torch::tensor({0.9F}, float_options),
+                                    torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F}}, float_options),
+                                    torch::ones({1}, float_options),
+                                    torch::zeros({1}, float_options),
+                                    torch::zeros({1, 2, 2}, float_options),
+                                    torch::empty({0, 2}, float_options),
+                                    torch::empty({0}, float_options)};
     features.feature_map_width = 10;
     features.feature_map_height = 8;
     return features;
 }
 
-}  // namespace
+} // namespace
 
-static void pipeline_train_writes_loadable_checkpoint() {
+static void pipeline_train_writes_loadable_checkpoint()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train");
     write_test_image(temp_dir.file("image.png"), 11);
     auto options = make_train_options(temp_dir);
@@ -242,7 +306,34 @@ static void pipeline_train_writes_loadable_checkpoint() {
     PFM_REQUIRE(pfm::checkpoint_can_load(options.checkpoint));
 }
 
-static void pipeline_train_rejects_invalid_training_limits() {
+static void pipeline_train_accepts_pair_archive_cache_without_image_dir()
+{
+    TempPipelineDirectory temp_dir("pfm_pipeline_train_pair_archive");
+    const auto cache_dir = temp_dir.path() / "archive_cache" / "train";
+    write_pair_archive_for_training(cache_dir / "source_000001" / "pair_000001_identity.pt");
+
+    pfm::CliOptions options;
+    options.checkpoint = temp_dir.file("checkpoint.pt").string();
+    options.epochs = 1;
+    options.batch_size = 1;
+    options.device = "cpu";
+    options.base_channels = 2;
+    options.descriptor_dim = 4;
+    options.graph_hidden_dim = 16;
+    options.graph_attention_layers = 1;
+    options.graph_keypoint_meta_dim = 16;
+    options.resize = 0;
+    options.training_profile = "smoke";
+    options.pair_cache_dirs.push_back(cache_dir.string());
+    options.pair_cache_limit = 1;
+
+    PFM_REQUIRE(pfm::run_train_command(options) == 0);
+    PFM_REQUIRE(std::filesystem::exists(options.checkpoint));
+    PFM_REQUIRE(pfm::checkpoint_can_load(options.checkpoint));
+}
+
+static void pipeline_train_rejects_invalid_training_limits()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_invalid_limits");
     write_test_image(temp_dir.file("image.png"), 11);
 
@@ -252,7 +343,8 @@ static void pipeline_train_rejects_invalid_training_limits() {
     PFM_REQUIRE(!std::filesystem::exists(invalid_resize.checkpoint));
 }
 
-static void pipeline_train_writes_synthetic_pair_cache() {
+static void pipeline_train_writes_synthetic_pair_cache()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_pair_cache");
     write_test_image(temp_dir.file("image_a.png"), 11);
     write_test_image(temp_dir.file("image_b.png"), 23);
@@ -263,10 +355,12 @@ static void pipeline_train_writes_synthetic_pair_cache() {
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
     PFM_REQUIRE(std::filesystem::exists(options.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000_view_b.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) /
+                                        "source_000000_image_a" / "pair_000000_view_b.png"));
 }
 
-static void pipeline_train_cache_only_writes_cache_without_checkpoint() {
+static void pipeline_train_cache_only_writes_cache_without_checkpoint()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_cache_only");
     write_test_image(temp_dir.file("image_a.png"), 11);
     write_test_image(temp_dir.file("image_b.png"), 23);
@@ -278,10 +372,12 @@ static void pipeline_train_cache_only_writes_cache_without_checkpoint() {
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
     PFM_REQUIRE(!std::filesystem::exists(options.checkpoint));
     PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "manifest.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000000_image_a" / "pair_000000_view_b.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) /
+                                        "source_000000_image_a" / "pair_000000_view_b.png"));
 }
 
-static void pipeline_train_prints_total_and_average_batch_time() {
+static void pipeline_train_prints_total_and_average_batch_time()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_timing");
     write_test_image(temp_dir.file("image_a.png"), 11);
     write_test_image(temp_dir.file("image_b.png"), 23);
@@ -296,7 +392,8 @@ static void pipeline_train_prints_total_and_average_batch_time() {
     PFM_REQUIRE(has_formatted_seconds_after_label(output, "avg_batch_time="));
 }
 
-static void pipeline_train_prints_visualization_note() {
+static void pipeline_train_prints_visualization_note()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_visualization_note");
     write_test_image(temp_dir.file("image_a.png"), 11);
     write_test_image(temp_dir.file("image_b.png"), 23);
@@ -325,7 +422,8 @@ static void pipeline_train_prints_visualization_note() {
     PFM_REQUIRE(output.find("async_workers=4") != std::string::npos);
 }
 
-static void pipeline_train_accepts_min_keypoint_intensity() {
+static void pipeline_train_accepts_min_keypoint_intensity()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_intensity_mask");
     cv::Mat mat(32, 32, CV_8UC1, cv::Scalar(0));
     mat(cv::Rect(20, 20, 8, 8)).setTo(cv::Scalar(255));
@@ -339,7 +437,8 @@ static void pipeline_train_accepts_min_keypoint_intensity() {
     PFM_REQUIRE(pfm::checkpoint_can_load(options.checkpoint));
 }
 
-static void pipeline_train_forwards_pairs_per_image_to_cache_generation() {
+static void pipeline_train_forwards_pairs_per_image_to_cache_generation()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_train_pairs_per_image");
     write_test_image(temp_dir.file("image_a.png"), 11);
     write_test_image(temp_dir.file("image_b.png"), 23);
@@ -351,11 +450,14 @@ static void pipeline_train_forwards_pairs_per_image_to_cache_generation() {
     options.resize = 32;
 
     PFM_REQUIRE(pfm::run_train_command(options) == 0);
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000001_image_b" / "pair_000003.pt"));
-    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) / "source_000001_image_b" / "pair_000003_view_b.png"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) /
+                                        "source_000001_image_b" / "pair_000003.pt"));
+    PFM_REQUIRE(std::filesystem::exists(std::filesystem::path(options.synthetic_pair_cache_dir) /
+                                        "source_000001_image_b" / "pair_000003_view_b.png"));
 }
 
-static void pipeline_extract_writes_loadable_feature_file() {
+static void pipeline_extract_writes_loadable_feature_file()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_extract");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image = temp_dir.file("extract.png");
@@ -381,7 +483,8 @@ static void pipeline_extract_writes_loadable_feature_file() {
     PFM_REQUIRE(features.descriptors.size(0) == features.keypoints.size(0));
 }
 
-static void pipeline_extract_uses_keypoint_distribution_options() {
+static void pipeline_extract_uses_keypoint_distribution_options()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_decode_distribution");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image = temp_dir.file("distributed_extract.png");
@@ -406,7 +509,8 @@ static void pipeline_extract_uses_keypoint_distribution_options() {
     PFM_REQUIRE(features.keypoints.size(0) == 1);
 }
 
-static void pipeline_extract_prints_stage_timing() {
+static void pipeline_extract_prints_stage_timing()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_extract_timing");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image = temp_dir.file("timed_extract.png");
@@ -434,7 +538,8 @@ static void pipeline_extract_prints_stage_timing() {
     PFM_REQUIRE(output.find("dense_features=") != std::string::npos);
 }
 
-static void pipeline_extract_filters_keypoints_below_min_intensity() {
+static void pipeline_extract_filters_keypoints_below_min_intensity()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_extract_intensity_mask");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image = temp_dir.file("masked_extract.png");
@@ -454,7 +559,8 @@ static void pipeline_extract_filters_keypoints_below_min_intensity() {
 
     PFM_REQUIRE(pfm::run_extract_command(options) == 0);
     const auto features = pfm::load_feature_set(options.output);
-    for (int64_t index = 0; index < features.keypoints.size(0); ++index) {
+    for (int64_t index = 0; index < features.keypoints.size(0); ++index)
+    {
         PFM_REQUIRE(features.keypoints.index({index, 0}).item<float>() >= 5.0F);
         PFM_REQUIRE(features.keypoints.index({index, 0}).item<float>() <= 6.0F);
         PFM_REQUIRE(features.keypoints.index({index, 1}).item<float>() >= 5.0F);
@@ -462,7 +568,8 @@ static void pipeline_extract_filters_keypoints_below_min_intensity() {
     }
 }
 
-static void pipeline_export_writes_loadable_checkpoint() {
+static void pipeline_export_writes_loadable_checkpoint()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_export");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto output = temp_dir.file("exported.pt");
@@ -476,7 +583,8 @@ static void pipeline_export_writes_loadable_checkpoint() {
     PFM_REQUIRE(pfm::checkpoint_can_load(options.output));
 }
 
-static void pipeline_export_rejects_config_only_checkpoint() {
+static void pipeline_export_rejects_config_only_checkpoint()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_export_config_only");
     const auto checkpoint = write_config_only_checkpoint(temp_dir);
     const auto output = temp_dir.file("exported_config_only.pt");
@@ -489,7 +597,8 @@ static void pipeline_export_rejects_config_only_checkpoint() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_match_writes_match_file() {
+static void pipeline_match_writes_match_file()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("match_a.png");
@@ -529,7 +638,8 @@ static void pipeline_match_writes_match_file() {
     PFM_REQUIRE(matches.confidence.size(0) == matches.points_a.size(0));
 }
 
-static void pipelineMatchUsesPrecomputedFeatureFilesWithCheckpointMatcher() {
+static void pipelineMatchUsesPrecomputedFeatureFilesWithCheckpointMatcher()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match_feature_files");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto feature_a = temp_dir.file("feature_a.pt");
@@ -553,7 +663,8 @@ static void pipelineMatchUsesPrecomputedFeatureFilesWithCheckpointMatcher() {
     PFM_REQUIRE(matches.confidence.size(0) == 0);
 }
 
-static void pipelineMatchSparseModeWritesSparseVisualization() {
+static void pipelineMatchSparseModeWritesSparseVisualization()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match_sparse_visualization");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("sparse_vis_a.png");
@@ -578,7 +689,8 @@ static void pipelineMatchSparseModeWritesSparseVisualization() {
     PFM_REQUIRE(std::filesystem::exists(temp_dir.path() / "vis" / "sparse_vis_a__sparse_vis_b_matches.png"));
 }
 
-static void pipelineMatchFeatureFilesScaleSparseVisualization() {
+static void pipelineMatchFeatureFilesScaleSparseVisualization()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match_feature_files_scaled_vis");
     const auto image_a = temp_dir.file("feature_vis_a.png");
     const auto image_b = temp_dir.file("feature_vis_b.png");
@@ -607,7 +719,8 @@ static void pipelineMatchFeatureFilesScaleSparseVisualization() {
     PFM_REQUIRE(!has_yellow_pixel_near(output, 5, 4));
 }
 
-static void pipelineMatchDenseModeOmitsSparseMatches() {
+static void pipelineMatchDenseModeOmitsSparseMatches()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match_dense_mode");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto feature_a = temp_dir.file("feature_a.pt");
@@ -632,7 +745,8 @@ static void pipelineMatchDenseModeOmitsSparseMatches() {
     PFM_REQUIRE(matches.confidence.size(0) == 2);
 }
 
-static void pipeline_inference_decode_heatmap_prefers_texture_saliency() {
+static void pipeline_inference_decode_heatmap_prefers_texture_saliency()
+{
     auto image = torch::zeros({1, 1, 16, 16}, torch::kFloat32);
     image.index_put_({0, 0, torch::indexing::Slice(), 8}, 1.0F);
     auto learned_heatmap = torch::ones({1, 1, 8, 8}, torch::kFloat32);
@@ -644,25 +758,24 @@ static void pipeline_inference_decode_heatmap_prefers_texture_saliency() {
     PFM_REQUIRE(heatmap.max().item<float>() > 0.95F);
 }
 
-static void pipeline_descriptor_grid_fallback_handles_low_quality_sparse_sets() {
+static void pipeline_descriptor_grid_fallback_handles_low_quality_sparse_sets()
+{
     PFM_REQUIRE(pfm::testing::descriptor_grid_fallback_min_sparse_matches_for_test() >= 16);
     PFM_REQUIRE(pfm::testing::should_use_descriptor_grid_fallback_for_test(0, 24));
     PFM_REQUIRE(pfm::testing::should_use_descriptor_grid_fallback_for_test(3, 24));
 }
 
-static void pipeline_descriptor_grid_fallback_preserves_existing_geometric_solution() {
+static void pipeline_descriptor_grid_fallback_preserves_existing_geometric_solution()
+{
     PFM_REQUIRE(!pfm::testing::should_use_descriptor_grid_fallback_for_test(8, 24));
     PFM_REQUIRE(!pfm::testing::should_use_descriptor_grid_fallback_for_test(10, 29));
 }
 
-static void pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_cell() {
-    pfm::RawFeatureMaps maps{
-        torch::ones({1, 1, 8, 8}, torch::kFloat32),
-        torch::ones({1, 4, 8, 8}, torch::kFloat32),
-        torch::ones({1, 1, 8, 8}, torch::kFloat32),
-        torch::zeros({1, 2, 8, 8}, torch::kFloat32),
-        torch::ones({1, 4, 8, 8}, torch::kFloat32),
-        torch::ones({1, 1, 8, 8}, torch::kFloat32)};
+static void pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_cell()
+{
+    pfm::RawFeatureMaps maps{torch::ones({1, 1, 8, 8}, torch::kFloat32), torch::ones({1, 4, 8, 8}, torch::kFloat32),
+                             torch::ones({1, 1, 8, 8}, torch::kFloat32), torch::zeros({1, 2, 8, 8}, torch::kFloat32),
+                             torch::ones({1, 4, 8, 8}, torch::kFloat32), torch::ones({1, 1, 8, 8}, torch::kFloat32)};
     auto mask = torch::zeros({8, 8}, torch::kUInt8);
     mask.index_put_({torch::indexing::Slice(0, 2), torch::indexing::Slice(0, 2)}, 1);
     mask.index_put_({torch::indexing::Slice(0, 2), torch::indexing::Slice(2, 4)}, 1);
@@ -678,14 +791,16 @@ static void pipeline_descriptor_grid_feature_set_uses_multiple_valid_points_per_
 
     PFM_REQUIRE(sparse.keypoints.size(0) == 2);
     PFM_REQUIRE(denser.keypoints.size(0) == 4);
-    for (int64_t row = 0; row < denser.keypoints.size(0); ++row) {
+    for (int64_t row = 0; row < denser.keypoints.size(0); ++row)
+    {
         const auto x = static_cast<int64_t>(denser.keypoints.index({row, 0}).item<float>());
         const auto y = static_cast<int64_t>(denser.keypoints.index({row, 1}).item<float>());
         PFM_REQUIRE(mask.index({y, x}).item<uint8_t>() != 0);
     }
 }
 
-static void pipeline_adaptive_high_density_requires_large_sparse_gain() {
+static void pipeline_adaptive_high_density_requires_large_sparse_gain()
+{
     PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(15, 42));
     PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(9, 39));
     PFM_REQUIRE(pfm::testing::should_use_high_density_sparse_matches_for_test(11, 54));
@@ -705,7 +820,8 @@ static void pipeline_adaptive_high_density_requires_large_sparse_gain() {
     PFM_REQUIRE(!pfm::testing::should_use_high_density_sparse_matches_for_test(124, 124));
 }
 
-static void pipeline_adaptive_high_density_preserves_decode_nms_radius() {
+static void pipeline_adaptive_high_density_preserves_decode_nms_radius()
+{
     pfm::FeatureDecodeConfig config;
     config.min_keypoints = 0;
     config.nms_radius = 2;
@@ -716,7 +832,8 @@ static void pipeline_adaptive_high_density_preserves_decode_nms_radius() {
     PFM_REQUIRE(high_density.nms_radius == 2);
 }
 
-static void pipeline_alternate_texture_blend_requires_decisive_match_gain() {
+static void pipeline_alternate_texture_blend_requires_decisive_match_gain()
+{
     PFM_REQUIRE(pfm::testing::should_use_alternate_texture_blend_matches_for_test(7, 37));
     PFM_REQUIRE(pfm::testing::should_use_alternate_texture_blend_matches_for_test(41, 108));
     PFM_REQUIRE(!pfm::testing::should_use_alternate_texture_blend_matches_for_test(60, 9));
@@ -724,7 +841,8 @@ static void pipeline_alternate_texture_blend_requires_decisive_match_gain() {
     PFM_REQUIRE(!pfm::testing::should_use_alternate_texture_blend_matches_for_test(8, 16));
 }
 
-static void pipeline_balanced_texture_blend_requires_stable_base_and_small_gain() {
+static void pipeline_balanced_texture_blend_requires_stable_base_and_small_gain()
+{
     PFM_REQUIRE(pfm::testing::should_use_balanced_texture_blend_matches_for_test(40, 44));
     PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(8, 32));
     PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(41, 108));
@@ -732,7 +850,8 @@ static void pipeline_balanced_texture_blend_requires_stable_base_and_small_gain(
     PFM_REQUIRE(!pfm::testing::should_use_balanced_texture_blend_matches_for_test(40, 36));
 }
 
-static void pipeline_default_texture_blend_uses_empirical_rotation_setting() {
+static void pipeline_default_texture_blend_uses_empirical_rotation_setting()
+{
     unsetenv("PFM_TEXTURE_BLEND_WEIGHT");
     PFM_REQUIRE(pfm::testing::rotation_invariant_texture_blend_weight_for_test() == 1.0);
 
@@ -744,7 +863,8 @@ static void pipeline_default_texture_blend_uses_empirical_rotation_setting() {
     unsetenv("PFM_TEXTURE_BLEND_WEIGHT");
 }
 
-static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base() {
+static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base()
+{
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
     PFM_REQUIRE(!pfm::testing::sparse_geometry_filter_rotation_only_requested_for_test());
     PFM_REQUIRE(!pfm::testing::should_skip_expensive_sparse_alternates_for_test(169));
@@ -757,7 +877,8 @@ static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_af
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
 }
 
-static void pipeline_eval_writes_report_archive() {
+static void pipeline_eval_writes_report_archive()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_eval");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("eval_a.png");
@@ -786,7 +907,8 @@ static void pipeline_eval_writes_report_archive() {
     PFM_REQUIRE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>() >= 0.0F);
 }
 
-static void pipeline_match_eval_and_export_print_timing() {
+static void pipeline_match_eval_and_export_print_timing()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_command_timing");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("timed_match_a.png");
@@ -843,7 +965,8 @@ static void pipeline_match_eval_and_export_print_timing() {
     PFM_REQUIRE(has_formatted_seconds_after_label(export_capture.str(), "elapsed="));
 }
 
-static void pipeline_extract_rejects_invalid_device() {
+static void pipeline_extract_rejects_invalid_device()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_extract_invalid_device");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image = temp_dir.file("extract.png");
@@ -860,7 +983,8 @@ static void pipeline_extract_rejects_invalid_device() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_match_rejects_invalid_device() {
+static void pipeline_match_rejects_invalid_device()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_match_invalid_device");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("match_a.png");
@@ -880,7 +1004,8 @@ static void pipeline_match_rejects_invalid_device() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_eval_rejects_invalid_device() {
+static void pipeline_eval_rejects_invalid_device()
+{
     TempPipelineDirectory temp_dir("pfm_pipeline_eval_invalid_device");
     const auto checkpoint = write_checkpoint(temp_dir);
     const auto image_a = temp_dir.file("eval_a.png");
@@ -904,8 +1029,10 @@ static void pipeline_eval_rejects_invalid_device() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_cuda_device_is_strictly_validated_when_unavailable() {
-    if (torch::cuda::is_available()) {
+static void pipeline_cuda_device_is_strictly_validated_when_unavailable()
+{
+    if (torch::cuda::is_available())
+    {
         return;
     }
 
@@ -925,8 +1052,10 @@ static void pipeline_cuda_device_is_strictly_validated_when_unavailable() {
     PFM_REQUIRE(!std::filesystem::exists(options.output));
 }
 
-static void pipeline_cuda_extract_writes_cpu_feature_file_when_available() {
-    if (!torch::cuda::is_available()) {
+static void pipeline_cuda_extract_writes_cpu_feature_file_when_available()
+{
+    if (!torch::cuda::is_available())
+    {
         return;
     }
 
@@ -952,8 +1081,11 @@ static void pipeline_cuda_extract_writes_cpu_feature_file_when_available() {
     PFM_REQUIRE(features.dense_confidence.device().is_cpu());
 }
 
-void register_pipeline_tests() {
+void register_pipeline_tests()
+{
     register_test("pipeline_train_writes_loadable_checkpoint", pipeline_train_writes_loadable_checkpoint);
+    register_test("pipeline_train_accepts_pair_archive_cache_without_image_dir",
+                  pipeline_train_accepts_pair_archive_cache_without_image_dir);
     register_test("pipeline_train_rejects_invalid_training_limits", pipeline_train_rejects_invalid_training_limits);
     register_test("pipeline_train_writes_synthetic_pair_cache", pipeline_train_writes_synthetic_pair_cache);
     register_test("pipeline_train_cache_only_writes_cache_without_checkpoint",

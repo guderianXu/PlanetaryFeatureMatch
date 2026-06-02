@@ -6,9 +6,11 @@
 
 #include "augment/augmentation_profile.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct ImagePairAugmentationConfig {
+struct ImagePairAugmentationConfig
+{
     float translation_x = 0.0F;
     float translation_y = 0.0F;
     float rotation_degrees = 0.0F;
@@ -24,15 +26,17 @@ struct ImagePairAugmentationConfig {
     double extreme_pair_ratio = 0.2;
 };
 
-struct ImagePairSample {
+struct ImagePairSample
+{
     torch::Tensor view_a;
     torch::Tensor view_b;
     torch::Tensor warp_a_to_b;
     torch::Tensor valid_mask;
 };
 
-class ImagePairAugmentor {
-public:
+class ImagePairAugmentor
+{
+  public:
     /// Creates an image-pair augmentor.
     /// @param config Augmentation configuration.
     explicit ImagePairAugmentor(ImagePairAugmentationConfig config);
@@ -43,8 +47,8 @@ public:
     /// @throws std::invalid_argument if the image or config is invalid.
     ImagePairSample augment(const torch::Tensor& image) const;
 
-private:
+  private:
     ImagePairAugmentationConfig _config;
 };
 
-}  // namespace pfm
+} // namespace pfm

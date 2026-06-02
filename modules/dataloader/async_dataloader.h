@@ -14,9 +14,11 @@
 #include "dataloader/tensor_batch.h"
 #include "runtime/blocking_queue.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct DataLoaderOptions {
+struct DataLoaderOptions
+{
     size_t batch_size = 1;
     size_t worker_count = 0;
     size_t prefetch_batches = 2;
@@ -24,19 +26,17 @@ struct DataLoaderOptions {
     bool pin_memory = false;
 };
 
-class AsyncDataLoader {
-public:
+class AsyncDataLoader
+{
+  public:
     /// Creates a data loader for one dataset and sampler.
     /// \param dataset Dataset used to load samples.
     /// \param sampler Sampler that provides one epoch of indices.
     /// \param collator Collator used to pad and stack samples.
     /// \param options Batch size, worker, prefetch, drop-last, and pinned-memory options.
     /// \throws std::invalid_argument if dataset or sampler is null, batch_size is zero, or async prefetch is zero.
-    AsyncDataLoader(
-        std::shared_ptr<TensorDataset> dataset,
-        std::unique_ptr<Sampler> sampler,
-        TensorBatchCollator collator,
-        DataLoaderOptions options);
+    AsyncDataLoader(std::shared_ptr<TensorDataset> dataset, std::unique_ptr<Sampler> sampler,
+                    TensorBatchCollator collator, DataLoaderOptions options);
 
     /// Stops workers and releases queued batches.
     ~AsyncDataLoader();
@@ -52,7 +52,7 @@ public:
     /// \throws std::exception rethrows dataset, collation, or pinned-memory failures.
     std::optional<TensorBatch> next();
 
-private:
+  private:
     struct QueueItem;
 
     TensorBatch makeBatch(const std::vector<size_t>& batch_indices);
@@ -78,4 +78,4 @@ private:
     bool _exhausted = false;
 };
 
-}  // namespace pfm
+} // namespace pfm

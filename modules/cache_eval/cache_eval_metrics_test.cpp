@@ -1,5 +1,3 @@
-#include "tests/test_harness.h"
-
 #include <sstream>
 #include <string>
 #include <vector>
@@ -8,10 +6,13 @@
 #include "cache_eval/cache_eval_metrics.h"
 #include "cache_eval/cache_eval_quality.h"
 #include "cache_eval/cache_eval_training.h"
+#include "tests/test_harness.h"
 
-namespace {
+namespace
+{
 
-pfm::cache_eval::PairMetrics makePairA() {
+pfm::cache_eval::PairMetrics makePairA()
+{
     pfm::cache_eval::PairMetrics pair("pair,a");
     pair.addMatches(10, 7);
     pair.setFeatureCounts(100, 80);
@@ -22,7 +23,8 @@ pfm::cache_eval::PairMetrics makePairA() {
     return pair;
 }
 
-pfm::cache_eval::PairMetrics makePairB() {
+pfm::cache_eval::PairMetrics makePairB()
+{
     pfm::cache_eval::PairMetrics pair("pair_b");
     pair.addMatches(5, 5);
     pair.setFeatureCounts(20, 10);
@@ -32,7 +34,8 @@ pfm::cache_eval::PairMetrics makePairB() {
     return pair;
 }
 
-void pairMetricsComputesRatiosAndCsvRows() {
+void pairMetricsComputesRatiosAndCsvRows()
+{
     const auto pair = makePairA();
 
     PFM_REQUIRE(pair.totalMatches() == 10);
@@ -47,13 +50,16 @@ void pairMetricsComputesRatiosAndCsvRows() {
     PFM_REQUIRE_CLOSE(pair.descriptorTop1Accuracy(), 0.5, 1.0e-12);
     PFM_REQUIRE_CLOSE(pair.meanDescriptorRank(), 2.5, 1.0e-12);
 
-    PFM_REQUIRE(
-        pfm::cache_eval::PairMetrics::csvHeader() ==
-        "pair_id,total_matches,correct_matches,precision,features_a,features_b,matched_features_a,matched_features_b,coverage_a,coverage_b,source_features,valid_warp_features,covered_features,feature_coverage,descriptor_queries,descriptor_top1,descriptor_top1_accuracy,descriptor_rank_observed,descriptor_rank_sum,mean_descriptor_rank");
+    PFM_REQUIRE(pfm::cache_eval::PairMetrics::csvHeader() ==
+                "pair_id,total_matches,correct_matches,precision,features_a,features_b,matched_features_a,matched_"
+                "features_b,coverage_a,coverage_b,source_features,valid_warp_features,covered_features,feature_"
+                "coverage,descriptor_queries,descriptor_top1,descriptor_top1_accuracy,descriptor_rank_observed,"
+                "descriptor_rank_sum,mean_descriptor_rank");
     PFM_REQUIRE(pair.csvRow().find("\"pair,a\",10,7,0.7,100,80,50,32,0.5,0.4,12,10,6,0.6,2,1,0.5,2,5,2.5") == 0);
 }
 
-void accumulatorSummarizesPairsWithWeightedCounts() {
+void accumulatorSummarizesPairsWithWeightedCounts()
+{
     pfm::cache_eval::MetricsAccumulator accumulator;
     accumulator.addPair(makePairA());
     accumulator.addPair(makePairB());
@@ -82,7 +88,8 @@ void accumulatorSummarizesPairsWithWeightedCounts() {
     PFM_REQUIRE_CLOSE(summary.meanDescriptorRank(), 2.0, 1.0e-12);
 }
 
-void accumulatorWritesCsvTableWithOptionalSummary() {
+void accumulatorWritesCsvTableWithOptionalSummary()
+{
     pfm::cache_eval::MetricsAccumulator accumulator;
     accumulator.addPair(makePairA());
     accumulator.addPair(makePairB());
@@ -95,7 +102,8 @@ void accumulatorWritesCsvTableWithOptionalSummary() {
     PFM_REQUIRE(table.find("ALL,15,12,0.8") != std::string::npos);
 }
 
-void invalidCountersAreRejected() {
+void invalidCountersAreRejected()
+{
     pfm::cache_eval::PairMetrics pair("bad_pair");
 
     PFM_REQUIRE_INVALID_ARG(pair.addMatches(-1, 0));
@@ -111,11 +119,9 @@ void invalidCountersAreRejected() {
     PFM_REQUIRE_INVALID_ARG(pair.addDescriptorQueries(1, 2, 1));
 }
 
-void hardPairMiningFiltersByMinMatchesAndMaxPrecision() {
-    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{
-        {10, 0.10, 1, 4},
-        {11, 0.80, 8, 10},
-        {12, 0.30, 3, 10}};
+void hardPairMiningFiltersByMinMatchesAndMaxPrecision()
+{
+    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{{10, 0.10, 1, 4}, {11, 0.80, 8, 10}, {12, 0.30, 3, 10}};
 
     pfm::cache_eval::HardPairMiningOptions options;
     options.limit = 4;
@@ -127,11 +133,9 @@ void hardPairMiningFiltersByMinMatchesAndMaxPrecision() {
     PFM_REQUIRE(indices == std::vector<int64_t>({12}));
 }
 
-void hardPairMiningPrioritizesLowPrecision() {
-    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{
-        {20, 0.80, 8, 10},
-        {21, 0.20, 2, 10},
-        {22, 0.50, 5, 10}};
+void hardPairMiningPrioritizesLowPrecision()
+{
+    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{{20, 0.80, 8, 10}, {21, 0.20, 2, 10}, {22, 0.50, 5, 10}};
 
     pfm::cache_eval::HardPairMiningOptions options;
     options.limit = 3;
@@ -141,11 +145,9 @@ void hardPairMiningPrioritizesLowPrecision() {
     PFM_REQUIRE(indices == std::vector<int64_t>({21, 22, 20}));
 }
 
-void hardPairMiningBreaksPrecisionTiesByMoreMatches() {
-    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{
-        {30, 0.40, 4, 10},
-        {31, 0.40, 8, 20},
-        {32, 0.40, 2, 5}};
+void hardPairMiningBreaksPrecisionTiesByMoreMatches()
+{
+    const std::vector<pfm::cache_eval::MatchSummaryRow> rows{{30, 0.40, 4, 10}, {31, 0.40, 8, 20}, {32, 0.40, 2, 5}};
 
     pfm::cache_eval::HardPairMiningOptions options;
     options.limit = 3;
@@ -155,12 +157,10 @@ void hardPairMiningBreaksPrecisionTiesByMoreMatches() {
     PFM_REQUIRE(indices == std::vector<int64_t>({31, 30, 32}));
 }
 
-void hardPairMiningDeduplicatesIndicesStably() {
+void hardPairMiningDeduplicatesIndicesStably()
+{
     const std::vector<pfm::cache_eval::MatchSummaryRow> rows{
-        {40, 0.20, 2, 10},
-        {41, 0.20, 2, 10},
-        {40, 0.20, 2, 10},
-        {42, 0.20, 2, 10}};
+        {40, 0.20, 2, 10}, {41, 0.20, 2, 10}, {40, 0.20, 2, 10}, {42, 0.20, 2, 10}};
 
     pfm::cache_eval::HardPairMiningOptions options;
     options.limit = 10;
@@ -170,12 +170,12 @@ void hardPairMiningDeduplicatesIndicesStably() {
     PFM_REQUIRE(indices == std::vector<int64_t>({40, 41, 42}));
 }
 
-void manifestParserReadsHeaderCommentsAndQuotedPaths() {
-    std::istringstream input(
-        "# cache eval input\n"
-        "pair_id,feature_a,feature_b,matches,warp_a_to_b\n"
-        "pair_000,\"features/a,0.pt\",features/b0.pt,matches/0.pt,warp/0.pt\n"
-        "pair_001,features/a1.pt,features/b1.pt,matches/1.pt,warp/1.pt\n");
+void manifestParserReadsHeaderCommentsAndQuotedPaths()
+{
+    std::istringstream input("# cache eval input\n"
+                             "pair_id,feature_a,feature_b,matches,warp_a_to_b\n"
+                             "pair_000,\"features/a,0.pt\",features/b0.pt,matches/0.pt,warp/0.pt\n"
+                             "pair_001,features/a1.pt,features/b1.pt,matches/1.pt,warp/1.pt\n");
 
     const auto pairs = pfm::cache_eval::parsePairManifest(input);
 
@@ -188,7 +188,8 @@ void manifestParserReadsHeaderCommentsAndQuotedPaths() {
     PFM_REQUIRE(pairs[1].pair_id == "pair_001");
 }
 
-void manifestWriterEscapesAndRoundTripsRows() {
+void manifestWriterEscapesAndRoundTripsRows()
+{
     const std::vector<pfm::cache_eval::PairManifestEntry> entries{
         {"pair,0", "features/a\"0.pt", "features/b0.pt", "matches/0.pt", "warp/0.pt"},
         {"pair_1", "features/a1.pt", "features/b1.pt", "matches/1.pt", "warp/1.pt"}};
@@ -205,13 +206,15 @@ void manifestWriterEscapesAndRoundTripsRows() {
     PFM_REQUIRE(parsed[1].warp_a_to_b == "warp/1.pt");
 }
 
-void manifestParserRejectsMissingFields() {
+void manifestParserRejectsMissingFields()
+{
     std::istringstream input("pair_000,a.pt,b.pt,matches.pt\n");
 
     PFM_REQUIRE_INVALID_ARG(pfm::cache_eval::parsePairManifest(input));
 }
 
-void qualityGateReportsFailingFields() {
+void qualityGateReportsFailingFields()
+{
     pfm::cache_eval::PairMetrics pair("bad_pair");
     pair.addMatches(20, 9);
     pair.setFeatureCounts(40, 30);
@@ -239,7 +242,8 @@ void qualityGateReportsFailingFields() {
     PFM_REQUIRE(decision.hard_score > 0.0);
 }
 
-void qualityGateAcceptsGoodPairsAndSelectsWorstHardPairs() {
+void qualityGateAcceptsGoodPairsAndSelectsWorstHardPairs()
+{
     auto good = makePairA();
     good.addMatches(40, 33);
     good.setFeatureCoverage(60, 50, 45);
@@ -275,7 +279,8 @@ void qualityGateAcceptsGoodPairsAndSelectsWorstHardPairs() {
     PFM_REQUIRE(hard_pairs[0].hard_score >= hard_pairs[1].hard_score);
 }
 
-void qualityDecisionCsvReportsEveryPair() {
+void qualityDecisionCsvReportsEveryPair()
+{
     auto good = makePairA();
     good.addMatches(40, 35);
     good.setFeatureCoverage(40, 30, 28);
@@ -304,7 +309,8 @@ void qualityDecisionCsvReportsEveryPair() {
                 std::string::npos);
 }
 
-void trainingIndexExportParsesStableUniquePairIndices() {
+void trainingIndexExportParsesStableUniquePairIndices()
+{
     const std::vector<pfm::cache_eval::PairManifestEntry> entries{
         {"pair_000077", "a.pt", "b.pt", "m.pt", "cache/source/pair_000077.pt"},
         {"custom_id", "a.pt", "b.pt", "m.pt", "/tmp/cache/source/pair_000003.pt"},
@@ -317,18 +323,22 @@ void trainingIndexExportParsesStableUniquePairIndices() {
     PFM_REQUIRE(csv == "hard_cache_index\n77\n3\n");
 }
 
-void trainingIndexExportRejectsUnparseablePairIndex() {
+void trainingIndexExportRejectsUnparseablePairIndex()
+{
     const pfm::cache_eval::PairManifestEntry entry{"bad", "a.pt", "b.pt", "m.pt", "cache/source/not_pair.pt"};
 
     PFM_REQUIRE_INVALID_ARG(pfm::cache_eval::extractSyntheticPairCacheIndex(entry));
 }
 
-}  // namespace
+} // namespace
 
-void register_cache_eval_tests() {
+void register_cache_eval_tests()
+{
     register_test("cache eval pair metrics computes ratios and csv rows", pairMetricsComputesRatiosAndCsvRows);
-    register_test("cache eval accumulator summarizes pairs with weighted counts", accumulatorSummarizesPairsWithWeightedCounts);
-    register_test("cache eval accumulator writes csv table with optional summary", accumulatorWritesCsvTableWithOptionalSummary);
+    register_test("cache eval accumulator summarizes pairs with weighted counts",
+                  accumulatorSummarizesPairsWithWeightedCounts);
+    register_test("cache eval accumulator writes csv table with optional summary",
+                  accumulatorWritesCsvTableWithOptionalSummary);
     register_test("cache eval invalid counters are rejected", invalidCountersAreRejected);
     register_test("cache eval hard pair mining filters by min matches and max precision",
                   hardPairMiningFiltersByMinMatchesAndMaxPrecision);

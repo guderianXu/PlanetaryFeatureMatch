@@ -3,21 +3,25 @@
 #include <cstddef>
 #include <vector>
 
-namespace pfm::match_quality {
+namespace pfm::match_quality
+{
 
-struct MatchPoint {
+struct MatchPoint
+{
     double ax = 0.0;
     double ay = 0.0;
     double bx = 0.0;
     double by = 0.0;
 };
 
-struct ImageExtent {
+struct ImageExtent
+{
     double width = 0.0;
     double height = 0.0;
 };
 
-struct SpatialQualityOptions {
+struct SpatialQualityOptions
+{
     std::size_t low_count_threshold = 35;
     std::size_t grid_rows = 4;
     std::size_t grid_cols = 4;
@@ -28,7 +32,8 @@ struct SpatialQualityOptions {
     double displacement_bin_fraction = 0.03;
 };
 
-struct SpatialMatchQuality {
+struct SpatialMatchQuality
+{
     std::size_t match_count = 0;
     double normalized_spatial_coverage_a = 0.0;
     double normalized_spatial_coverage_b = 0.0;
@@ -40,11 +45,7 @@ struct SpatialMatchQuality {
     bool low_count_narrow_cluster = false;
 };
 
-SpatialMatchQuality evaluateSpatialMatchQuality(
-    const std::vector<MatchPoint>& matches,
-    ImageExtent image_a,
-    ImageExtent image_b,
-    const SpatialQualityOptions& options = {}
-);
+SpatialMatchQuality evaluateSpatialMatchQuality(const std::vector<MatchPoint>& matches, ImageExtent image_a,
+                                                ImageExtent image_b, const SpatialQualityOptions& options = {});
 
-}  // namespace pfm::match_quality
+} // namespace pfm::match_quality

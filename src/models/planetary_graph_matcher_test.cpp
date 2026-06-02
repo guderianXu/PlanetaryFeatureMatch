@@ -3,7 +3,8 @@
 #include "models/planetary_graph_matcher.h"
 #include "tests/test_harness.h"
 
-static void planetary_graph_matcher_outputs_match_logits_with_dustbin() {
+static void planetary_graph_matcher_outputs_match_logits_with_dustbin()
+{
     pfm::PlanetaryGraphMatcher matcher(4, 8);
     auto descriptors_a = torch::randn({3, 4});
     auto descriptors_b = torch::randn({5, 4});
@@ -19,7 +20,8 @@ static void planetary_graph_matcher_outputs_match_logits_with_dustbin() {
     PFM_REQUIRE(output.scores.size(0) == output.matches.size(0));
 }
 
-static void planetary_graph_matcher_rejects_descriptor_dimension_mismatch() {
+static void planetary_graph_matcher_rejects_descriptor_dimension_mismatch()
+{
     pfm::PlanetaryGraphMatcher matcher(4, 8);
     auto descriptors_a = torch::randn({3, 4});
     auto descriptors_b = torch::randn({5, 6});
@@ -29,7 +31,8 @@ static void planetary_graph_matcher_rejects_descriptor_dimension_mismatch() {
     PFM_REQUIRE_INVALID_ARG(matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b));
 }
 
-static void planetary_graph_matcher_uses_attention_layers() {
+static void planetary_graph_matcher_uses_attention_layers()
+{
     pfm::PlanetaryGraphMatcher matcher(4, 8, 2);
     auto descriptors_a = torch::randn({3, 4});
     auto descriptors_b = torch::randn({5, 4});
@@ -42,15 +45,19 @@ static void planetary_graph_matcher_uses_attention_layers() {
     PFM_REQUIRE(matcher->attentionLayerCount() == 2);
 }
 
-static void planetary_graph_matcher_attention_layer_uses_norm_and_ffn() {
+static void planetary_graph_matcher_attention_layer_uses_norm_and_ffn()
+{
     pfm::PlanetaryGraphMatcher matcher(4, 8, 1);
     bool found_norm = false;
     bool found_feed_forward = false;
-    for (const auto& parameter : matcher->named_parameters()) {
-        if (parameter.key().find("self_norm") != std::string::npos) {
+    for (const auto& parameter : matcher->named_parameters())
+    {
+        if (parameter.key().find("self_norm") != std::string::npos)
+        {
             found_norm = true;
         }
-        if (parameter.key().find("feed_forward") != std::string::npos) {
+        if (parameter.key().find("feed_forward") != std::string::npos)
+        {
             found_feed_forward = true;
         }
     }
@@ -59,7 +66,8 @@ static void planetary_graph_matcher_attention_layer_uses_norm_and_ffn() {
     PFM_REQUIRE(found_feed_forward);
 }
 
-static void graph_matcher_keypoints_affect_logits() {
+static void graph_matcher_keypoints_affect_logits()
+{
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
@@ -74,7 +82,8 @@ static void graph_matcher_keypoints_affect_logits() {
     PFM_REQUIRE(!torch::allclose(original, shifted));
 }
 
-static void graph_matcher_keypoint_logits_are_half_turn_invariant() {
+static void graph_matcher_keypoint_logits_are_half_turn_invariant()
+{
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
@@ -90,7 +99,8 @@ static void graph_matcher_keypoint_logits_are_half_turn_invariant() {
     PFM_REQUIRE(torch::allclose(original, rotated, 1.0e-4, 1.0e-4));
 }
 
-static void graph_matcher_keypoint_logits_are_scale_invariant() {
+static void graph_matcher_keypoint_logits_are_scale_invariant()
+{
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
@@ -104,14 +114,16 @@ static void graph_matcher_keypoint_logits_are_scale_invariant() {
     PFM_REQUIRE(torch::allclose(original, scaled, 1.0e-4, 1.0e-4));
 }
 
-static void graph_matcher_filters_dustbin_sparse_matches() {
+static void graph_matcher_filters_dustbin_sparse_matches()
+{
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
     auto descriptors_b = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
     auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
     auto keypoints_b = torch::tensor({{8.0F, 8.0F}, {24.0F, 24.0F}}, torch::kFloat32);
-    for (auto& parameter : matcher->parameters()) {
+    for (auto& parameter : matcher->parameters())
+    {
         parameter.detach().zero_();
     }
     matcher->named_parameters()["dustbin_bias"].detach().fill_(10.0F);
@@ -122,14 +134,16 @@ static void graph_matcher_filters_dustbin_sparse_matches() {
     PFM_REQUIRE(output.scores.sizes() == std::vector<int64_t>({0}));
 }
 
-static void graph_matcher_keeps_only_mutual_sparse_matches() {
+static void graph_matcher_keeps_only_mutual_sparse_matches()
+{
     pfm::PlanetaryGraphMatcher matcher(2, 8, 1);
     matcher->eval();
     auto descriptors_a = torch::tensor({{1.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
     auto descriptors_b = torch::tensor({{1.0F, 0.0F}}, torch::kFloat32);
     auto keypoints_a = torch::tensor({{8.0F, 8.0F}, {8.0F, 8.0F}}, torch::kFloat32);
     auto keypoints_b = torch::tensor({{8.0F, 8.0F}}, torch::kFloat32);
-    for (auto& parameter : matcher->parameters()) {
+    for (auto& parameter : matcher->parameters())
+    {
         parameter.detach().fill_(0.1F);
     }
     matcher->named_parameters()["dustbin_bias"].detach().fill_(-10.0F);
@@ -140,7 +154,8 @@ static void graph_matcher_keeps_only_mutual_sparse_matches() {
     PFM_REQUIRE(output.matches.index({0, 1}).item<int64_t>() == 0);
 }
 
-void register_planetary_graph_matcher_tests() {
+void register_planetary_graph_matcher_tests()
+{
     register_test("planetary_graph_matcher_outputs_match_logits_with_dustbin",
                   planetary_graph_matcher_outputs_match_logits_with_dustbin);
     register_test("planetary_graph_matcher_rejects_descriptor_dimension_mismatch",
@@ -148,11 +163,11 @@ void register_planetary_graph_matcher_tests() {
     register_test("graph matcher keypoints affect logits", graph_matcher_keypoints_affect_logits);
     register_test("graph matcher keypoint logits are half turn invariant",
                   graph_matcher_keypoint_logits_are_half_turn_invariant);
-    register_test("graph matcher keypoint logits are scale invariant", graph_matcher_keypoint_logits_are_scale_invariant);
+    register_test("graph matcher keypoint logits are scale invariant",
+                  graph_matcher_keypoint_logits_are_scale_invariant);
     register_test("graph matcher filters dustbin sparse matches", graph_matcher_filters_dustbin_sparse_matches);
     register_test("graph matcher keeps only mutual sparse matches", graph_matcher_keeps_only_mutual_sparse_matches);
-    register_test("planetary_graph_matcher_uses_attention_layers",
-                  planetary_graph_matcher_uses_attention_layers);
+    register_test("planetary_graph_matcher_uses_attention_layers", planetary_graph_matcher_uses_attention_layers);
     register_test("planetary_graph_matcher_attention_layer_uses_norm_and_ffn",
                   planetary_graph_matcher_attention_layer_uses_norm_and_ffn);
 }

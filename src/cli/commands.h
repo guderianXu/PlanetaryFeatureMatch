@@ -1,16 +1,18 @@
 #pragma once
 
-#include <memory>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "CLI11.hpp"
 
-namespace pfm {
+namespace pfm
+{
 
 /// Supported command line subcommands.
-enum class Command {
+enum class Command
+{
     None,
     Train,
     Extract,
@@ -20,7 +22,8 @@ enum class Command {
 };
 
 /// Parsed command line options for pfm commands.
-struct CliOptions {
+struct CliOptions
+{
     Command command = Command::None;
     std::string image_dir;
     std::string image;
@@ -59,6 +62,9 @@ struct CliOptions {
     int descriptor_dim = 128;
     int graph_hidden_dim = 256;
     int graph_attention_layers = 6;
+    int graph_keypoint_meta_dim = 16;
+    bool full_v21 = false;
+    std::string training_profile = "full";
     int pairs_per_image = 1;
     int max_train_batches = 0;
     double learning_rate = 3.0e-4;
@@ -75,6 +81,8 @@ struct CliOptions {
     std::string synthetic_pair_cache_dir;
     std::vector<std::string> extra_synthetic_pair_cache_dirs;
     std::vector<std::string> hard_synthetic_pair_cache_dirs;
+    std::vector<std::string> pair_cache_dirs;
+    int64_t pair_cache_limit = 0;
     int hard_synthetic_pair_cache_repeats = 3;
     std::vector<int64_t> hard_synthetic_pair_cache_indices;
     bool cache_only = false;
@@ -105,4 +113,4 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options);
 /// @return Zero on success, nonzero on parse or runtime errors.
 int run_cli(int argc, char** argv);
 
-}  // namespace pfm
+} // namespace pfm

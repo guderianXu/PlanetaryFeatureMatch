@@ -3,10 +3,13 @@
 #include <cmath>
 #include <stdexcept>
 
-namespace pfm {
-namespace {
+namespace pfm
+{
+namespace
+{
 
-struct ProfileStrength {
+struct ProfileStrength
+{
     float translation = 0.0F;
     float rotation = 0.0F;
     float scale = 0.0F;
@@ -17,83 +20,100 @@ struct ProfileStrength {
     float perspective = 0.0F;
 };
 
-float deterministicWave(int64_t source_index, int64_t variant_index, float frequency, float phase) {
+float deterministicWave(int64_t source_index, int64_t variant_index, float frequency, float phase)
+{
     return std::sin(static_cast<float>(source_index + 1) * phase + static_cast<float>(variant_index + 1) * frequency);
 }
 
-AugmentationProfile mixedProfileForVariant(const ImagePairAugmentationConfig& config) {
-    if (config.extreme_pair_ratio > 0.0 && config.variant_index % 4 == 1) {
+AugmentationProfile mixedProfileForVariant(const ImagePairAugmentationConfig& config)
+{
+    if (config.extreme_pair_ratio > 0.0 && config.variant_index % 4 == 1)
+    {
         return AugmentationProfile::Extreme;
     }
-    switch (config.variant_index % 3) {
-        case 0:
-            return AugmentationProfile::Mild;
-        case 1:
-            return AugmentationProfile::Hard;
-        default:
-            return AugmentationProfile::Medium;
+    switch (config.variant_index % 3)
+    {
+    case 0:
+        return AugmentationProfile::Mild;
+    case 1:
+        return AugmentationProfile::Hard;
+    default:
+        return AugmentationProfile::Medium;
     }
 }
 
-ProfileStrength profileStrength(AugmentationProfile profile) {
-    switch (profile) {
-        case AugmentationProfile::Mild:
-            return ProfileStrength{3.0F, 6.0F, 0.04F, 0.03F, 0.05F, 0.004F, 0.0F, 0.0F};
-        case AugmentationProfile::Medium:
-            return ProfileStrength{7.0F, 16.0F, 0.10F, 0.07F, 0.12F, 0.010F, 0.0F, 0.0F};
-        case AugmentationProfile::Hard:
-            return ProfileStrength{12.0F, 32.0F, 0.18F, 0.12F, 0.22F, 0.018F, 0.0F, 0.0F};
-        case AugmentationProfile::Extreme:
-            return ProfileStrength{18.0F, 55.0F, 0.30F, 0.18F, 0.35F, 0.030F, 0.0F, 0.0F};
-        case AugmentationProfile::Viewpoint:
-            return ProfileStrength{24.0F, 45.0F, 0.30F, 0.12F, 0.22F, 0.018F, 0.32F, 0.00120F};
-        case AugmentationProfile::CompoundViewpoint:
-            return ProfileStrength{28.0F, 180.0F, 0.36F, 0.12F, 0.22F, 0.018F, 0.34F, 0.00135F};
-        case AugmentationProfile::Mixed:
-            return profileStrength(AugmentationProfile::Medium);
-        case AugmentationProfile::RotationOnly:
-            return ProfileStrength{};
+ProfileStrength profileStrength(AugmentationProfile profile)
+{
+    switch (profile)
+    {
+    case AugmentationProfile::Mild:
+        return ProfileStrength{3.0F, 6.0F, 0.04F, 0.03F, 0.05F, 0.004F, 0.0F, 0.0F};
+    case AugmentationProfile::Medium:
+        return ProfileStrength{7.0F, 16.0F, 0.10F, 0.07F, 0.12F, 0.010F, 0.0F, 0.0F};
+    case AugmentationProfile::Hard:
+        return ProfileStrength{12.0F, 32.0F, 0.18F, 0.12F, 0.22F, 0.018F, 0.0F, 0.0F};
+    case AugmentationProfile::Extreme:
+        return ProfileStrength{18.0F, 55.0F, 0.30F, 0.18F, 0.35F, 0.030F, 0.0F, 0.0F};
+    case AugmentationProfile::Viewpoint:
+        return ProfileStrength{24.0F, 45.0F, 0.30F, 0.12F, 0.22F, 0.018F, 0.32F, 0.00120F};
+    case AugmentationProfile::CompoundViewpoint:
+        return ProfileStrength{28.0F, 180.0F, 0.36F, 0.12F, 0.22F, 0.018F, 0.34F, 0.00135F};
+    case AugmentationProfile::Mixed:
+        return profileStrength(AugmentationProfile::Medium);
+    case AugmentationProfile::RotationOnly:
+        return ProfileStrength{};
     }
     return profileStrength(AugmentationProfile::Medium);
 }
 
-bool usesProfileAugmentation(const ImagePairAugmentationConfig& config) {
+bool usesProfileAugmentation(const ImagePairAugmentationConfig& config)
+{
     return config.source_index != 0 || config.variant_index != 0 || config.profile != AugmentationProfile::Mixed;
 }
 
-AugmentationProfile resolvedProfile(const ImagePairAugmentationConfig& config) {
+AugmentationProfile resolvedProfile(const ImagePairAugmentationConfig& config)
+{
     return config.profile == AugmentationProfile::Mixed ? mixedProfileForVariant(config) : config.profile;
 }
 
-void validateConfig(const ImagePairAugmentationConfig& config) {
+void validateConfig(const ImagePairAugmentationConfig& config)
+{
     constexpr float integer_tolerance = 1.0e-6F;
 
-    if (std::abs(config.translation_x - std::round(config.translation_x)) > integer_tolerance) {
+    if (std::abs(config.translation_x - std::round(config.translation_x)) > integer_tolerance)
+    {
         throw std::invalid_argument("translation_x must be an integer translation");
     }
-    if (std::abs(config.translation_y - std::round(config.translation_y)) > integer_tolerance) {
+    if (std::abs(config.translation_y - std::round(config.translation_y)) > integer_tolerance)
+    {
         throw std::invalid_argument("translation_y must be an integer translation");
     }
-    if (config.scale <= 0.0F) {
+    if (config.scale <= 0.0F)
+    {
         throw std::invalid_argument("scale must be positive");
     }
-    if (config.contrast_scale <= 0.0F) {
+    if (config.contrast_scale <= 0.0F)
+    {
         throw std::invalid_argument("contrast_scale must be positive");
     }
-    if (config.noise_sigma < 0.0F) {
+    if (config.noise_sigma < 0.0F)
+    {
         throw std::invalid_argument("noise_sigma must be non-negative");
     }
-    if (config.extreme_pair_ratio < 0.0 || config.extreme_pair_ratio > 1.0) {
+    if (config.extreme_pair_ratio < 0.0 || config.extreme_pair_ratio > 1.0)
+    {
         throw std::invalid_argument("extreme_pair_ratio must be between 0 and 1");
     }
-    if (config.rotation_step_degrees <= 0.0F || !std::isfinite(config.rotation_step_degrees)) {
+    if (config.rotation_step_degrees <= 0.0F || !std::isfinite(config.rotation_step_degrees))
+    {
         throw std::invalid_argument("rotation_step_degrees must be positive and finite");
     }
 }
 
-}  // namespace
+} // namespace
 
-ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentationConfig& config) {
+ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentationConfig& config)
+{
     validateConfig(config);
 
     ImagePairTransformParameters params;
@@ -105,7 +125,8 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     params.contrast_scale = config.contrast_scale;
     params.noise_sigma = config.noise_sigma;
 
-    if (config.profile == AugmentationProfile::RotationOnly) {
+    if (config.profile == AugmentationProfile::RotationOnly)
+    {
         params.translation_x = 0.0F;
         params.translation_y = 0.0F;
         params.rotation_degrees = static_cast<float>(config.variant_index) * config.rotation_step_degrees;
@@ -118,7 +139,8 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
         return params;
     }
 
-    if (!usesProfileAugmentation(config)) {
+    if (!usesProfileAugmentation(config))
+    {
         return params;
     }
 
@@ -128,24 +150,28 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     const auto index = config.variant_index;
     const bool mixed_quarter_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 3;
     const bool mixed_half_turn = config.profile == AugmentationProfile::Mixed && config.variant_index % 8 == 7;
-    const bool mixed_full_rotation_anchor = config.profile == AugmentationProfile::Mixed && config.variant_index % 2 == 0;
+    const bool mixed_full_rotation_anchor =
+        config.profile == AugmentationProfile::Mixed && config.variant_index % 2 == 0;
     const bool viewpoint_profile =
         profile == AugmentationProfile::Viewpoint || profile == AugmentationProfile::CompoundViewpoint;
     const bool compound_viewpoint_profile = profile == AugmentationProfile::CompoundViewpoint;
 
-    if (mixed_quarter_turn) {
+    if (mixed_quarter_turn)
+    {
         params.rotation_degrees += deterministicWave(source, index, 0.23F, 0.61F) >= 0.0F ? 90.0F : -90.0F;
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
         return params;
     }
-    if (mixed_half_turn) {
+    if (mixed_half_turn)
+    {
         params.rotation_degrees += deterministicWave(source, index, 0.19F, 0.43F) >= 0.0F ? 180.0F : -180.0F;
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
         return params;
     }
-    if (mixed_full_rotation_anchor) {
+    if (mixed_full_rotation_anchor)
+    {
         params.rotation_degrees += static_cast<float>((config.variant_index % 24) * 15);
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
@@ -154,10 +180,13 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
 
     params.translation_x += std::round(deterministicWave(source, index, 1.37F, 0.71F) * strength.translation);
     params.translation_y += std::round(deterministicWave(source, index, 1.91F, 1.13F) * strength.translation);
-    if (compound_viewpoint_profile) {
+    if (compound_viewpoint_profile)
+    {
         params.rotation_degrees += static_cast<float>((config.variant_index % 24) * 15) +
                                    deterministicWave(source, index, 0.73F, 1.53F) * 18.0F;
-    } else {
+    }
+    else
+    {
         params.rotation_degrees += deterministicWave(source, index, 0.73F, 1.53F) * strength.rotation;
     }
     params.scale *= 1.0F + deterministicWave(source, index, 0.41F, 0.37F) * strength.scale;
@@ -166,7 +195,8 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     params.noise_sigma += std::abs(deterministicWave(source, index, 1.63F, 0.59F)) * strength.noise;
     params.gamma = 1.0F + deterministicWave(source, index, 0.67F, 1.79F) * 0.35F;
     params.shadow_strength = profile == AugmentationProfile::Extreme ? 0.30F : 0.12F;
-    if (viewpoint_profile) {
+    if (viewpoint_profile)
+    {
         params.shear_x = deterministicWave(source, index, 0.89F, 0.47F) * strength.shear;
         params.shear_y = deterministicWave(source, index, 1.07F, 0.73F) * strength.shear * 0.55F;
         params.perspective_x = deterministicWave(source, index, 0.53F, 1.17F) * strength.perspective;
@@ -176,4 +206,4 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     return params;
 }
 
-}  // namespace pfm
+} // namespace pfm

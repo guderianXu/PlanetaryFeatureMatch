@@ -1,8 +1,10 @@
 #pragma once
 
-namespace pfm {
+namespace pfm
+{
 
-enum class AugmentationProfile {
+enum class AugmentationProfile
+{
     Mixed,
     RotationOnly,
     Mild,
@@ -13,4 +15,4 @@ enum class AugmentationProfile {
     CompoundViewpoint,
 };
 
-}  // namespace pfm
+} // namespace pfm

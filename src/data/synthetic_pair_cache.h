@@ -4,13 +4,15 @@
 #include <cstdint>
 #include <string>
 
-#include "dataloader/dataset.h"
 #include "data/image_dataset.h"
 #include "data/synthetic_pair.h"
+#include "dataloader/dataset.h"
 
-namespace pfm {
+namespace pfm
+{
 
-struct SyntheticPairCacheConfig {
+struct SyntheticPairCacheConfig
+{
     std::string cache_dir;
     int64_t resize = 512;
     std::size_t pair_count = 0;
@@ -26,8 +28,9 @@ struct SyntheticPairCacheConfig {
 /// @throws std::invalid_argument if the cache configuration or source image data is invalid.
 void prepare_synthetic_pair_cache(const ImageDataset& dataset, const SyntheticPairCacheConfig& config);
 
-class SyntheticPairCacheDataset {
-public:
+class SyntheticPairCacheDataset
+{
+  public:
     /// Opens an existing synthetic pair cache directory.
     /// @param cache_dir Directory containing manifest.pt and pair_*.pt files.
     /// @throws std::invalid_argument if the cache manifest cannot be loaded.
@@ -44,15 +47,16 @@ public:
     /// @throws std::invalid_argument if the cached pair file is missing or invalid.
     SyntheticPair load(std::size_t index) const;
 
-private:
+  private:
     std::string _cache_dir;
     std::size_t _pair_count = 0;
     std::size_t _pairs_per_image = 1;
     std::size_t _source_count = 1;
 };
 
-class SyntheticPairCacheTensorDataset : public TensorDataset {
-public:
+class SyntheticPairCacheTensorDataset : public TensorDataset
+{
+  public:
     /// Wraps an existing synthetic pair cache as TensorBatch samples.
     /// @param cache_dir Directory containing a prepared synthetic pair cache.
     explicit SyntheticPairCacheTensorDataset(std::string cache_dir);
@@ -66,8 +70,8 @@ public:
     /// @return Tensor batch with view_a, view_b, warp_a_to_b, and valid_mask.
     TensorBatch get(size_t index) override;
 
-private:
+  private:
     SyntheticPairCacheDataset _cache;
 };
 
-}  // namespace pfm
+} // namespace pfm

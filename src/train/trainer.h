@@ -1,23 +1,27 @@
 #pragma once
 
-#include <limits>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
-namespace pfm {
+namespace pfm
+{
 
-struct TrainConfig {
+struct TrainConfig
+{
     std::string image_dir;
     std::string checkpoint;
     std::string init_checkpoint;
-    std::string device = "cpu";
+    std::string device = "gpu";
     int epochs = 1;
     int batch_size = 1;
     int base_channels = 32;
     int descriptor_dim = 128;
     int graph_hidden_dim = 256;
     int graph_attention_layers = 6;
+    int graph_keypoint_meta_dim = 16;
+    std::string training_profile = "full";
     int resize = 512;
     int pairs_per_image = 1;
     int max_train_batches = 0;
@@ -28,6 +32,8 @@ struct TrainConfig {
     std::string synthetic_pair_cache_dir;
     std::vector<std::string> extra_synthetic_pair_cache_dirs;
     std::vector<std::string> hard_synthetic_pair_cache_dirs;
+    std::vector<std::string> pair_cache_dirs;
+    int64_t pair_cache_limit = 0;
     int hard_synthetic_pair_cache_repeats = 3;
     std::vector<int64_t> hard_synthetic_pair_cache_indices;
     bool cache_only = false;
@@ -60,7 +66,8 @@ struct TrainConfig {
     bool descriptor_orientation_canonicalization = true;
 };
 
-struct TrainResult {
+struct TrainResult
+{
     int epochs_completed = 0;
     double initial_loss = 0.0;
     double final_loss = 0.0;
@@ -69,15 +76,15 @@ struct TrainResult {
     double avg_batch_time_seconds = 0.0;
 };
 
-/// Trains the real-image MVP model for the configured number of epochs and saves a checkpoint.
-/// @param config Training image directory, checkpoint path, compute device, data limits, cache settings, and optimizer settings.
-/// @return Completed epoch count with first and final observed training losses.
-/// @throws std::invalid_argument if paths, numeric settings, or the requested device are invalid.
+/// 按配置训练真实影像 MVP 模型，并保存 checkpoint。
+/// @param config 训练图像目录、checkpoint 路径、计算设备、数据限制、缓存设置和优化器设置。
+/// @return 已完成 epoch 数，以及首次和最终观测到的训练 loss。
+/// @throws std::invalid_argument 当路径、数值参数或请求的设备非法时抛出。
 TrainResult train_model(const TrainConfig& config);
 
-/// Checks whether a training checkpoint can be loaded as a LibTorch archive.
-/// @param checkpoint Path to a checkpoint file written by train_model.
-/// @return True when the archive loads and contains required config tensors; false otherwise.
+/// 检查训练 checkpoint 能否作为 LibTorch archive 加载。
+/// @param checkpoint 由 train_model 写出的 checkpoint 文件路径。
+/// @return archive 可加载且包含必需配置张量时返回 true，否则返回 false。
 bool checkpoint_can_load(const std::string& checkpoint);
 
-}  // namespace pfm
+} // namespace pfm

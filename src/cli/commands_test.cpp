@@ -1,32 +1,28 @@
-#include "tests/test_harness.h"
-
 #include <string>
 #include <vector>
 
 #include "CLI11.hpp"
-
 #include "cli/commands.h"
+#include "tests/test_harness.h"
 
-static void parse_missing_subcommand_throws() {
+static void parse_missing_subcommand_throws()
+{
     const std::vector<std::string> args = {"pfm"};
 
     PFM_REQUIRE_THROWS_AS(pfm::parse_cli(args), CLI::ParseError);
 }
 
-static void parse_extract_missing_required_option_throws() {
+static void parse_extract_missing_required_option_throws()
+{
     const std::vector<std::string> args = {
-        "pfm",
-        "extract",
-        "--image",
-        "a.png",
-        "--checkpoint",
-        "model.pt",
+        "pfm", "extract", "--image", "a.png", "--checkpoint", "model.pt",
     };
 
     PFM_REQUIRE_THROWS_AS(pfm::parse_cli(args), CLI::ParseError);
 }
 
-static void parse_extract_command() {
+static void parse_extract_command()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "extract",
@@ -50,29 +46,29 @@ static void parse_extract_command() {
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
 }
 
-static void parse_extract_keypoint_distribution_options() {
-    const auto options = pfm::parse_cli({
-        "pfm",
-        "extract",
-        "--image",
-        "a.png",
-        "--checkpoint",
-        "model.pt",
-        "--output",
-        "features.pt",
-        "--keypoint-grid-rows",
-        "4",
-        "--keypoint-grid-cols",
-        "6",
-        "--keypoints-per-cell",
-        "3",
-        "--min-keypoints",
-        "32",
-        "--nms-radius",
-        "2",
-        "--descriptor-pool-radius",
-        "2",
-        "--disable-descriptor-orientation-canonicalization"});
+static void parse_extract_keypoint_distribution_options()
+{
+    const auto options = pfm::parse_cli({"pfm",
+                                         "extract",
+                                         "--image",
+                                         "a.png",
+                                         "--checkpoint",
+                                         "model.pt",
+                                         "--output",
+                                         "features.pt",
+                                         "--keypoint-grid-rows",
+                                         "4",
+                                         "--keypoint-grid-cols",
+                                         "6",
+                                         "--keypoints-per-cell",
+                                         "3",
+                                         "--min-keypoints",
+                                         "32",
+                                         "--nms-radius",
+                                         "2",
+                                         "--descriptor-pool-radius",
+                                         "2",
+                                         "--disable-descriptor-orientation-canonicalization"});
 
     PFM_REQUIRE(options.keypoint_grid_rows == 4);
     PFM_REQUIRE(options.keypoint_grid_cols == 6);
@@ -83,51 +79,21 @@ static void parse_extract_keypoint_distribution_options() {
     PFM_REQUIRE(options.disable_descriptor_orientation_canonicalization);
 }
 
-static void parse_invalid_keypoint_distribution_options_throw() {
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({
-            "pfm",
-            "extract",
-            "--image",
-            "a.png",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "features.pt",
-            "--keypoint-grid-rows",
-            "0"}),
-        CLI::ParseError);
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({
-            "pfm",
-            "match",
-            "--image-a",
-            "a.png",
-            "--image-b",
-            "b.png",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "matches.pt",
-            "--nms-radius",
-            "-1"}),
-        CLI::ParseError);
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({
-            "pfm",
-            "eval",
-            "--pairs",
-            "pairs.txt",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "report.pt",
-            "--descriptor-pool-radius",
-            "-1"}),
-        CLI::ParseError);
+static void parse_invalid_keypoint_distribution_options_throw()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "extract", "--image", "a.png", "--checkpoint", "model.pt", "--output",
+                                          "features.pt", "--keypoint-grid-rows", "0"}),
+                          CLI::ParseError);
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                          "model.pt", "--output", "matches.pt", "--nms-radius", "-1"}),
+                          CLI::ParseError);
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "eval", "--pairs", "pairs.txt", "--checkpoint", "model.pt", "--output",
+                                          "report.pt", "--descriptor-pool-radius", "-1"}),
+                          CLI::ParseError);
 }
 
-static void parse_train_defaults_to_bounded_resize() {
+static void parse_train_defaults_to_bounded_resize()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "train",
@@ -144,7 +110,8 @@ static void parse_train_defaults_to_bounded_resize() {
     PFM_REQUIRE_CLOSE(parsed.val_ratio, 0.0, 1.0e-12);
 }
 
-static void parse_train_command() {
+static void parse_train_command()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "train",
@@ -181,6 +148,10 @@ static void parse_train_command() {
         "0.05",
         "--weight-decay",
         "0.08",
+        "--graph-keypoint-meta-dim",
+        "12",
+        "--training-profile",
+        "smoke",
         "--synthetic-pair-cache-dir",
         "pair_cache",
         "--cache-only",
@@ -198,6 +169,10 @@ static void parse_train_command() {
         "3",
         "--hard-synthetic-pair-cache-index",
         "8",
+        "--pair-cache-dir",
+        "sim_cache_train",
+        "--pair-cache-limit",
+        "9",
         "--synthetic-pair-cache-rebuild",
         "--log-csv",
         "metrics.csv",
@@ -248,6 +223,8 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.lr_warmup_steps == 12);
     PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 0.05, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.weight_decay, 0.08, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_keypoint_meta_dim == 12);
+    PFM_REQUIRE(parsed.training_profile == "smoke");
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
     PFM_REQUIRE(parsed.cache_only);
@@ -259,6 +236,8 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.hard_synthetic_pair_cache_dirs[1] == "compound_extreme_cache");
     PFM_REQUIRE(parsed.hard_synthetic_pair_cache_repeats == 4);
     PFM_REQUIRE(parsed.hard_synthetic_pair_cache_indices == std::vector<int64_t>({3, 8}));
+    PFM_REQUIRE(parsed.pair_cache_dirs == std::vector<std::string>({"sim_cache_train"}));
+    PFM_REQUIRE(parsed.pair_cache_limit == 9);
     PFM_REQUIRE(parsed.synthetic_pair_cache_rebuild);
     PFM_REQUIRE(parsed.log_csv == "metrics.csv");
     PFM_REQUIRE(parsed.dataloader_workers == 2);
@@ -279,7 +258,8 @@ static void parse_train_command() {
     PFM_REQUIRE(parsed.nms_radius == 2);
 }
 
-static void parse_train_visualization_defaults_to_four_samples() {
+static void parse_train_full_v21_sets_large_model_dimensions()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "train",
@@ -287,63 +267,53 @@ static void parse_train_visualization_defaults_to_four_samples() {
         "images",
         "--checkpoint",
         "model.pt",
-        "--visualization-dir",
-        "train_vis"});
+        "--full-v21",
+    });
+
+    PFM_REQUIRE(parsed.full_v21);
+    PFM_REQUIRE(parsed.base_channels == 64);
+    PFM_REQUIRE(parsed.descriptor_dim == 256);
+    PFM_REQUIRE(parsed.graph_hidden_dim == 512);
+    PFM_REQUIRE(parsed.graph_attention_layers == 8);
+    PFM_REQUIRE(parsed.graph_keypoint_meta_dim == 16);
+}
+
+static void parse_train_visualization_defaults_to_four_samples()
+{
+    const auto parsed = pfm::parse_cli(
+        {"pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt", "--visualization-dir", "train_vis"});
 
     PFM_REQUIRE(parsed.visualization_dir == "train_vis");
     PFM_REQUIRE(parsed.visualization_samples == 4);
     PFM_REQUIRE(!parsed.visualization_samples_all);
 }
 
-static void parse_train_visualization_samples_all() {
-    const auto parsed = pfm::parse_cli({
-        "pfm",
-        "train",
-        "--image-dir",
-        "images",
-        "--checkpoint",
-        "model.pt",
-        "--visualization-dir",
-        "train_vis",
-        "--visualization-samples",
-        "all"});
+static void parse_train_visualization_samples_all()
+{
+    const auto parsed = pfm::parse_cli({"pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt",
+                                        "--visualization-dir", "train_vis", "--visualization-samples", "all"});
 
     PFM_REQUIRE(parsed.visualization_samples_all);
 }
 
-static void parse_train_visualization_samples_zero_disables_output() {
-    const auto parsed = pfm::parse_cli({
-        "pfm",
-        "train",
-        "--image-dir",
-        "images",
-        "--checkpoint",
-        "model.pt",
-        "--visualization-dir",
-        "train_vis",
-        "--visualization-samples",
-        "0"});
+static void parse_train_visualization_samples_zero_disables_output()
+{
+    const auto parsed = pfm::parse_cli({"pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt",
+                                        "--visualization-dir", "train_vis", "--visualization-samples", "0"});
 
     PFM_REQUIRE(parsed.visualization_samples == 0);
     PFM_REQUIRE(!parsed.visualization_samples_all);
 }
 
-static void parse_train_visualization_invalid_samples_throw() {
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({"pfm",
-                        "train",
-                        "--image-dir",
-                        "images",
-                        "--checkpoint",
-                        "model.pt",
-                        "--visualization-dir",
-                        "train_vis",
-                        "--visualization-samples",
-                        "invalid"}),
-        CLI::ParseError);
+static void parse_train_visualization_invalid_samples_throw()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt",
+                                          "--visualization-dir", "train_vis", "--visualization-samples", "invalid"}),
+                          CLI::ParseError);
 }
 
-static void parse_match_command() {
+static void parse_match_command()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "match",
@@ -395,43 +365,27 @@ static void parse_match_command() {
     PFM_REQUIRE(parsed.sparse_geometry_filter == "rotation-only");
 }
 
-static void parse_match_defaults_to_sparse_mode() {
-    const auto parsed = pfm::parse_cli({
-        "pfm",
-        "match",
-        "--image-a",
-        "a.png",
-        "--image-b",
-        "b.png",
-        "--checkpoint",
-        "model.pt",
-        "--output",
-        "matches.pt"});
+static void parse_match_defaults_to_sparse_mode()
+{
+    const auto parsed = pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                        "model.pt", "--output", "matches.pt"});
 
     PFM_REQUIRE(parsed.match_mode == "sparse");
 }
 
-static void parse_match_accepts_adaptive_and_local_sparse_geometry_filters() {
-    for (const std::string mode : {"adaptive", "local", "projective", "rotation-only"}) {
-        const auto parsed = pfm::parse_cli({
-            "pfm",
-            "match",
-            "--image-a",
-            "a.png",
-            "--image-b",
-            "b.png",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "matches.pt",
-            "--sparse-geometry-filter",
-            mode});
+static void parse_match_accepts_adaptive_and_local_sparse_geometry_filters()
+{
+    for (const std::string mode : {"adaptive", "local", "projective", "rotation-only"})
+    {
+        const auto parsed = pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                            "model.pt", "--output", "matches.pt", "--sparse-geometry-filter", mode});
 
         PFM_REQUIRE(parsed.sparse_geometry_filter == mode);
     }
 }
 
-static void parse_eval_command() {
+static void parse_eval_command()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "eval",
@@ -464,7 +418,8 @@ static void parse_eval_command() {
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
 }
 
-static void parse_export_command() {
+static void parse_export_command()
+{
     const auto parsed = pfm::parse_cli({
         "pfm",
         "export",
@@ -479,87 +434,42 @@ static void parse_export_command() {
     PFM_REQUIRE(parsed.output == "exported.pt");
 }
 
-static void parse_min_keypoint_intensity_out_of_range_throws() {
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({"pfm",
-                        "extract",
-                        "--image",
-                        "a.tif",
-                        "--checkpoint",
-                        "model.pt",
-                        "--output",
-                        "features.pt",
-                        "--min-keypoint-intensity",
-                        "1.5"}),
-        CLI::ParseError);
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({"pfm",
-                        "train",
-                        "--image-dir",
-                        "images",
-                        "--checkpoint",
-                        "model.pt",
-                        "--min-keypoint-intensity",
-                        "-0.1"}),
-        CLI::ParseError);
+static void parse_min_keypoint_intensity_out_of_range_throws()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "extract", "--image", "a.tif", "--checkpoint", "model.pt", "--output",
+                                          "features.pt", "--min-keypoint-intensity", "1.5"}),
+                          CLI::ParseError);
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt",
+                                          "--min-keypoint-intensity", "-0.1"}),
+                          CLI::ParseError);
 }
 
-static void parse_match_invalid_max_keypoints_throws() {
+static void parse_match_invalid_max_keypoints_throws()
+{
     const std::vector<std::string> args = {
-        "pfm",
-        "match",
-        "--image-a",
-        "a.png",
-        "--image-b",
-        "b.png",
-        "--checkpoint",
-        "model.pt",
-        "--output",
-        "matches.json",
-        "--max-keypoints",
-        "invalid",
+        "pfm",          "match",    "--image-a", "a.png",        "--image-b",       "b.png",
+        "--checkpoint", "model.pt", "--output",  "matches.json", "--max-keypoints", "invalid",
     };
 
     PFM_REQUIRE_THROWS_AS(pfm::parse_cli(args), CLI::ParseError);
 }
 
-static void parseMatchInvalidModeThrows() {
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({
-            "pfm",
-            "match",
-            "--image-a",
-            "a.png",
-            "--image-b",
-            "b.png",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "matches.pt",
-            "--match-mode",
-            "invalid"}),
-        CLI::ParseError);
+static void parseMatchInvalidModeThrows()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                          "model.pt", "--output", "matches.pt", "--match-mode", "invalid"}),
+                          CLI::ParseError);
 }
 
-static void parse_match_invalid_sparse_geometry_filter_throws() {
-    PFM_REQUIRE_THROWS_AS(
-        pfm::parse_cli({
-            "pfm",
-            "match",
-            "--image-a",
-            "a.png",
-            "--image-b",
-            "b.png",
-            "--checkpoint",
-            "model.pt",
-            "--output",
-            "matches.pt",
-            "--sparse-geometry-filter",
-            "invalid"}),
-        CLI::ParseError);
+static void parse_match_invalid_sparse_geometry_filter_throws()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                          "model.pt", "--output", "matches.pt", "--sparse-geometry-filter", "invalid"}),
+                          CLI::ParseError);
 }
 
-static void top_level_help_lists_subcommand_options() {
+static void top_level_help_lists_subcommand_options()
+{
     pfm::CliOptions options;
     auto app = pfm::build_cli_app(options);
     const auto help = app->help();
@@ -588,87 +498,73 @@ static void top_level_help_lists_subcommand_options() {
     PFM_REQUIRE(help.find("export --checkpoint") != std::string::npos);
 }
 
-static void run_cli_help_returns_zero() {
+static void run_cli_help_returns_zero()
+{
     const char* argv[] = {"pfm", "--help"};
 
     PFM_REQUIRE(pfm::run_cli(2, const_cast<char**>(argv)) == 0);
 }
 
-static void run_extract_without_checkpoint_path_fails_cleanly() {
+static void run_extract_without_checkpoint_path_fails_cleanly()
+{
     const char* argv[] = {"pfm", "extract", "--image", "a.png", "--checkpoint", "", "--output", "a.pfm"};
 
     PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_extract_with_required_paths_fails_without_loadable_checkpoint() {
+static void run_extract_with_required_paths_fails_without_loadable_checkpoint()
+{
     const char* argv[] = {"pfm", "extract", "--image", "a.png", "--checkpoint", "model.pt", "--output", "a.pfm"};
 
     PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_match_with_required_paths_returns_task_8_failure() {
+static void run_match_with_required_paths_returns_task_8_failure()
+{
     const char* argv[] = {
-        "pfm",
-        "match",
-        "--image-a",
-        "a.png",
-        "--image-b",
-        "b.png",
-        "--checkpoint",
-        "model.pt",
-        "--output",
-        "matches.json",
+        "pfm",   "match",        "--image-a", "a.png",    "--image-b",
+        "b.png", "--checkpoint", "model.pt",  "--output", "matches.json",
     };
 
     PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) != 0);
 }
 
-static void run_eval_with_required_paths_returns_task_8_failure() {
+static void run_eval_with_required_paths_returns_task_8_failure()
+{
     const char* argv[] = {
-        "pfm",
-        "eval",
-        "--pairs",
-        "pairs.txt",
-        "--checkpoint",
-        "model.pt",
-        "--output",
-        "report.json",
+        "pfm", "eval", "--pairs", "pairs.txt", "--checkpoint", "model.pt", "--output", "report.json",
     };
 
     PFM_REQUIRE(pfm::run_cli(8, const_cast<char**>(argv)) != 0);
 }
 
-static void run_train_with_required_paths_fails_without_image_directory() {
+static void run_train_with_required_paths_fails_without_image_directory()
+{
     const char* argv[] = {
-        "pfm",
-        "train",
-        "--image-dir",
-        "images",
-        "--checkpoint",
-        "model.pt",
-        "--epochs",
-        "1",
-        "--batch-size",
-        "1",
+        "pfm", "train", "--image-dir", "images", "--checkpoint", "model.pt", "--epochs", "1", "--batch-size", "1",
     };
 
     PFM_REQUIRE(pfm::run_cli(10, const_cast<char**>(argv)) != 0);
 }
 
-static void run_export_with_required_paths_fails_without_loadable_checkpoint() {
+static void run_export_with_required_paths_fails_without_loadable_checkpoint()
+{
     const char* argv[] = {"pfm", "export", "--checkpoint", "model.pt", "--output", "exported.pt"};
 
     PFM_REQUIRE(pfm::run_cli(6, const_cast<char**>(argv)) != 0);
 }
 
-void register_cli_tests() {
+void register_cli_tests()
+{
     register_test("parse_missing_subcommand_throws", parse_missing_subcommand_throws);
     register_test("parse_extract_missing_required_option_throws", parse_extract_missing_required_option_throws);
     register_test("parse_extract_command", parse_extract_command);
     register_test("parse_extract_keypoint_distribution_options", parse_extract_keypoint_distribution_options);
-    register_test("parse_invalid_keypoint_distribution_options_throw", parse_invalid_keypoint_distribution_options_throw);
+    register_test("parse_invalid_keypoint_distribution_options_throw",
+                  parse_invalid_keypoint_distribution_options_throw);
     register_test("parse_train_defaults_to_bounded_resize", parse_train_defaults_to_bounded_resize);
     register_test("parse_train_command", parse_train_command);
+    register_test("parse_train_full_v21_sets_large_model_dimensions", parse_train_full_v21_sets_large_model_dimensions);
     register_test("parse_train_visualization_defaults_to_four_samples",
                   parse_train_visualization_defaults_to_four_samples);
     register_test("parse_train_visualization_samples_all", parse_train_visualization_samples_all);
@@ -688,10 +584,8 @@ void register_cli_tests() {
                   parse_match_invalid_sparse_geometry_filter_throws);
     register_test("top_level_help_lists_subcommand_options", top_level_help_lists_subcommand_options);
     register_test("run_cli_help_returns_zero", run_cli_help_returns_zero);
-    register_test(
-        "run_extract_without_checkpoint_path_fails_cleanly",
-        run_extract_without_checkpoint_path_fails_cleanly
-    );
+    register_test("run_extract_without_checkpoint_path_fails_cleanly",
+                  run_extract_without_checkpoint_path_fails_cleanly);
     register_test("run_extract_with_required_paths_fails_without_loadable_checkpoint",
                   run_extract_with_required_paths_fails_without_loadable_checkpoint);
     register_test("run_match_with_required_paths_returns_task_8_failure",

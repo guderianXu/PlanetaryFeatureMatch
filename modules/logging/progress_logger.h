@@ -4,10 +4,12 @@
 
 #include "logging/training_metric.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class ConsoleProgressLogger : public TrainingMetricLogger {
-public:
+class ConsoleProgressLogger : public TrainingMetricLogger
+{
+  public:
     /// Creates a console progress logger.
     /// @param stream Output stream.
     /// @param bar_width Progress bar width in characters.
@@ -24,9 +26,9 @@ public:
     /// Flushes the output stream.
     void flush() override;
 
-private:
+  private:
     std::ostream& _stream;
     int _bar_width;
 };
 
-}  // namespace pfm
+} // namespace pfm

@@ -69,6 +69,16 @@ target_include_directories(pfm_optim PUBLIC
 target_link_libraries(pfm_optim PUBLIC ${TORCH_LIBRARIES})
 target_compile_options(pfm_optim PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(pfm_losses STATIC
+    modules/losses/basic_losses.cpp
+)
+target_include_directories(pfm_losses PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_link_libraries(pfm_losses PUBLIC ${TORCH_LIBRARIES})
+target_compile_options(pfm_losses PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(pfm_cache_eval STATIC
     modules/cache_eval/cache_eval_manifest.cpp
     modules/cache_eval/cache_eval_metrics.cpp
@@ -109,9 +119,9 @@ target_include_directories(pfm_adaptive_match_policy PUBLIC
 target_compile_options(pfm_adaptive_match_policy PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(pfm_core STATIC
-    src/core/device.cpp
-    src/core/tensor_utils.cpp
-    src/core/timer.cpp
+    modules/core/device.cpp
+    modules/core/tensor_utils.cpp
+    modules/core/timer.cpp
 )
 target_include_directories(pfm_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -122,9 +132,9 @@ target_link_libraries(pfm_core PUBLIC ${TORCH_LIBRARIES})
 target_compile_options(pfm_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(pfm_image STATIC
-    src/data/image_io.cpp
-    src/data/normalization.cpp
-    src/data/intensity_mask.cpp
+    modules/image/image_io.cpp
+    modules/image/normalization.cpp
+    modules/image/intensity_mask.cpp
 )
 target_include_directories(pfm_image PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -135,7 +145,7 @@ target_link_libraries(pfm_image PUBLIC pfm_core ${TORCH_LIBRARIES} ${OpenCV_LIBS
 target_compile_options(pfm_image PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(pfm_geometry STATIC
-    src/geometry/warp.cpp
+    modules/geometry/warp.cpp
 )
 target_include_directories(pfm_geometry PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -158,7 +168,7 @@ target_link_libraries(pfm_augment PUBLIC pfm_core pfm_image pfm_geometry ${TORCH
 target_compile_options(pfm_augment PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(pfm_eval STATIC
-    src/eval/metrics.cpp
+    modules/eval/metrics.cpp
 )
 target_include_directories(pfm_eval PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -171,6 +181,7 @@ target_compile_options(pfm_eval PRIVATE -Wall -Wextra -Wpedantic)
 add_library(pfm STATIC
     src/cli/commands.cpp
     src/data/image_dataset.cpp
+    src/data/pair_archive_dataset.cpp
     src/data/synthetic_pair.cpp
     src/data/synthetic_pair_cache.cpp
     src/data/synthetic_pair_dataset.cpp
@@ -184,11 +195,8 @@ add_library(pfm STATIC
     src/infer/pipeline.cpp
     src/infer/visualization.cpp
     src/losses/losses.cpp
-    src/models/backbone.cpp
-    src/models/dense_head.cpp
-    src/models/matcher.cpp
+    src/models/pfm_model_v21.cpp
     src/models/planetary_graph_matcher.cpp
-    src/models/sparse_head.cpp
     src/train/trainer.cpp
     src/train/training_visualization.cpp
 )
@@ -199,7 +207,7 @@ target_include_directories(pfm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/modules
 )
 
-target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_dataloader pfm_logging pfm_optim ${TORCH_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_dataloader pfm_logging pfm_optim pfm_losses ${TORCH_LIBRARIES} ${OpenCV_LIBS})
 target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(pfm_cli src/main.cpp)
@@ -229,12 +237,18 @@ target_link_libraries(pfm_interpolate_checkpoints PRIVATE pfm)
 add_executable(pfm_print_checkpoint_config tools/print_checkpoint_config.cpp)
 target_link_libraries(pfm_print_checkpoint_config PRIVATE pfm)
 
+add_executable(pfm_print_v21_state_keys tools/print_pfm_v21_state_keys.cpp)
+target_link_libraries(pfm_print_v21_state_keys PRIVATE pfm)
+
+add_executable(pfm_pair_cache_training_smoke tools/pair_cache_training_smoke.cpp)
+target_link_libraries(pfm_pair_cache_training_smoke PRIVATE pfm)
+
 add_executable(pfm_tests
     tests/test_main.cpp
     src/cli/commands_test.cpp
-    src/core/device_test.cpp
-    src/core/tensor_utils_test.cpp
-    src/core/timer_test.cpp
+    modules/core/device_test.cpp
+    modules/core/tensor_utils_test.cpp
+    modules/core/timer_test.cpp
     modules/runtime/runtime_test.cpp
     modules/dataloader/dataloader_test.cpp
     modules/logging/logging_test.cpp
@@ -253,25 +267,23 @@ add_executable(pfm_tests
     src/infer/pipeline_test.cpp
     src/infer/visualization_test.cpp
     src/data/image_dataset_test.cpp
-    src/data/image_io_test.cpp
-    src/data/intensity_mask_test.cpp
-    src/data/normalization_test.cpp
+    modules/image/image_io_test.cpp
+    modules/image/intensity_mask_test.cpp
+    modules/image/normalization_test.cpp
+    src/data/pair_archive_dataset_test.cpp
     src/data/synthetic_pair_test.cpp
     src/data/synthetic_pair_cache_test.cpp
     src/augment/augment_test.cpp
-    src/eval/metrics_test.cpp
-    src/geometry/warp_test.cpp
+    modules/eval/metrics_test.cpp
+    modules/geometry/warp_test.cpp
     src/losses/losses_test.cpp
-    src/models/backbone_test.cpp
-    src/models/dense_head_test.cpp
-    src/models/matcher_test.cpp
+    src/models/pfm_model_v21_test.cpp
     src/models/planetary_graph_matcher_test.cpp
-    src/models/sparse_head_test.cpp
     src/train/trainer_test.cpp
     src/train/training_visualization_test.cpp
 )
 target_include_directories(pfm_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging pfm_optim pfm_cache_eval pfm_match_quality pfm_training_schedule pfm_adaptive_match_policy)
+target_link_libraries(pfm_tests PRIVATE pfm pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_runtime pfm_dataloader pfm_logging pfm_optim pfm_losses pfm_cache_eval pfm_match_quality pfm_training_schedule pfm_adaptive_match_policy)
 add_test(NAME pfm_tests COMMAND pfm_tests)

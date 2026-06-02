@@ -1,13 +1,16 @@
 #include "logging/gpu_metric_provider.h"
 
-namespace pfm {
+namespace pfm
+{
 
-GpuMetrics NullGpuMetricProvider::sample() {
+GpuMetrics NullGpuMetricProvider::sample()
+{
     return GpuMetrics{};
 }
 
-std::unique_ptr<GpuMetricProvider> makeDefaultGpuMetricProvider() {
+std::unique_ptr<GpuMetricProvider> makeDefaultGpuMetricProvider()
+{
     return makeNvmlGpuMetricProvider();
 }
 
-}  // namespace pfm
+} // namespace pfm

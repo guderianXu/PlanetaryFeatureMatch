@@ -1,18 +1,19 @@
 #include "tests/test_harness.h"
-
 #include "training_schedule/training_schedule.h"
 
-namespace {
+namespace
+{
 
 using pfm::training_schedule::CurriculumStage;
 using pfm::training_schedule::DatasetKind;
+using pfm::training_schedule::evaluateSample;
 using pfm::training_schedule::HardFineTuneConfig;
+using pfm::training_schedule::hardFineTuneLearningRate;
 using pfm::training_schedule::SampleMetrics;
 using pfm::training_schedule::TrainingStageConfig;
-using pfm::training_schedule::evaluateSample;
-using pfm::training_schedule::hardFineTuneLearningRate;
 
-void highQualityRotationSampleKeepsNormalWeight() {
+void highQualityRotationSampleKeepsNormalWeight()
+{
     TrainingStageConfig config;
     config.stage = CurriculumStage::RotationClean;
     config.base_weight = 1.0;
@@ -30,7 +31,8 @@ void highQualityRotationSampleKeepsNormalWeight() {
     PFM_REQUIRE_CLOSE(decision.weight, 1.0, 1.0e-12);
 }
 
-void lowPrecisionHardPairIsWeightedButCapped() {
+void lowPrecisionHardPairIsWeightedButCapped()
+{
     TrainingStageConfig config;
     config.stage = CurriculumStage::HardPairs;
     config.base_weight = 1.0;
@@ -51,7 +53,8 @@ void lowPrecisionHardPairIsWeightedButCapped() {
     PFM_REQUIRE_CLOSE(decision.weight, 2.5, 1.0e-12);
 }
 
-void curriculumFiltersExtremeSamplesEarlyAndReleasesLater() {
+void curriculumFiltersExtremeSamplesEarlyAndReleasesLater()
+{
     TrainingStageConfig config;
     config.stage = CurriculumStage::RotationClean;
 
@@ -70,7 +73,8 @@ void curriculumFiltersExtremeSamplesEarlyAndReleasesLater() {
     PFM_REQUIRE(evaluateSample(hard_sample, config).enabled);
 }
 
-void hardFineTuneLearningRateUsesScaleAndWarmupIsMonotonic() {
+void hardFineTuneLearningRateUsesScaleAndWarmupIsMonotonic()
+{
     HardFineTuneConfig config;
     config.base_lr = 1.0e-4;
     config.hard_lr_scale = 0.10;
@@ -88,9 +92,10 @@ void hardFineTuneLearningRateUsesScaleAndWarmupIsMonotonic() {
     PFM_REQUIRE_CLOSE(lr20, 1.0e-5, 1.0e-12);
 }
 
-}  // namespace
+} // namespace
 
-void register_training_schedule_tests() {
+void register_training_schedule_tests()
+{
     register_test("training schedule high quality rotation sample keeps normal weight",
                   highQualityRotationSampleKeepsNormalWeight);
     register_test("training schedule low precision hard pair is weighted but capped",

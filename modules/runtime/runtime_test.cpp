@@ -1,15 +1,17 @@
-#include "runtime/blocking_queue.h"
-#include "runtime/thread_pool.h"
-#include "tests/test_harness.h"
-
 #include <atomic>
 #include <chrono>
-#include <future>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 
-static void blocking_queue_preserves_fifo_order() {
+#include <future>
+
+#include "runtime/blocking_queue.h"
+#include "runtime/thread_pool.h"
+#include "tests/test_harness.h"
+
+static void blocking_queue_preserves_fifo_order()
+{
     pfm::BlockingQueue<int> queue(2);
 
     queue.push(1);
@@ -19,11 +21,14 @@ static void blocking_queue_preserves_fifo_order() {
     PFM_REQUIRE(queue.pop().value() == 2);
 }
 
-static void blocking_queue_close_wakes_waiting_consumer() {
+static void blocking_queue_close_wakes_waiting_consumer()
+{
     pfm::BlockingQueue<int> queue(1);
-    auto result = std::async(std::launch::async, [&queue]() {
-        return queue.pop();
-    });
+    auto result = std::async(std::launch::async,
+                             [&queue]()
+                             {
+                                 return queue.pop();
+                             });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     queue.close();
@@ -32,18 +37,23 @@ static void blocking_queue_close_wakes_waiting_consumer() {
     PFM_REQUIRE(!result.get().has_value());
 }
 
-static void blocking_queue_rejects_zero_capacity() {
+static void blocking_queue_rejects_zero_capacity()
+{
     PFM_REQUIRE_INVALID_ARG(pfm::BlockingQueue<int>(0));
 }
 
-static void thread_pool_runs_all_jobs() {
+static void thread_pool_runs_all_jobs()
+{
     pfm::ThreadPool pool(3, 8);
     std::atomic<int> counter{0};
 
-    for (int i = 0; i < 10; ++i) {
-        pool.enqueue([&counter]() {
-            counter.fetch_add(1);
-        });
+    for (int i = 0; i < 10; ++i)
+    {
+        pool.enqueue(
+            [&counter]()
+            {
+                counter.fetch_add(1);
+            });
     }
     pool.close();
     pool.join();
@@ -51,28 +61,37 @@ static void thread_pool_runs_all_jobs() {
     PFM_REQUIRE(counter.load() == 10);
 }
 
-static void thread_pool_rethrows_worker_exception() {
+static void thread_pool_rethrows_worker_exception()
+{
     pfm::ThreadPool pool(2, 4);
 
-    pool.enqueue([]() {
-        throw std::runtime_error("worker failed");
-    });
+    pool.enqueue(
+        []()
+        {
+            throw std::runtime_error("worker failed");
+        });
     pool.close();
 
     PFM_REQUIRE_THROWS_AS(pool.join(), std::runtime_error);
 }
 
-static void thread_pool_finishes_queued_jobs_after_worker_exception() {
+static void thread_pool_finishes_queued_jobs_after_worker_exception()
+{
     pfm::ThreadPool pool(1, 4);
     std::atomic<int> counter{0};
 
-    pool.enqueue([]() {
-        throw std::runtime_error("worker failed");
-    });
-    for (int i = 0; i < 3; ++i) {
-        pool.enqueue([&counter]() {
-            counter.fetch_add(1);
+    pool.enqueue(
+        []()
+        {
+            throw std::runtime_error("worker failed");
         });
+    for (int i = 0; i < 3; ++i)
+    {
+        pool.enqueue(
+            [&counter]()
+            {
+                counter.fetch_add(1);
+            });
     }
     pool.close();
 
@@ -80,11 +99,13 @@ static void thread_pool_finishes_queued_jobs_after_worker_exception() {
     PFM_REQUIRE(counter.load() == 3);
 }
 
-static void thread_pool_rejects_zero_workers() {
+static void thread_pool_rejects_zero_workers()
+{
     PFM_REQUIRE_THROWS_AS(pfm::ThreadPool(0, 4), std::invalid_argument);
 }
 
-void register_runtime_tests() {
+void register_runtime_tests()
+{
     register_test("blocking queue preserves fifo order", blocking_queue_preserves_fifo_order);
     register_test("blocking queue close wakes waiting consumer", blocking_queue_close_wakes_waiting_consumer);
     register_test("blocking queue rejects zero capacity", blocking_queue_rejects_zero_capacity);

@@ -1,11 +1,12 @@
-#include "tests/test_harness.h"
+#include "adaptive_match_policy/adaptive_match_policy.h"
 
 #include <limits>
 #include <string>
 
-#include "adaptive_match_policy/adaptive_match_policy.h"
+#include "tests/test_harness.h"
 
-namespace {
+namespace
+{
 
 using pfm::adaptive_match_policy::AdaptiveMatchPolicyConfig;
 using pfm::adaptive_match_policy::DescriptorTopKBand;
@@ -13,7 +14,8 @@ using pfm::adaptive_match_policy::MatchObservation;
 using pfm::adaptive_match_policy::selectDescriptorTopKPolicy;
 using pfm::adaptive_match_policy::verifiedFraction;
 
-void highConfidenceStatsChooseConservativeTopK() {
+void highConfidenceStatsChooseConservativeTopK()
+{
     MatchObservation observation;
     observation.tentative_match_count = 150;
     observation.verified_match_count = 115;
@@ -30,7 +32,8 @@ void highConfidenceStatsChooseConservativeTopK() {
     PFM_REQUIRE_CLOSE(verifiedFraction(observation), 115.0 / 150.0, 1.0e-12);
 }
 
-void sparseSupportChoosesLooseTopKForRecovery() {
+void sparseSupportChoosesLooseTopKForRecovery()
+{
     MatchObservation observation;
     observation.tentative_match_count = 28;
     observation.verified_match_count = 22;
@@ -46,7 +49,8 @@ void sparseSupportChoosesLooseTopKForRecovery() {
     PFM_REQUIRE(decision.reason == "insufficient_match_support");
 }
 
-void noisyCandidatePoolChoosesConservativeTopKWithSafeguards() {
+void noisyCandidatePoolChoosesConservativeTopKWithSafeguards()
+{
     MatchObservation observation;
     observation.tentative_match_count = 220;
     observation.verified_match_count = 28;
@@ -62,7 +66,8 @@ void noisyCandidatePoolChoosesConservativeTopKWithSafeguards() {
     PFM_REQUIRE(decision.reason == "noisy_candidate_pool");
 }
 
-void middlingStatsUseBalancedTopK() {
+void middlingStatsUseBalancedTopK()
+{
     MatchObservation observation;
     observation.tentative_match_count = 100;
     observation.verified_match_count = 46;
@@ -78,7 +83,8 @@ void middlingStatsUseBalancedTopK() {
     PFM_REQUIRE(decision.reason == "balanced_default");
 }
 
-void exportedExperimentConfigOverridesDescriptorTopK() {
+void exportedExperimentConfigOverridesDescriptorTopK()
+{
     AdaptiveMatchPolicyConfig config;
     config.conservative_top_k = 16;
     config.balanced_top_k = 96;
@@ -102,7 +108,8 @@ void exportedExperimentConfigOverridesDescriptorTopK() {
     PFM_REQUIRE(selectDescriptorTopKPolicy(balanced, config).descriptor_top_k == 96);
 }
 
-void invalidStatisticsAndConfigAreRejected() {
+void invalidStatisticsAndConfigAreRejected()
+{
     MatchObservation impossible_counts;
     impossible_counts.tentative_match_count = 8;
     impossible_counts.verified_match_count = 9;
@@ -128,9 +135,10 @@ void invalidStatisticsAndConfigAreRejected() {
     PFM_REQUIRE_INVALID_ARG(selectDescriptorTopKPolicy(valid_observation, invalid_config));
 }
 
-}  // namespace
+} // namespace
 
-void register_adaptive_match_policy_tests() {
+void register_adaptive_match_policy_tests()
+{
     register_test("adaptive match policy high confidence stats choose conservative top-k",
                   highConfidenceStatsChooseConservativeTopK);
     register_test("adaptive match policy sparse support chooses loose top-k for recovery",

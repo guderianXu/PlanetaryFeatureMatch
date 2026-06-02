@@ -5,11 +5,13 @@
 
 #include <torch/torch.h>
 
-namespace pfm {
+namespace pfm
+{
 
 using TensorBatch = std::unordered_map<std::string, torch::Tensor>;
 
-enum class TensorLayout {
+enum class TensorLayout
+{
     Hw,
     Chw,
     Hwc
@@ -28,4 +30,4 @@ TensorBatch moveBatchToDevice(const TensorBatch& batch, const torch::Device& dev
 /// \throws std::runtime_error if pinned allocation fails.
 TensorBatch pinTensorBatchMemory(const TensorBatch& batch);
 
-}  // namespace pfm
+} // namespace pfm

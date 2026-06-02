@@ -3,27 +3,32 @@
 #include <stdexcept>
 #include <utility>
 
-namespace pfm {
+namespace pfm
+{
 
-SyntheticPairTensorDataset::SyntheticPairTensorDataset(
-    std::vector<torch::Tensor> images,
-    size_t pairs_per_image,
-    ImagePairAugmentationConfig config)
-    : _images(std::move(images)), _pairs_per_image(pairs_per_image), _config(config) {
-    if (_images.empty()) {
+SyntheticPairTensorDataset::SyntheticPairTensorDataset(std::vector<torch::Tensor> images, size_t pairs_per_image,
+                                                       ImagePairAugmentationConfig config)
+    : _images(std::move(images)), _pairs_per_image(pairs_per_image), _config(config)
+{
+    if (_images.empty())
+    {
         throw std::invalid_argument("synthetic pair tensor dataset requires at least one image");
     }
-    if (_pairs_per_image == 0) {
+    if (_pairs_per_image == 0)
+    {
         throw std::invalid_argument("pairs per image must be positive");
     }
 }
 
-size_t SyntheticPairTensorDataset::size() const {
+size_t SyntheticPairTensorDataset::size() const
+{
     return _images.size() * _pairs_per_image;
 }
 
-TensorBatch SyntheticPairTensorDataset::get(size_t index) {
-    if (index >= size()) {
+TensorBatch SyntheticPairTensorDataset::get(size_t index)
+{
+    if (index >= size())
+    {
         throw std::out_of_range("synthetic pair tensor dataset index out of range");
     }
 
@@ -42,4 +47,4 @@ TensorBatch SyntheticPairTensorDataset::get(size_t index) {
     return batch;
 }
 
-}  // namespace pfm
+} // namespace pfm

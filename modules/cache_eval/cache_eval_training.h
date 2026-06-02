@@ -6,7 +6,8 @@
 
 #include "cache_eval/cache_eval_manifest.h"
 
-namespace pfm::cache_eval {
+namespace pfm::cache_eval
+{
 
 /// Extracts the synthetic pair cache index from a manifest entry.
 /// The parser accepts pair ids or filenames like pair_000077.
@@ -18,4 +19,4 @@ std::vector<int64_t> extractSyntheticPairCacheIndices(const std::vector<PairMani
 /// Serializes hard cache indices as a one-column CSV.
 std::string hardCacheIndexCsv(const std::vector<int64_t>& indices);
 
-}  // namespace pfm::cache_eval
+} // namespace pfm::cache_eval

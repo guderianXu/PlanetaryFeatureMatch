@@ -10,9 +10,11 @@
 #include "logging/progress_logger.h"
 #include "tests/test_harness.h"
 
-namespace {
+namespace
+{
 
-pfm::TrainingMetric sampleMetric() {
+pfm::TrainingMetric sampleMetric()
+{
     pfm::TrainingMetric metric;
     metric.epoch = 2;
     metric.total_epochs = 10;
@@ -29,17 +31,21 @@ pfm::TrainingMetric sampleMetric() {
     return metric;
 }
 
-class CountingMetricLogger : public pfm::TrainingMetricLogger {
-public:
-    void logIteration(const pfm::TrainingMetric&) override {
+class CountingMetricLogger : public pfm::TrainingMetricLogger
+{
+  public:
+    void logIteration(const pfm::TrainingMetric&) override
+    {
         ++iteration_count;
     }
 
-    void logEpochSummary(const pfm::TrainingMetric&) override {
+    void logEpochSummary(const pfm::TrainingMetric&) override
+    {
         ++summary_count;
     }
 
-    void flush() override {
+    void flush() override
+    {
         ++flush_count;
     }
 
@@ -48,7 +54,8 @@ public:
     int flush_count = 0;
 };
 
-static void consoleProgressLoggerRendersCoreFields() {
+static void consoleProgressLoggerRendersCoreFields()
+{
     std::ostringstream stream;
     pfm::ConsoleProgressLogger logger(stream, 20);
 
@@ -63,7 +70,8 @@ static void consoleProgressLoggerRendersCoreFields() {
     PFM_REQUIRE(text.find("off=12") != std::string::npos);
 }
 
-static void csvMetricLoggerWritesHeaderAndRows() {
+static void csvMetricLoggerWritesHeaderAndRows()
+{
     const auto path = std::filesystem::temp_directory_path() / "pfm_metric_logger_test.csv";
     std::filesystem::remove(path);
 
@@ -77,15 +85,15 @@ static void csvMetricLoggerWritesHeaderAndRows() {
     std::getline(input, header);
     std::getline(input, row);
 
-    PFM_REQUIRE(
-        header ==
-        "epoch,total_epochs,iteration,total_iterations,images_seen,total_images,learning_rate,elapsed_seconds,loss_total,matcher_loss,offset_error_px");
+    PFM_REQUIRE(header == "epoch,total_epochs,iteration,total_iterations,images_seen,total_images,learning_rate,"
+                          "elapsed_seconds,loss_total,matcher_loss,offset_error_px");
     PFM_REQUIRE(row.find("2,10,3,5,12,20") == 0);
     PFM_REQUIRE(row.find(",4.5,3.5,12") != std::string::npos);
     std::filesystem::remove(path);
 }
 
-static void nullGpuMetricProviderReturnsEmptyValues() {
+static void nullGpuMetricProviderReturnsEmptyValues()
+{
     pfm::NullGpuMetricProvider provider;
 
     auto metrics = provider.sample();
@@ -94,7 +102,8 @@ static void nullGpuMetricProviderReturnsEmptyValues() {
     PFM_REQUIRE(!metrics.power_watts.has_value());
 }
 
-static void defaultGpuMetricProviderIsConstructible() {
+static void defaultGpuMetricProviderIsConstructible()
+{
     auto provider = pfm::makeDefaultGpuMetricProvider();
 
     PFM_REQUIRE(provider != nullptr);
@@ -103,7 +112,8 @@ static void defaultGpuMetricProviderIsConstructible() {
     PFM_REQUIRE(!metrics.power_watts.has_value() || metrics.power_watts.value() >= 0.0);
 }
 
-static void metricLoggerGroupForwardsToOwnedLoggers() {
+static void metricLoggerGroupForwardsToOwnedLoggers()
+{
     auto first = std::make_unique<CountingMetricLogger>();
     auto second = std::make_unique<CountingMetricLogger>();
     auto* first_ptr = first.get();
@@ -124,9 +134,10 @@ static void metricLoggerGroupForwardsToOwnedLoggers() {
     PFM_REQUIRE(second_ptr->flush_count == 1);
 }
 
-}  // namespace
+} // namespace
 
-void register_logging_tests() {
+void register_logging_tests()
+{
     register_test("console progress logger renders core fields", consoleProgressLoggerRendersCoreFields);
     register_test("csv metric logger writes header and rows", csvMetricLoggerWritesHeaderAndRows);
     register_test("null gpu metric provider returns empty values", nullGpuMetricProviderReturnsEmptyValues);

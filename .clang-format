@@ -1,0 +1,27 @@
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++17
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+BreakBeforeBraces: Allman
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+NamespaceIndentation: None
+PointerAlignment: Left
+ReferenceAlignment: Left
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<((algorithm|array|atomic|chrono|cmath|condition_variable|cstddef|cstdint|cstdio|cstdlib|deque|exception|filesystem|fstream|functional|iomanip|ios|iostream|limits|map|memory|mutex|numeric|optional|queue|random|set|sstream|stdexcept|string|string_view|thread|tuple|type_traits|unordered_map|utility|vector)(/.*)?)>'
+    Priority: 1
+  - Regex: '^<(cuda|cudnn|cublas|torch|ATen|c10|opencv2|gdal|cpl|boost|asp|vw)(/.*)?>'
+    Priority: 2
+  - Regex: '^"'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 2

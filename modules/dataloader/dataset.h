@@ -4,10 +4,12 @@
 
 #include "dataloader/tensor_batch.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class TensorDataset {
-public:
+class TensorDataset
+{
+  public:
     /// Destroys the dataset.
     virtual ~TensorDataset() = default;
 
@@ -22,4 +24,4 @@ public:
     virtual TensorBatch get(size_t index) = 0;
 };
 
-}  // namespace pfm
+} // namespace pfm

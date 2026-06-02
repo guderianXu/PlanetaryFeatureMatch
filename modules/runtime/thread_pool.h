@@ -9,10 +9,12 @@
 
 #include "runtime/blocking_queue.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class ThreadPool {
-public:
+class ThreadPool
+{
+  public:
     /// Creates a fixed-size worker pool.
     ///
     /// @param worker_count Number of worker threads to start.
@@ -38,7 +40,7 @@ public:
     /// Joins all worker threads and rethrows the first worker exception, if any.
     void join();
 
-private:
+  private:
     void workerLoop();
     void captureException();
 
@@ -50,4 +52,4 @@ private:
     bool _joined = false;
 };
 
-}  // namespace pfm
+} // namespace pfm

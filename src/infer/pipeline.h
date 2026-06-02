@@ -2,7 +2,8 @@
 
 #include "cli/commands.h"
 
-namespace pfm {
+namespace pfm
+{
 
 /// Run the training command.
 /// @param options Parsed CLI options containing image_dir, checkpoint, device, epochs, and batch_size.
@@ -29,4 +30,4 @@ int run_eval_command(const CliOptions& options);
 /// @return Zero after writing a loadable checkpoint copy, nonzero when validation or export fails.
 int run_export_command(const CliOptions& options);
 
-}  // namespace pfm
+} // namespace pfm

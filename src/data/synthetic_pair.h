@@ -5,9 +5,11 @@
 
 #include <torch/torch.h>
 
-namespace pfm {
+namespace pfm
+{
 
-enum class SyntheticPairAugmentationProfile {
+enum class SyntheticPairAugmentationProfile
+{
     Mixed,
     RotationOnly,
     Mild,
@@ -29,7 +31,8 @@ SyntheticPairAugmentationProfile parse_synthetic_pair_augmentation_profile(const
 /// @return Stable lowercase profile name.
 std::string synthetic_pair_augmentation_profile_name(SyntheticPairAugmentationProfile profile);
 
-struct SyntheticPairConfig {
+struct SyntheticPairConfig
+{
     float translation_x = 0.0F;
     float translation_y = 0.0F;
     float rotation_degrees = 0.0F;
@@ -44,7 +47,8 @@ struct SyntheticPairConfig {
     double extreme_pair_ratio = 0.2;
 };
 
-struct SyntheticPair {
+struct SyntheticPair
+{
     torch::Tensor view_a;
     torch::Tensor view_b;
     torch::Tensor warp_a_to_b;
@@ -58,4 +62,4 @@ struct SyntheticPair {
 /// @throws std::invalid_argument if image is not a valid CHW image tensor or config contains unsupported values.
 SyntheticPair make_synthetic_pair(const torch::Tensor& image, const SyntheticPairConfig& config);
 
-}  // namespace pfm
+} // namespace pfm

@@ -5,10 +5,12 @@
 
 #include "logging/training_metric.h"
 
-namespace pfm {
+namespace pfm
+{
 
-class MetricLoggerGroup : public TrainingMetricLogger {
-public:
+class MetricLoggerGroup : public TrainingMetricLogger
+{
+  public:
     /// Adds a logger sink owned by this group.
     /// @param logger Logger to add.
     /// @throws std::invalid_argument if logger is null.
@@ -25,8 +27,8 @@ public:
     /// Flushes all loggers.
     void flush() override;
 
-private:
+  private:
     std::vector<std::unique_ptr<TrainingMetricLogger>> _loggers;
 };
 
-}  // namespace pfm
+} // namespace pfm

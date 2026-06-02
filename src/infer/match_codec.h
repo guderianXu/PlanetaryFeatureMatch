@@ -4,9 +4,11 @@
 
 #include <torch/torch.h>
 
-namespace pfm {
+namespace pfm
+{
 
-struct MatchSet {
+struct MatchSet
+{
     torch::Tensor sparse_matches;
     torch::Tensor sparse_scores;
     torch::Tensor points_a;
@@ -26,4 +28,4 @@ void save_match_set(const MatchSet& match_set, const std::string& path);
 /// @throws std::invalid_argument if loading fails or any required tensor is missing.
 MatchSet load_match_set(const std::string& path);
 
-}  // namespace pfm
+} // namespace pfm

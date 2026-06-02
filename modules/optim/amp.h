@@ -3,10 +3,12 @@
 #include <ATen/core/ScalarType.h>
 #include <c10/core/DeviceType.h>
 
-namespace pfm {
+namespace pfm
+{
 
-class AmpAutocastGuard {
-public:
+class AmpAutocastGuard
+{
+  public:
     /// Enables autocast for the lifetime of this guard when requested.
     /// @param enabled Whether autocast should be enabled.
     /// @param device_type Device type, normally CUDA.
@@ -18,11 +20,11 @@ public:
     AmpAutocastGuard& operator=(AmpAutocastGuard&&) = delete;
     ~AmpAutocastGuard();
 
-private:
+  private:
     bool _enabled = false;
     c10::DeviceType _device_type;
     at::ScalarType _previous_dtype;
     bool _previous_enabled = false;
 };
 
-}  // namespace pfm
+} // namespace pfm
