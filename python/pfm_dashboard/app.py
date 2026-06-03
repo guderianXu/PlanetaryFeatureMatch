@@ -1028,8 +1028,16 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
 }
+.live-chart-line-raw {
+  opacity: 0.26;
+  stroke-width: 1.2;
+}
+.live-chart-line-smooth {
+  opacity: 0.96;
+  stroke-width: 2.6;
+}
 .live-chart-dot {
-  opacity: 0.74;
+  opacity: 0.38;
 }
 .live-chart-endpoint {
   stroke: #071018;
@@ -1215,7 +1223,7 @@ function metricFromLatest(latest, names) {
 }
 
 function rowStep(row, index) {
-  return numericValue(row, ['step', 'global_step', 'batch', 'epoch']) || index + 1;
+  return numericValue(row, ['step', 'global_step', 'batch', 'iteration']) || index + 1;
 }
 
 function runMetricRows(metricsPayload, runName) {
@@ -1232,16 +1240,35 @@ function visibleMetricRows(rows) {
 function chartPoints(metricsPayload, selectedRuns, names) {
   return selectedRuns.map((run) => {
     const rows = runMetricRows(metricsPayload, run.name);
-    const visibleRows = visibleMetricRows(rows);
+    const startIndex = Math.max(0, rows.length - LIVE_CHART_WINDOW_BATCHES);
+    const visibleRows = rows.slice(startIndex);
     return {
       name: run.name,
       color: run.backend === 'cpp' ? '#48bfc1' : '#83a8cf',
       points: visibleRows.map((row, index) => ({
-        x: rowStep(row, index),
+        x: startIndex + index + 1,
         y: numericValue(row, names)
       })).filter((point) => point.y !== null)
     };
   }).filter((series) => series.points.length);
+}
+
+function movingAveragePoints(points) {
+  const radius = Math.max(2, Math.min(12, Math.floor(points.length / 28)));
+  return points.map((point, index) => {
+    const start = Math.max(0, index - radius);
+    const end = Math.min(points.length, index + radius + 1);
+    const window = points.slice(start, end);
+    const average = window.reduce((sum, item) => sum + item.y, 0) / Math.max(1, window.length);
+    return {x: point.x, y: average};
+  });
+}
+
+function pathForPoints(points, xScale, yScale) {
+  return points.map((point, index) => {
+    const command = index === 0 ? 'M' : 'L';
+    return `${command}${xScale(point.x).toFixed(1)},${yScale(point.y).toFixed(1)}`;
+  }).join(' ');
 }
 
 function renderLiveChart(svg, seriesList) {
@@ -1258,8 +1285,11 @@ function renderLiveChart(svg, seriesList) {
   }
   const xMin = Math.min(...points.map((point) => point.x));
   const xMax = Math.max(...points.map((point) => point.x));
-  const yMin = Math.min(...points.map((point) => point.y));
-  const yMax = Math.max(...points.map((point) => point.y));
+  const rawYMin = Math.min(...points.map((point) => point.y));
+  const rawYMax = Math.max(...points.map((point) => point.y));
+  const yPadding = Math.max(1.0e-9, (rawYMax - rawYMin) * 0.08);
+  const yMin = rawYMin - yPadding;
+  const yMax = rawYMax + yPadding;
   const xScale = (value) => pad.left + ((value - xMin) / Math.max(1, xMax - xMin)) * plotW;
   const yScale = (value) => pad.top + (1 - ((value - yMin) / Math.max(1e-9, yMax - yMin))) * plotH;
   const guides = [0.25, 0.5, 0.75].map((ratio) => {
@@ -1267,11 +1297,10 @@ function renderLiveChart(svg, seriesList) {
     return `<line class="live-chart-guide" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}"></line>`;
   }).join('');
   const lines = seriesList.map((series) => {
-    const path = series.points.map((point, index) => {
-      const command = index === 0 ? 'M' : 'L';
-      return `${command}${xScale(point.x).toFixed(1)},${yScale(point.y).toFixed(1)}`;
-    }).join(' ');
-    return `<path class="live-chart-line" d="${path}" stroke="${series.color}"></path>`;
+    const rawPath = pathForPoints(series.points, xScale, yScale);
+    const smoothPath = pathForPoints(movingAveragePoints(series.points), xScale, yScale);
+    return `<path class="live-chart-line live-chart-line-raw" d="${rawPath}" stroke="${series.color}"></path>
+      <path class="live-chart-line live-chart-line-smooth" d="${smoothPath}" stroke="${series.color}"></path>`;
   }).join('');
   const dots = seriesList.map((series) => {
     const stride = Math.max(1, Math.ceil(series.points.length / LIVE_CHART_MAX_DOTS));
