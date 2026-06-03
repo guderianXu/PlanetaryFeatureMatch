@@ -54,7 +54,8 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     app->footer(
         "\nCommon command options:\n"
         "  train --image-dir images --checkpoint model.pt [--epochs 1] [--batch-size 1] [--device cpu] "
-        "[--init-checkpoint base.pt] [--resize 512] [--pairs-per-image 1] [--max-train-batches 0] "
+        "[--init-checkpoint base.pt] [--resize 512] [--training-crop-size 0] [--pairs-per-image 1] "
+        "[--max-train-batches 0] "
         "[--augmentation-profile mixed] "
         "[--augmentation-curriculum] [--rotation-step-degrees 15] "
         "[--extreme-pair-ratio 0.2] [--learning-rate 0.0003] [--lr-warmup-steps 0] "
@@ -100,6 +101,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--epochs", options.epochs, "Training epochs");
     train->add_option("--batch-size", options.batch_size, "Training batch size");
     train->add_option("--resize", options.resize, "Resize training image max edge; use 0 to keep original size");
+    train
+        ->add_option("--training-crop-size", options.training_crop_size,
+                     "Crop pair archive samples to a local window before resize; 0 disables cropping")
+        ->check(CLI::NonNegativeNumber);
     train->add_option("--base-channels", options.base_channels, "Backbone base channel count")
         ->check(CLI::PositiveNumber);
     train->add_option("--descriptor-dim", options.descriptor_dim, "Descriptor dimension")->check(CLI::PositiveNumber);

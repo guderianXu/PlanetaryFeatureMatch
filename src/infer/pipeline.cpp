@@ -737,6 +737,7 @@ int run_train_command(const CliOptions& options)
         config.epochs = options.epochs;
         config.batch_size = options.batch_size;
         config.resize = options.resize;
+        config.training_crop_size = options.training_crop_size;
         config.base_channels = options.base_channels;
         config.descriptor_dim = options.descriptor_dim;
         config.graph_hidden_dim = options.graph_hidden_dim;

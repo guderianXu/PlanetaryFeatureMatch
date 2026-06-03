@@ -44,6 +44,8 @@ struct TrainConfig
     double temperature = 0.07;
     /// 训练图像缩放上限；0 或负值表示不缩放。
     int resize = 512;
+    /// pair archive 训练时先裁剪的局部窗口大小；0 表示不裁剪。
+    int training_crop_size = 0;
     /// 每张图像在线生成的影像对数量。
     int pairs_per_image = 1;
     /// 每个 epoch 最多训练 batch 数；0 表示不限制。

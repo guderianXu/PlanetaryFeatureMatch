@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>PFM Lab Dashboard launch</title>
+</head>
+<body>
+  <h1>PFM Lab Dashboard</h1>
+  <p>时间：2026-06-03</p>
+  <p>用途：本地工程控制台，用于启动 Python/C++ 训练、查看长任务日志和对比 runs 指标。</p>
+  <h2>启动命令</h2>
+  <pre>setsid runs/dashboard_launch_20260603.sh &gt; runs/dashboard_launch_20260603.log 2&gt;&amp;1 &amp;</pre>
+  <h2>访问地址</h2>
+  <p><code>http://127.0.0.1:7860</code></p>
+  <h2>范围</h2>
+  <ul>
+    <li>读取 <code>runs/</code> 下的 <code>metrics.csv</code>、<code>train.log</code>、<code>run.html</code> 和 checkpoint。</li>
+    <li>生成新的训练脚本和 HTML 记录。</li>
+    <li>启动 Python、C++ 或 Python+C++ 对比训练。</li>
+  </ul>
+</body>
+</html>

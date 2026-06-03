@@ -260,6 +260,9 @@ target_link_libraries(pfm_print_v21_state_keys PRIVATE pfm)
 add_executable(pfm_pair_cache_training_smoke tools/pair_cache_training_smoke.cpp)
 target_link_libraries(pfm_pair_cache_training_smoke PRIVATE pfm)
 
+add_executable(pfm_texture_descriptor_diagnostics tools/texture_descriptor_diagnostics.cpp)
+target_link_libraries(pfm_texture_descriptor_diagnostics PRIVATE pfm)
+
 add_executable(pfm_tests
     tests/test_main.cpp
     src/cli/commands_test.cpp

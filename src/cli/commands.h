@@ -59,6 +59,7 @@ struct CliOptions
     int epochs = 1;
     int batch_size = 1;
     int resize = 512;
+    int training_crop_size = 0;
     int base_channels = 32;
     int descriptor_dim = 128;
     int graph_hidden_dim = 256;

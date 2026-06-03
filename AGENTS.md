@@ -127,6 +127,17 @@ cmake --build 辅助软件/数据模拟/build -j$(nproc)
 - 比较实验要保存 CSV 和 HTML 可视化报告，便于回查哪组参数产生了结果。面向人工阅读的日志、实验记录、阶段记录、诊断报告和总结统一使用 HTML 格式。
 - 长任务 stdout/stderr 可保留原始 `.log` 方便 tail 和排错，但同一任务应补充 `.html` 汇总页，记录命令、环境、输入输出路径、关键进度、异常和结论。
 
+## Dashboard
+
+- 本项目提供本地工程控制台 `PFM Lab Dashboard`，用于启动 Python/C++ 训练、查看日志和对比 `runs/` 指标。
+- 启动命令：
+  ```bash
+  setsid runs/dashboard_launch_20260603.sh > runs/dashboard_launch_20260603.log 2>&1 &
+  ```
+- 默认访问地址：`http://127.0.0.1:7860`。
+- Dashboard 只管理项目本地 `runs/` 文件，不替代命令行训练；它生成的训练脚本、日志、PID 和 HTML 记录仍应保留在对应 `runs/<实验名>/` 目录。
+- 从 Dashboard 启动训练时，要显式选择 Python、C++ 或 Python+C++ 对比后端，并检查 cache、checkpoint、crop、resize、batch、epoch、workers、prefetch 和 memory cache 参数。
+
 ## 文档与沟通
 
 - 对用户用中文简洁说明做了什么、验证了什么、还有什么风险。

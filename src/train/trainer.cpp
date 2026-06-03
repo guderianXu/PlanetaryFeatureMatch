@@ -374,6 +374,10 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("resize must be non-negative");
     }
+    if (config.training_crop_size < 0)
+    {
+        throw std::invalid_argument("training_crop_size must be non-negative");
+    }
     if (config.pairs_per_image <= 0)
     {
         throw std::invalid_argument("pairs_per_image must be positive");
@@ -978,6 +982,103 @@ torch::Tensor resize_training_valid_mask(const torch::Tensor& valid_mask, int64_
         .contiguous();
 }
 
+int64_t clamped_crop_origin(const torch::Tensor& center, int64_t crop_size, int64_t full_size)
+{
+    if (crop_size >= full_size)
+    {
+        return 0;
+    }
+    const auto center_value = center.detach().to(torch::kCPU, torch::kFloat32).item<float>();
+    const auto origin = static_cast<int64_t>(std::round(center_value - static_cast<double>(crop_size - 1) * 0.5));
+    return std::max<int64_t>(0, std::min<int64_t>(origin, full_size - crop_size));
+}
+
+int64_t uniform_crop_origin(int64_t crop_size, int64_t full_size, const torch::Device& device)
+{
+    if (crop_size >= full_size)
+    {
+        return 0;
+    }
+    const auto limit = full_size - crop_size + 1;
+    return torch::randint(limit, {1}, torch::TensorOptions().dtype(torch::kLong).device(device)).item<int64_t>();
+}
+
+SyntheticPair crop_training_pair(const SyntheticPair& pair, int64_t crop_size)
+{
+    using torch::indexing::Slice;
+
+    if (crop_size <= 0)
+    {
+        return pair;
+    }
+    const auto height_a = pair.view_a.size(1);
+    const auto width_a = pair.view_a.size(2);
+    const auto height_b = pair.view_b.size(1);
+    const auto width_b = pair.view_b.size(2);
+    const auto crop_h_a = std::min<int64_t>(crop_size, height_a);
+    const auto crop_w_a = std::min<int64_t>(crop_size, width_a);
+    const auto crop_h_b = std::min<int64_t>(crop_size, height_b);
+    const auto crop_w_b = std::min<int64_t>(crop_size, width_b);
+    if (crop_h_a == height_a && crop_w_a == width_a && crop_h_b == height_b && crop_w_b == width_b)
+    {
+        return pair;
+    }
+
+    auto finite_full_warp = torch::isfinite(pair.warp_a_to_b).all(-1);
+    auto valid_full = pair.valid_mask.to(torch::kBool).logical_and(finite_full_warp);
+    int64_t ax0 = 0;
+    int64_t ay0 = 0;
+    if (valid_full.any().item<bool>())
+    {
+        auto valid_yx = torch::nonzero(valid_full);
+        auto selected_index =
+            torch::randint(valid_yx.size(0), {1}, torch::TensorOptions().dtype(torch::kLong).device(valid_yx.device()))
+                .item<int64_t>();
+        auto selected_yx = valid_yx.index({selected_index});
+        ax0 = clamped_crop_origin(selected_yx.index({1}).to(torch::kFloat32), crop_w_a, width_a);
+        ay0 = clamped_crop_origin(selected_yx.index({0}).to(torch::kFloat32), crop_h_a, height_a);
+    }
+    else
+    {
+        ax0 = uniform_crop_origin(crop_w_a, width_a, pair.view_a.device());
+        ay0 = uniform_crop_origin(crop_h_a, height_a, pair.view_a.device());
+    }
+    const auto ax1 = ax0 + crop_w_a;
+    const auto ay1 = ay0 + crop_h_a;
+
+    auto warp_crop_full_b = pair.warp_a_to_b.index({Slice(ay0, ay1), Slice(ax0, ax1), Slice()});
+    auto valid_crop = pair.valid_mask.index({Slice(ay0, ay1), Slice(ax0, ax1)}).to(torch::kBool).clone();
+    auto finite_warp = torch::isfinite(warp_crop_full_b).all(-1);
+    auto valid_for_center = valid_crop.logical_and(finite_warp);
+    int64_t bx0 = 0;
+    int64_t by0 = 0;
+    if (valid_for_center.any().item<bool>())
+    {
+        auto center_b = warp_crop_full_b.index({valid_for_center}).mean(0);
+        bx0 = clamped_crop_origin(center_b.index({0}), crop_w_b, width_b);
+        by0 = clamped_crop_origin(center_b.index({1}), crop_h_b, height_b);
+    }
+    else
+    {
+        bx0 = std::max<int64_t>(0, std::min<int64_t>(ax0, width_b - crop_w_b));
+        by0 = std::max<int64_t>(0, std::min<int64_t>(ay0, height_b - crop_h_b));
+    }
+    const auto bx1 = bx0 + crop_w_b;
+    const auto by1 = by0 + crop_h_b;
+
+    auto warp = warp_crop_full_b.clone();
+    warp.index_put_({Slice(), Slice(), 0}, warp.index({Slice(), Slice(), 0}) - static_cast<double>(bx0));
+    warp.index_put_({Slice(), Slice(), 1}, warp.index({Slice(), Slice(), 1}) - static_cast<double>(by0));
+    valid_crop = valid_crop.logical_and(finite_warp)
+                     .logical_and(warp.index({Slice(), Slice(), 0}).ge(0.0))
+                     .logical_and(warp.index({Slice(), Slice(), 0}).le(static_cast<double>(crop_w_b - 1)))
+                     .logical_and(warp.index({Slice(), Slice(), 1}).ge(0.0))
+                     .logical_and(warp.index({Slice(), Slice(), 1}).le(static_cast<double>(crop_h_b - 1)));
+    return SyntheticPair{pair.view_a.index({Slice(), Slice(ay0, ay1), Slice(ax0, ax1)}).contiguous(),
+                         pair.view_b.index({Slice(), Slice(by0, by1), Slice(bx0, bx1)}).contiguous(),
+                         warp.contiguous(), valid_crop.contiguous()};
+}
+
 SyntheticPair limit_training_pair_size(const SyntheticPair& pair, int64_t resize)
 {
     const auto original_height = pair.view_a.size(1);
@@ -994,6 +1095,12 @@ SyntheticPair limit_training_pair_size(const SyntheticPair& pair, int64_t resize
     return SyntheticPair{view_a, view_b, resize_training_warp(pair.warp_a_to_b, target_height, target_width),
                          resize_training_valid_mask(pair.valid_mask, target_height, target_width)};
 }
+
+SyntheticPair prepare_training_pair_size(const SyntheticPair& pair, int64_t training_crop_size, int64_t resize)
+{
+    return limit_training_pair_size(crop_training_pair(pair, training_crop_size), resize);
+}
+
 
 torch::Tensor make_descriptor_sample_indices(const torch::Tensor& descriptors)
 {
@@ -3791,13 +3898,15 @@ class IndexedSyntheticPairCacheTensorDataset : public TensorDataset
 };
 
 std::vector<SyntheticPair> load_cached_pairs(const CompositeSyntheticPairCacheDataset& cache_dataset,
-                                             std::size_t offset, std::size_t end, torch::Device device, int64_t resize)
+                                             std::size_t offset, std::size_t end, torch::Device device,
+                                             int64_t training_crop_size, int64_t resize)
 {
     std::vector<SyntheticPair> pairs;
     pairs.reserve(end - offset);
     for (std::size_t index = offset; index < end; ++index)
     {
-        pairs.push_back(limit_training_pair_size(move_pair_to_device(cache_dataset.load(index), device), resize));
+        pairs.push_back(prepare_training_pair_size(move_pair_to_device(cache_dataset.load(index), device),
+                                                   training_crop_size, resize));
     }
     return pairs;
 }
@@ -3920,9 +4029,25 @@ torch::Tensor sample_python_descriptor_points(const torch::Tensor& descriptor_ma
         .contiguous();
 }
 
-PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& warp, const torch::Tensor& valid_mask,
+torch::Tensor center_intensity_for_points(const torch::Tensor& image, const torch::Tensor& points)
+{
+    if (points.numel() == 0)
+    {
+        return image.new_empty({0});
+    }
+    auto intensity = image.mean(0);
+    const auto height = intensity.size(0);
+    const auto width = intensity.size(1);
+    auto rounded = points.round().to(torch::kLong);
+    auto x = rounded.index({torch::indexing::Slice(), 0}).clamp(0, width - 1);
+    auto y = rounded.index({torch::indexing::Slice(), 1}).clamp(0, height - 1);
+    return intensity.index({y, x});
+}
+
+PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& view_a, const torch::Tensor& view_b,
+                                                          const torch::Tensor& warp, const torch::Tensor& valid_mask,
                                                           int64_t batch, int64_t feature_height,
-                                                          int64_t feature_width, int64_t count)
+                                                          int64_t feature_width, int64_t count, double min_intensity)
 {
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
@@ -3943,13 +4068,26 @@ PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& w
     {
         return PythonCompareSample{warp.new_empty({0, 2}), warp.new_empty({0, 2})};
     }
-    const auto take = std::min<int64_t>(count, valid_indices.size(0));
-    auto order = torch::randperm(valid_indices.size(0), valid_indices.options()).narrow(0, 0, take);
-    auto selected = valid_indices.index_select(0, order);
-    auto y = torch::floor_divide(selected, image_width).to(warp.dtype());
-    auto x = selected.remainder(image_width).to(warp.dtype());
+    auto y = torch::floor_divide(valid_indices, image_width).to(warp.dtype());
+    auto x = valid_indices.remainder(image_width).to(warp.dtype());
     auto points_a_image = torch::stack({x, y}, 1).contiguous();
-    auto points_b_image = warp_item.reshape({image_height * image_width, 2}).index_select(0, selected).contiguous();
+    auto points_b_image = warp_item.reshape({image_height * image_width, 2}).index_select(0, valid_indices).contiguous();
+    if (min_intensity > 0.0 && points_a_image.numel() > 0)
+    {
+        auto textured =
+            center_intensity_for_points(view_a.index({batch}), points_a_image).gt(min_intensity).logical_and(
+                center_intensity_for_points(view_b.index({batch}), points_b_image).gt(min_intensity));
+        points_a_image = points_a_image.index({textured});
+        points_b_image = points_b_image.index({textured});
+    }
+    if (points_a_image.numel() == 0)
+    {
+        return PythonCompareSample{warp.new_empty({0, 2}), warp.new_empty({0, 2})};
+    }
+    const auto take = std::min<int64_t>(count, points_a_image.size(0));
+    auto order = torch::randperm(points_a_image.size(0), valid_indices.options()).narrow(0, 0, take);
+    points_a_image = points_a_image.index_select(0, order);
+    points_b_image = points_b_image.index_select(0, order);
     return PythonCompareSample{
         scale_image_points_to_feature_grid(points_a_image, image_height, image_width, feature_height, feature_width),
         scale_image_points_to_feature_grid(points_b_image, image_height, image_width, feature_height, feature_width)};
@@ -4062,7 +4200,6 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                                                          SparseHeadOutput sparse_b, const DenseHeadOutput& dense,
                                                          const TrainConfig& config)
 {
-    (void)view_b;
     const auto zero = torch::zeros({}, sparse_a.descriptors.options());
     std::vector<torch::Tensor> descriptor_losses;
     std::vector<torch::Tensor> graph_losses;
@@ -4077,8 +4214,9 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
     graph_losses.reserve(static_cast<size_t>(batch_size));
     for (int64_t batch = 0; batch < batch_size; ++batch)
     {
-        auto sample = sample_python_compare_correspondences(warp, valid_mask, batch, sparse_a.descriptors.size(2),
-                                                            sparse_a.descriptors.size(3), config.samples_per_pair);
+        auto sample = sample_python_compare_correspondences(view_a, view_b, warp, valid_mask, batch,
+                                                            sparse_a.descriptors.size(2), sparse_a.descriptors.size(3),
+                                                            config.samples_per_pair, config.min_keypoint_intensity);
         if (sample.points_a.size(0) == 0)
         {
             continue;
@@ -4555,7 +4693,7 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     SparseHeadOutput sparse_b;
     DenseHeadOutput dense;
     {
-        const auto use_amp = view_a.is_cuda();
+        const auto use_amp = view_a.is_cuda() && training_profile != TrainingProfile::PythonCompare;
         AmpAutocastGuard autocast_guard(use_amp, c10::DeviceType::CUDA, at::kBFloat16);
         feature_pyramid_a = modules.backbone->forward(view_a);
         feature_pyramid_b = modules.backbone->forward(view_b);
@@ -5329,7 +5467,8 @@ DenseHeadOutput float_dense_output(DenseHeadOutput output)
     return output;
 }
 
-std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Device device, int64_t resize)
+std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Device device, int64_t training_crop_size,
+                                                   int64_t resize)
 {
     auto view_a = batch.at("view_a").to(device);
     auto view_b = batch.at("view_b").to(device);
@@ -5339,10 +5478,10 @@ std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Dev
     pairs.reserve(static_cast<std::size_t>(view_a.size(0)));
     for (int64_t index = 0; index < view_a.size(0); ++index)
     {
-        pairs.push_back(limit_training_pair_size(
+        pairs.push_back(prepare_training_pair_size(
             SyntheticPair{view_a.index({index}).contiguous(), view_b.index({index}).contiguous(),
                           warp_a_to_b.index({index}).contiguous(), valid_mask.index({index}).contiguous()},
-            resize));
+            training_crop_size, resize));
     }
     return pairs;
 }
@@ -6119,6 +6258,7 @@ TrainResult train_model(const TrainConfig& config)
               << " validation_images=" << val_images << " cache_entries=" << cache_specs.size()
               << " pair_archive_dirs=" << config.pair_cache_dirs.size() << " pairs_per_epoch=" << epoch_size
               << " pairs_per_image=" << config.pairs_per_image << " training_profile=" << config.training_profile
+              << " training_crop_size=" << config.training_crop_size
               << " memory_cache_items=" << config.pair_memory_cache_size
               << " dataloader_workers=" << config.dataloader_workers
               << " prefetch_batches=" << config.prefetch_batches
@@ -6232,7 +6372,8 @@ TrainResult train_model(const TrainConfig& config)
                 {
                     throw std::runtime_error("online dataloader exhausted before epoch end");
                 }
-                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.resize);
+                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
+                                                config.resize);
             }
             else if (pair_archive_loader)
             {
@@ -6241,7 +6382,8 @@ TrainResult train_model(const TrainConfig& config)
                 {
                     throw std::runtime_error("pair archive dataloader exhausted before epoch end");
                 }
-                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.resize);
+                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
+                                                config.resize);
             }
             else if (cache_loader)
             {
@@ -6250,11 +6392,13 @@ TrainResult train_model(const TrainConfig& config)
                 {
                     throw std::runtime_error("cache dataloader exhausted before epoch end");
                 }
-                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.resize);
+                pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
+                                                config.resize);
             }
             else if (cache_dataset)
             {
-                pairs = load_cached_pairs(*cache_dataset, offset, end, device, config.resize);
+                pairs = load_cached_pairs(*cache_dataset, offset, end, device, config.training_crop_size,
+                                          config.resize);
             }
             else
             {

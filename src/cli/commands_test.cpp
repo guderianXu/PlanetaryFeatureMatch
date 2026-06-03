@@ -129,6 +129,8 @@ static void parse_train_command()
         "cuda:0",
         "--resize",
         "512",
+        "--training-crop-size",
+        "384",
         "--pairs-per-image",
         "3",
         "--max-train-batches",
@@ -215,6 +217,7 @@ static void parse_train_command()
     PFM_REQUIRE(parsed.batch_size == 4);
     PFM_REQUIRE(parsed.device == "cuda:0");
     PFM_REQUIRE(parsed.resize == 512);
+    PFM_REQUIRE(parsed.training_crop_size == 384);
     PFM_REQUIRE(parsed.pairs_per_image == 3);
     PFM_REQUIRE(parsed.max_train_batches == 5);
     PFM_REQUIRE(parsed.augmentation_profile == "rotation-only");
