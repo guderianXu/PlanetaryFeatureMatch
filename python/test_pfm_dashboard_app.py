@@ -29,6 +29,11 @@ class DashboardAppTest(unittest.TestCase):
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["runs"][0]["name"], "python_sample")
                 self.assertEqual(payload["runs"][0]["progress_label"], "1/2 steps")
+                with urllib.request.urlopen(base + "/static/dashboard.css", timeout=5) as response:
+                    self.assertEqual(response.headers.get_content_type(), "text/css")
+                    self.assertIn(b"--bg: #0b1015", response.read())
+                with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
+                    self.assertEqual(response.headers.get_content_type(), "application/javascript")
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
                 self.assertIn(b"Progress", runs_html)

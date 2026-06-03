@@ -376,9 +376,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_text(self, text: str) -> None:
+        self._send_payload(text, "text/plain; charset=utf-8")
+
+    def _send_payload(self, text: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         payload = text.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -415,9 +418,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             report = root / "runs" / name / "run.html"
             self._send_html(report.read_text(encoding="utf-8") if report.exists() else "missing report")
         elif parsed.path == "/static/dashboard.css":
-            self._send_text(STYLE)
+            self._send_payload(STYLE, "text/css; charset=utf-8")
         elif parsed.path == "/static/dashboard.js":
-            self._send_text(SCRIPT)
+            self._send_payload(SCRIPT, "application/javascript; charset=utf-8")
         else:
             self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
 
@@ -491,36 +494,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 STYLE = """
 :root {
-  --bg: #080c12;
-  --bg-grid: rgba(98, 118, 138, 0.12);
-  --sidebar: #0b1017;
-  --sidebar-line: rgba(175, 196, 218, 0.12);
-  --surface: #111923;
-  --surface-raised: #162131;
-  --surface-soft: #0d141d;
-  --surface-hot: #172b2c;
-  --line: rgba(169, 190, 212, 0.16);
-  --line-strong: rgba(180, 206, 231, 0.28);
-  --text: #edf4fb;
-  --muted: #91a1b4;
-  --muted-strong: #b8c5d4;
-  --accent: #1dd6c3;
-  --accent-strong: #72f2df;
-  --blue: #70a7ff;
-  --green: #45dc8c;
-  --amber: #f0a84a;
-  --red: #ff7a66;
-  --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
-  --inner: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --bg: #0b1015;
+  --sidebar: #0e151b;
+  --sidebar-line: #22303b;
+  --surface: #141c24;
+  --surface-raised: #18232c;
+  --surface-soft: #10171e;
+  --surface-hot: #172728;
+  --line: #273542;
+  --line-strong: #354656;
+  --text: #dfe7ee;
+  --muted: #82909f;
+  --muted-strong: #a8b5c2;
+  --accent: #48bfc1;
+  --accent-strong: #7bd6d4;
+  --blue: #83a8cf;
+  --green: #79bf70;
+  --amber: #d37b49;
+  --red: #cf664f;
+  --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --inner: inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   background:
-    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(135deg, #080c12 0%, #0c121a 47%, #11130f 100%);
-  background-size: 28px 28px, 28px 28px, auto;
+    radial-gradient(circle at 72% 8%, rgba(72, 191, 193, 0.05), transparent 30%),
+    linear-gradient(135deg, #0b1015 0%, #101821 54%, #0b1015 100%);
   color: var(--text);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -529,7 +529,7 @@ a:hover { text-decoration: underline; }
 .app-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
 .sidebar {
   background:
-    linear-gradient(180deg, rgba(29, 214, 195, 0.06), transparent 260px),
+    linear-gradient(180deg, rgba(72, 191, 193, 0.055), transparent 260px),
     var(--sidebar);
   color: var(--text);
   padding: 22px 18px;
@@ -550,14 +550,14 @@ a:hover { text-decoration: underline; }
   place-items: center;
   border-radius: 8px;
   background:
-    linear-gradient(135deg, rgba(29, 214, 195, 0.18), rgba(112, 167, 255, 0.08)),
-    #111923;
-  border: 1px solid rgba(114, 242, 223, 0.34);
+    linear-gradient(135deg, rgba(72, 191, 193, 0.15), rgba(131, 168, 207, 0.07)),
+    #141c24;
+  border: 1px solid rgba(123, 214, 212, 0.22);
   color: var(--accent-strong);
   font-size: 13px;
   font-weight: 800;
   letter-spacing: 0;
-  box-shadow: 0 0 28px rgba(29, 214, 195, 0.18);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
 }
 .brand-mark span { transform: translateY(-1px); }
 .brand-title { font-size: 17px; font-weight: 750; }
@@ -573,8 +573,8 @@ nav { display: grid; gap: 7px; }
 }
 .nav-item:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--line); text-decoration: none; }
 .nav-item.active {
-  background: linear-gradient(135deg, rgba(29, 214, 195, 0.16), rgba(112, 167, 255, 0.08));
-  border-color: rgba(114, 242, 223, 0.34);
+  background: linear-gradient(135deg, rgba(72, 191, 193, 0.13), rgba(131, 168, 207, 0.06));
+  border-color: rgba(123, 214, 212, 0.24);
   color: #f7fffd;
   box-shadow: var(--inner);
 }
@@ -596,7 +596,7 @@ nav { display: grid; gap: 7px; }
   justify-content: space-between;
   align-items: center;
   gap: 18px;
-  background: rgba(8, 12, 18, 0.78);
+  background: rgba(11, 16, 21, 0.84);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(10px);
   position: sticky;
@@ -614,8 +614,8 @@ main { padding: 22px 28px 36px; }
   padding: 0 12px;
   border-radius: 6px;
   color: var(--accent-strong);
-  background: rgba(29, 214, 195, 0.09);
-  border: 1px solid rgba(114, 242, 223, 0.24);
+  background: rgba(72, 191, 193, 0.08);
+  border: 1px solid rgba(123, 214, 212, 0.2);
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
@@ -635,10 +635,10 @@ main { padding: 22px 28px 36px; }
   line-height: 1;
 }
 .button.primary, button[type="submit"] {
-  background: linear-gradient(135deg, #16c7b6, #0f8c87);
-  color: #03110f;
-  border-color: rgba(114, 242, 223, 0.38);
-  box-shadow: 0 10px 28px rgba(29, 214, 195, 0.22);
+  background: linear-gradient(135deg, #4fbec0, #2f898b);
+  color: #071113;
+  border-color: rgba(123, 214, 212, 0.25);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
 }
 .button.primary:hover, button[type="submit"]:hover { filter: brightness(1.08); text-decoration: none; }
 .button.secondary { background: rgba(255, 255, 255, 0.04); color: var(--text); border-color: var(--line-strong); }
@@ -662,10 +662,10 @@ main { padding: 22px 28px 36px; }
   justify-content: space-between;
   gap: 18px;
   padding: 24px;
-  border: 1px solid rgba(114, 242, 223, 0.22);
+  border: 1px solid rgba(123, 214, 212, 0.16);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(29, 214, 195, 0.11), rgba(112, 167, 255, 0.05) 48%, rgba(240, 168, 74, 0.07)),
+    linear-gradient(90deg, rgba(72, 191, 193, 0.09), rgba(131, 168, 207, 0.05) 48%, rgba(211, 123, 73, 0.055)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent),
     #101923;
   box-shadow: var(--shadow);
@@ -677,8 +677,8 @@ main { padding: 22px 28px 36px; }
   position: absolute;
   inset: auto 0 0;
   height: 2px;
-  background: linear-gradient(90deg, var(--accent), transparent 35%, var(--amber));
-  opacity: 0.78;
+  background: linear-gradient(90deg, var(--accent), transparent 42%, var(--amber));
+  opacity: 0.52;
 }
 .hero-panel h2 { margin: 0; font-size: 26px; line-height: 1.15; }
 .metric-grid {
@@ -709,7 +709,7 @@ main { padding: 22px 28px 36px; }
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, var(--accent), rgba(112, 167, 255, 0.3));
+  background: linear-gradient(90deg, var(--accent), rgba(131, 168, 207, 0.26));
 }
 .metric-card span { display: block; color: var(--muted-strong); font-size: 12px; font-weight: 750; text-transform: uppercase; }
 .metric-card strong { display: block; margin-top: 8px; font-size: 27px; line-height: 1; color: #ffffff; }
@@ -752,15 +752,15 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   font-weight: 800;
   text-transform: uppercase;
 }
-.backend-python { background: rgba(112, 167, 255, 0.12); color: #a9c8ff; border: 1px solid rgba(112, 167, 255, 0.25); }
-.backend-cpp { background: rgba(69, 220, 140, 0.12); color: #a8f2c8; border: 1px solid rgba(69, 220, 140, 0.25); }
+.backend-python { background: rgba(131, 168, 207, 0.12); color: #b8cde4; border: 1px solid rgba(131, 168, 207, 0.24); }
+.backend-cpp { background: rgba(121, 191, 112, 0.11); color: #b9ddb2; border: 1px solid rgba(121, 191, 112, 0.24); }
 .backend-unknown { background: rgba(145, 161, 180, 0.12); color: #c5d1df; border: 1px solid rgba(145, 161, 180, 0.22); }
-.status-running { background: rgba(29, 214, 195, 0.13); color: var(--accent-strong); border: 1px solid rgba(114, 242, 223, 0.32); }
+.status-running { background: rgba(72, 191, 193, 0.12); color: var(--accent-strong); border: 1px solid rgba(123, 214, 212, 0.28); }
 .status-done { background: rgba(145, 161, 180, 0.12); color: #cbd6e3; border: 1px solid rgba(145, 161, 180, 0.2); }
-.status-warn { background: rgba(240, 168, 74, 0.13); color: #ffd18c; border: 1px solid rgba(240, 168, 74, 0.28); }
+.status-warn { background: rgba(211, 123, 73, 0.13); color: #e8a978; border: 1px solid rgba(211, 123, 73, 0.26); }
 .status-muted { background: rgba(145, 161, 180, 0.09); color: #9dadbf; border: 1px solid rgba(145, 161, 180, 0.16); }
 .quality-bar { width: 96px; height: 7px; background: rgba(255, 255, 255, 0.08); border-radius: 999px; overflow: hidden; }
-.quality-bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--amber)); border-radius: inherit; }
+.quality-bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--amber)); border-radius: inherit; opacity: 0.9; }
 .progress-cell {
   min-width: 142px;
   display: grid;
@@ -782,8 +782,8 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   display: block;
   height: 100%;
   min-width: 2px;
-  background: linear-gradient(90deg, #1dd6c3, #70a7ff);
-  box-shadow: 0 0 18px rgba(29, 214, 195, 0.28);
+  background: linear-gradient(90deg, #48bfc1, #83a8cf);
+  box-shadow: none;
   border-radius: inherit;
 }
 .row-actions { color: var(--muted); }
@@ -817,10 +817,10 @@ input, select, textarea {
 }
 textarea { resize: vertical; min-height: 88px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 input::placeholder, textarea::placeholder { color: #617085; }
-input:focus, select:focus, textarea:focus { outline: 2px solid rgba(29, 214, 195, 0.2); border-color: rgba(114, 242, 223, 0.55); }
+input:focus, select:focus, textarea:focus { outline: 2px solid rgba(72, 191, 193, 0.16); border-color: rgba(123, 214, 212, 0.45); }
 .quick-presets { display: flex; gap: 8px; margin-top: 14px; }
 .quick-presets button { background: rgba(255, 255, 255, 0.04); color: var(--text); border-color: var(--line); }
-.quick-presets button:hover { border-color: rgba(114, 242, 223, 0.36); color: var(--accent-strong); }
+.quick-presets button:hover { border-color: rgba(123, 214, 212, 0.28); color: var(--accent-strong); }
 .sticky-submit {
   grid-column: 1 / -1;
   position: sticky;
@@ -831,13 +831,13 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(29, 214, 195
   gap: 16px;
   padding: 14px 16px;
   background: rgba(13, 20, 29, 0.92);
-  border: 1px solid rgba(114, 242, 223, 0.22);
+  border: 1px solid rgba(123, 214, 212, 0.18);
   border-radius: 8px;
   box-shadow: 0 -18px 44px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(10px);
 }
 .sticky-submit span { color: var(--muted); font-size: 13px; }
-.notice { padding: 12px 14px; margin: 0 0 16px; background: rgba(29, 214, 195, 0.12); border: 1px solid rgba(114, 242, 223, 0.28); color: var(--accent-strong); border-radius: 8px; font-weight: 650; }
+.notice { padding: 12px 14px; margin: 0 0 16px; background: rgba(72, 191, 193, 0.1); border: 1px solid rgba(123, 214, 212, 0.22); color: var(--accent-strong); border-radius: 8px; font-weight: 650; }
 .compare-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; }
 .compare-picker select { min-height: 420px; }
 .chart-panel { height: 580px; }
@@ -913,7 +913,7 @@ async function loadCompareChart() {
   }
   const response = await fetch('/api/metrics?' + runs.map(run => 'runs=' + encodeURIComponent(run)).join('&'));
   const payload = await response.json();
-  const colors = ['#1dd6c3', '#70a7ff', '#f0a84a', '#ff7a66', '#b69cff'];
+  const colors = ['#48bfc1', '#83a8cf', '#d37b49', '#79bf70', '#a58bbd'];
   const datasets = [];
   runs.forEach((run, index) => {
     const rows = (payload.metrics[run] || {}).rows || [];
@@ -937,7 +937,7 @@ async function loadCompareChart() {
   const yMax = Math.max(...allPoints.map(point => point.y));
   const xScale = (value) => padding.left + ((value - xMin) / Math.max(1, xMax - xMin)) * plotWidth;
   const yScale = (value) => padding.top + (1 - ((value - yMin) / Math.max(1e-9, yMax - yMin))) * plotHeight;
-  context.strokeStyle = 'rgba(169, 190, 212, 0.22)';
+  context.strokeStyle = 'rgba(168, 181, 194, 0.22)';
   context.lineWidth = 1;
   context.beginPath();
   context.moveTo(padding.left, padding.top);
