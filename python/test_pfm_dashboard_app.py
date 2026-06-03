@@ -32,6 +32,8 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('data-live-training', train_html)
                 self.assertIn('data-live-epoch', train_html)
                 self.assertIn('data-live-batch', train_html)
+                self.assertIn('class="live-chart-section"', train_html)
+                self.assertIn("训练指标曲线", train_html)
                 self.assertIn('data-live-chart="loss"', train_html)
                 self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
                 self.assertIn('value="dashboard_cpp"', train_html)
@@ -50,6 +52,7 @@ class DashboardAppTest(unittest.TestCase):
                     self.assertEqual(response.headers.get_content_type(), "text/css")
                     dashboard_css = response.read()
                     self.assertIn(b"--bg: #0b1015", dashboard_css)
+                    self.assertIn(b".live-chart-section", dashboard_css)
                     self.assertIn(b"grid-template-columns: repeat(2, minmax(0, 1fr))", dashboard_css)
                 with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")

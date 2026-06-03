@@ -296,12 +296,15 @@ def render_train(project_root: Path, message: str = "") -> str:
         <article><span>最新 Top1</span><strong data-live-top1>-</strong></article>
         <article><span>指标行数</span><strong data-live-rows>0</strong></article>
       </div>
-      <div class="live-chart-grid">
-        <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>图匹配</strong><span data-live-chart-meta="graph">最近 300 batch</span></div><svg data-live-chart="graph" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      </div>
+    </div>
+  </div>
+  <div class="live-chart-section">
+    <div class="section-caption"><h3>训练指标曲线</h3><span>独立 2x2 区域，默认显示当前任务最近 300 个 batch。</span></div>
+    <div class="live-chart-grid">
+      <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>图匹配</strong><span data-live-chart-meta="graph">最近 300 batch</span></div><svg data-live-chart="graph" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
     </div>
   </div>
 </section>
@@ -896,6 +899,27 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   display: grid;
   grid-template-columns: minmax(320px, 0.86fr) minmax(0, 1.44fr);
   gap: 14px;
+}
+.live-chart-section {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.section-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.section-caption h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 15px;
+}
+.section-caption span {
+  color: var(--muted);
+  font-size: 12px;
 }
 .live-run-list {
   display: grid;
