@@ -241,7 +241,7 @@ def render_index(project_root: Path) -> str:
   <article class="metric-card"><span>检查点</span><strong>{checkpoint_count}</strong><small>已发现模型产物</small></article>
   <article class="metric-card"><span>磁盘剩余</span><strong>{_format_bytes(disk.free)}</strong><small>已用 {disk_used_percent}%</small></article>
 </section>
-<section class="content-grid">
+<section class="content-grid overview-runs-grid">
   <article class="panel wide">
     <div class="panel-head"><div><h2>近期任务</h2><p>最新训练实验、进度和模型产物。</p></div><a href="/runs">全部任务</a></div>
     {_runs_table(runs)}
@@ -736,6 +736,12 @@ main { padding: 22px 28px 36px; }
 .metric-card strong { display: block; margin-top: 8px; font-size: 27px; line-height: 1; color: #ffffff; }
 .metric-card small { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
 .content-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.8fr); gap: 16px; }
+.overview-runs-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.overview-runs-grid .wide {
+  min-width: 0;
+}
 .panel {
   padding: 16px;
   min-width: 0;
@@ -753,8 +759,15 @@ main { padding: 22px 28px 36px; }
   margin-bottom: 13px;
 }
 .panel-head h2 { margin: 0; font-size: 17px; line-height: 1.2; color: #ffffff; }
-.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
-table { width: 100%; border-collapse: collapse; font-size: 13px; background: transparent; }
+.table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+table { width: 100%; min-width: 1260px; border-collapse: collapse; font-size: 13px; background: transparent; }
 th, td { border-bottom: 1px solid rgba(169, 190, 212, 0.11); padding: 10px 11px; text-align: left; vertical-align: middle; white-space: nowrap; }
 th { background: rgba(255, 255, 255, 0.035); color: var(--muted-strong); font-size: 11px; text-transform: uppercase; font-weight: 800; }
 td { color: #dce6f2; }
