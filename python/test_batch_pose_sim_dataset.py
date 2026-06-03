@@ -53,6 +53,33 @@ class BatchPoseSimDatasetTests(unittest.TestCase):
         self.assertIn("/cache/test/", path.as_posix())
         self.assertTrue(path.name.startswith("pair_000003_ext_diag"))
 
+    def test_select_candidates_applies_ratio_after_range_limit(self):
+        module = load_batch_module()
+        track = module.TrackInfo(
+            stem="TrackA",
+            split="train",
+            csv_path=Path("TrackA.csv"),
+            tsai_dir=Path("tsai"),
+            frames=1,
+        )
+        candidates = [
+            module.Candidate(index=index, track=track, seq=index + 1, sim_view="A_basic_xp5", split=track.split)
+            for index in range(100)
+        ]
+
+        selected = module.select_generation_candidates(
+            candidates,
+            start_pair_index=0,
+            max_pairs=10,
+            split_mode="ratio",
+            split_ratio=(7, 2, 1),
+            split_seed=123,
+        )
+
+        counts = {split: sum(1 for candidate in selected if candidate.split == split) for split in ("train", "val", "test")}
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(counts, {"train": 7, "val": 2, "test": 1})
+
     def test_parse_args_accepts_frame_workers_and_ratio_split(self):
         module = load_batch_module()
         original_argv = sys.argv
@@ -74,6 +101,25 @@ class BatchPoseSimDatasetTests(unittest.TestCase):
         self.assertEqual(args.split_mode, "ratio")
         self.assertEqual(args.split_ratio, (7, 2, 1))
         self.assertEqual(args.frame_workers, 3)
+
+    def test_parse_args_accepts_explicit_dem_and_dom(self):
+        module = load_batch_module()
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "batch_pose_sim_dataset.py",
+                "--output-root",
+                "/tmp/out",
+                "--dem",
+                "/tmp/dem/mar.tif",
+                "--dom",
+                "/tmp/dom/mar_dom.tif",
+            ]
+            args = module.parse_args()
+        finally:
+            sys.argv = original_argv
+        self.assertEqual(args.dem, Path("/tmp/dem/mar.tif"))
+        self.assertEqual(args.dom, Path("/tmp/dom/mar_dom.tif"))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-#include "infer/checkpoint_gate.h"
+#include "checkpoint_gate/checkpoint_gate.h"
 #include "tests/test_harness.h"
 
 namespace

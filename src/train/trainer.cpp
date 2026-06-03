@@ -5,12 +5,15 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <list>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -22,14 +25,14 @@
 #include "core/tensor_utils.h"
 #include "core/timer.h"
 #include "data/image_dataset.h"
-#include "image/intensity_mask.h"
 #include "data/pair_archive_dataset.h"
 #include "data/synthetic_pair.h"
 #include "data/synthetic_pair_cache.h"
 #include "data/synthetic_pair_dataset.h"
 #include "dataloader/async_dataloader.h"
 #include "dataloader/sampler.h"
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
+#include "image/intensity_mask.h"
 #include "infer/feature_extractor.h"
 #include "infer/matching_pipeline.h"
 #include "logging/csv_metric_logger.h"
@@ -50,6 +53,7 @@ namespace
 
 constexpr int64_t INPUT_CHANNELS = 1;
 constexpr int64_t MAX_DESCRIPTOR_LOSS_SAMPLES = 1024;
+// 下面的权重按训练目标分组排列：检测器、描述子、图匹配、稠密分支和日志/可视化控制。
 constexpr double REPEATABILITY_LOSS_WEIGHT = 100.0;
 constexpr double REPEATABLE_SALIENCY_TARGET_WEIGHT = 8.0;
 constexpr double REPEATABLE_KEYPOINT_TARGET_WEIGHT = 25.0;
@@ -181,6 +185,7 @@ const std::vector<std::string> TRAINING_CSV_COLUMNS = {
 
 int64_t descriptor_broad_far_negative_count_for_progress(double progress)
 {
+    // 广域 hard negative 在课程后半段逐步打开，早期先让模型学稳局部正样本。
     if (!std::isfinite(progress) || progress <= 0.25)
     {
         return 0;
@@ -221,10 +226,12 @@ enum class TrainingProfile
     Descriptor,
     Graph,
     Full,
+    PythonCompare,
 };
 
 TrainingProfile parse_training_profile(const std::string& value)
 {
+    // training_profile 决定启用哪些损失分支，便于 smoke、descriptor-only、graph-only 等分阶段实验复用同一训练入口。
     if (value == "smoke")
     {
         return TrainingProfile::Smoke;
@@ -245,7 +252,12 @@ TrainingProfile parse_training_profile(const std::string& value)
     {
         return TrainingProfile::Full;
     }
-    throw std::invalid_argument("training_profile must be one of smoke, detector, descriptor, graph, or full");
+    if (value == "python-compare")
+    {
+        return TrainingProfile::PythonCompare;
+    }
+    throw std::invalid_argument(
+        "training_profile must be one of smoke, detector, descriptor, graph, full, or python-compare");
 }
 
 int64_t training_profile_id(TrainingProfile profile)
@@ -262,8 +274,10 @@ int64_t training_profile_id(TrainingProfile profile)
         return 3;
     case TrainingProfile::Full:
         return 4;
+    case TrainingProfile::PythonCompare:
+        return 5;
     }
-    return 4;
+    return 5;
 }
 
 bool training_profile_uses_detector_targets(TrainingProfile profile)
@@ -274,12 +288,14 @@ bool training_profile_uses_detector_targets(TrainingProfile profile)
 
 bool training_profile_uses_descriptor_losses(TrainingProfile profile)
 {
-    return profile == TrainingProfile::Descriptor || profile == TrainingProfile::Full;
+    return profile == TrainingProfile::Descriptor || profile == TrainingProfile::Full ||
+           profile == TrainingProfile::PythonCompare;
 }
 
 bool training_profile_uses_graph_losses(TrainingProfile profile)
 {
-    return profile == TrainingProfile::Graph || profile == TrainingProfile::Full;
+    return profile == TrainingProfile::Graph || profile == TrainingProfile::Full ||
+           profile == TrainingProfile::PythonCompare;
 }
 
 bool training_profile_uses_dense_pair_loss(TrainingProfile profile)
@@ -289,6 +305,7 @@ bool training_profile_uses_dense_pair_loss(TrainingProfile profile)
 
 void validate_config(const TrainConfig& config)
 {
+    // 训练入口的参数校验集中在这里，后续构建模型、DataLoader 和优化器时不再重复检查。
     if (config.image_dir.empty() && config.pair_cache_dirs.empty())
     {
         throw std::invalid_argument("image_dir or pair_cache_dirs must not be empty");
@@ -337,6 +354,22 @@ void validate_config(const TrainConfig& config)
         throw std::invalid_argument("graph_keypoint_meta_dim must be positive");
     }
     (void)parse_training_profile(config.training_profile);
+    if (config.samples_per_pair <= 0)
+    {
+        throw std::invalid_argument("samples_per_pair must be positive");
+    }
+    if (!std::isfinite(config.synthetic_loss_weight) || config.synthetic_loss_weight < 0.0)
+    {
+        throw std::invalid_argument("synthetic_loss_weight must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_loss_weight) || config.graph_matcher_loss_weight < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_loss_weight must be non-negative and finite");
+    }
+    if (!std::isfinite(config.temperature) || config.temperature <= 0.0)
+    {
+        throw std::invalid_argument("temperature must be positive and finite");
+    }
     if (config.resize < 0)
     {
         throw std::invalid_argument("resize must be non-negative");
@@ -408,6 +441,10 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("pair_cache_limit must be non-negative");
     }
+    if (config.pair_memory_cache_size < 0)
+    {
+        throw std::invalid_argument("pair_memory_cache_size must be non-negative");
+    }
     if (config.hard_synthetic_pair_cache_repeats <= 0)
     {
         throw std::invalid_argument("hard_synthetic_pair_cache_repeats must be positive");
@@ -464,6 +501,7 @@ void validate_config(const TrainConfig& config)
 
 double training_learning_rate_for_step(const TrainConfig& config, int64_t step, int64_t total_steps)
 {
+    // 支持可选 warmup + cosine decay，min_learning_rate_ratio 控制最低学习率。
     if (total_steps <= 0)
     {
         return config.learning_rate;
@@ -907,16 +945,18 @@ torch::Tensor resize_training_warp(const torch::Tensor& warp, int64_t target_hei
                                                       torch::nn::functional::InterpolateFuncOptions()
                                                           .size(std::vector<int64_t>{target_height, target_width})
                                                           .mode(torch::kBilinear)
-                                                          .align_corners(false))
+                                                          .align_corners(true))
                        .squeeze(0)
                        .permute({1, 2, 0})
                        .contiguous();
     resized.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 0},
                        resized.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}) *
-                           (static_cast<double>(target_width) / static_cast<double>(source_width)));
+                           (static_cast<double>(target_width - 1) /
+                            static_cast<double>(std::max<int64_t>(1, source_width - 1))));
     resized.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 1},
                        resized.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}) *
-                           (static_cast<double>(target_height) / static_cast<double>(source_height)));
+                           (static_cast<double>(target_height - 1) /
+                            static_cast<double>(std::max<int64_t>(1, source_height - 1))));
     return resized;
 }
 
@@ -930,9 +970,10 @@ torch::Tensor resize_training_valid_mask(const torch::Tensor& valid_mask, int64_
     return torch::nn::functional::interpolate(valid_mask.to(torch::kFloat32).unsqueeze(0).unsqueeze(0),
                                               torch::nn::functional::InterpolateFuncOptions()
                                                   .size(std::vector<int64_t>{target_height, target_width})
-                                                  .mode(torch::kNearest))
+                                                  .mode(torch::kArea))
         .squeeze(0)
         .squeeze(0)
+        .gt(0.0)
         .to(valid_mask.dtype())
         .contiguous();
 }
@@ -3120,14 +3161,14 @@ torch::Tensor resize_confidence_for_sparse_output(const torch::Tensor& confidenc
 }
 
 SparseHeadOutput finalize_v21_sparse_output(TrainModules& modules, v21::PfmV21SparseHeadOutput output,
-                                            const torch::Tensor& image, const torch::Tensor& dense_confidence)
+                                            const torch::Tensor& image, const torch::Tensor& dense_confidence,
+                                            double texture_blend_weight = ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT)
 {
     auto sparse = adapt_v21_sparse_output(std::move(output));
     auto texture = v21::makeRotationInvariantTextureDescriptor(image, sparse.descriptors.size(2),
                                                                sparse.descriptors.size(3), sparse.descriptors.size(1));
     texture = modules.texture_adapter->forward(texture);
-    sparse.descriptors =
-        modules.descriptor_fusion->forward(sparse.descriptors, texture, ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT);
+    sparse.descriptors = modules.descriptor_fusion->forward(sparse.descriptors, texture, texture_blend_weight);
     const auto texture_saliency =
         v21::makeRotationInvariantTextureSaliency(image, sparse.heatmap.size(2), sparse.heatmap.size(3));
     const auto confidence = resize_confidence_for_sparse_output(dense_confidence, sparse.heatmap);
@@ -3642,7 +3683,8 @@ SyntheticPair pair_archive_sample_to_synthetic_pair(const PairArchiveSample& sam
 class PairArchiveTensorDataset : public TensorDataset
 {
   public:
-    explicit PairArchiveTensorDataset(PairArchiveDatasetConfig config) : _dataset(std::move(config))
+    PairArchiveTensorDataset(PairArchiveDatasetConfig config, std::size_t memory_cache_size)
+        : _dataset(std::move(config)), _memory_cache_size(memory_cache_size)
     {
     }
 
@@ -3653,11 +3695,60 @@ class PairArchiveTensorDataset : public TensorDataset
 
     TensorBatch get(size_t index) override
     {
-        return cached_pair_to_tensor_batch(pair_archive_sample_to_synthetic_pair(_dataset.load(index)));
+        return cached_pair_to_tensor_batch(loadPair(index));
     }
 
   private:
+    struct CacheEntry
+    {
+        SyntheticPair pair;
+        std::list<size_t>::iterator lru_iterator;
+    };
+
+    SyntheticPair loadPair(size_t index)
+    {
+        if (_memory_cache_size == 0)
+        {
+            return pair_archive_sample_to_synthetic_pair(_dataset.load(index));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(_cache_mutex);
+            auto cached = _cache.find(index);
+            if (cached != _cache.end())
+            {
+                _lru.splice(_lru.begin(), _lru, cached->second.lru_iterator);
+                return cached->second.pair;
+            }
+        }
+
+        auto loaded_pair = pair_archive_sample_to_synthetic_pair(_dataset.load(index));
+        {
+            std::lock_guard<std::mutex> lock(_cache_mutex);
+            auto cached = _cache.find(index);
+            if (cached != _cache.end())
+            {
+                _lru.splice(_lru.begin(), _lru, cached->second.lru_iterator);
+                return cached->second.pair;
+            }
+
+            _lru.push_front(index);
+            _cache.emplace(index, CacheEntry{loaded_pair, _lru.begin()});
+            while (_cache.size() > _memory_cache_size)
+            {
+                const auto evicted_index = _lru.back();
+                _lru.pop_back();
+                _cache.erase(evicted_index);
+            }
+        }
+        return loaded_pair;
+    }
+
     PairArchiveDataset _dataset;
+    std::size_t _memory_cache_size = 0;
+    std::mutex _cache_mutex;
+    std::list<size_t> _lru;
+    std::unordered_map<size_t, CacheEntry> _cache;
 };
 
 class IndexedSyntheticPairCacheTensorDataset : public TensorDataset
@@ -3776,6 +3867,274 @@ struct TrainingDiagnosticSnapshot
     SparseHeadOutput sparse_b;
     torch::Tensor dense_confidence;
 };
+
+struct PythonCompareSample
+{
+    torch::Tensor points_a;
+    torch::Tensor points_b;
+};
+
+torch::Tensor normalize_python_descriptor_rows(const torch::Tensor& descriptors)
+{
+    auto finite = torch::nan_to_num(descriptors, 0.0, 0.0, 0.0);
+    return finite / finite.norm(2, 1, true).clamp_min(1.0e-3);
+}
+
+torch::Tensor scale_image_points_to_feature_grid(const torch::Tensor& points, int64_t image_height, int64_t image_width,
+                                                 int64_t feature_height, int64_t feature_width)
+{
+    if (points.numel() == 0)
+    {
+        return points.new_empty({0, 2});
+    }
+    auto x = points.index({torch::indexing::Slice(), 0}) *
+             (static_cast<double>(std::max<int64_t>(1, feature_width - 1)) /
+              static_cast<double>(std::max<int64_t>(1, image_width - 1)));
+    auto y = points.index({torch::indexing::Slice(), 1}) *
+             (static_cast<double>(std::max<int64_t>(1, feature_height - 1)) /
+              static_cast<double>(std::max<int64_t>(1, image_height - 1)));
+    return torch::stack({x, y}, 1).contiguous();
+}
+
+torch::Tensor sample_python_descriptor_points(const torch::Tensor& descriptor_map, const torch::Tensor& points)
+{
+    if (points.numel() == 0)
+    {
+        return descriptor_map.new_empty({0, descriptor_map.size(1)});
+    }
+    const auto height = descriptor_map.size(2);
+    const auto width = descriptor_map.size(3);
+    auto x = points.index({torch::indexing::Slice(), 0});
+    auto y = points.index({torch::indexing::Slice(), 1});
+    auto grid_x = width > 1 ? x / static_cast<double>(width - 1) * 2.0 - 1.0 : torch::zeros_like(x);
+    auto grid_y = height > 1 ? y / static_cast<double>(height - 1) * 2.0 - 1.0 : torch::zeros_like(y);
+    auto grid = torch::stack({grid_x, grid_y}, 1).reshape({1, points.size(0), 1, 2}).contiguous();
+    return torch::nn::functional::grid_sample(descriptor_map, grid,
+                                              torch::nn::functional::GridSampleFuncOptions()
+                                                  .mode(torch::kBilinear)
+                                                  .padding_mode(torch::kZeros)
+                                                  .align_corners(true))
+        .squeeze(0)
+        .squeeze(-1)
+        .transpose(0, 1)
+        .contiguous();
+}
+
+PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& warp, const torch::Tensor& valid_mask,
+                                                          int64_t batch, int64_t feature_height,
+                                                          int64_t feature_width, int64_t count)
+{
+    const auto image_height = warp.size(1);
+    const auto image_width = warp.size(2);
+    auto warp_item = warp.index({batch});
+    auto valid = valid_mask.index({batch}).to(torch::kBool)
+                     .logical_and(torch::isfinite(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(),
+                                                                    0})))
+                     .logical_and(torch::isfinite(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(),
+                                                                    1})))
+                     .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}).ge(0.0))
+                     .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}).le(
+                         static_cast<double>(image_width - 1)))
+                     .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}).ge(0.0))
+                     .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}).le(
+                         static_cast<double>(image_height - 1)));
+    auto valid_indices = torch::nonzero(valid.reshape({image_height * image_width})).flatten();
+    if (valid_indices.numel() == 0)
+    {
+        return PythonCompareSample{warp.new_empty({0, 2}), warp.new_empty({0, 2})};
+    }
+    const auto take = std::min<int64_t>(count, valid_indices.size(0));
+    auto order = torch::randperm(valid_indices.size(0), valid_indices.options()).narrow(0, 0, take);
+    auto selected = valid_indices.index_select(0, order);
+    auto y = torch::floor_divide(selected, image_width).to(warp.dtype());
+    auto x = selected.remainder(image_width).to(warp.dtype());
+    auto points_a_image = torch::stack({x, y}, 1).contiguous();
+    auto points_b_image = warp_item.reshape({image_height * image_width, 2}).index_select(0, selected).contiguous();
+    return PythonCompareSample{
+        scale_image_points_to_feature_grid(points_a_image, image_height, image_width, feature_height, feature_width),
+        scale_image_points_to_feature_grid(points_b_image, image_height, image_width, feature_height, feature_width)};
+}
+
+DescriptorTrainingMetrics make_python_compare_descriptor_metrics(const torch::Tensor& desc_a,
+                                                                 const torch::Tensor& desc_b, double temperature)
+{
+    auto normalized_a = normalize_python_descriptor_rows(desc_a);
+    auto normalized_b = normalize_python_descriptor_rows(desc_b);
+    auto similarity = torch::matmul(normalized_a, normalized_b.transpose(0, 1));
+    auto targets = torch::arange(desc_a.size(0), torch::TensorOptions().dtype(torch::kLong).device(desc_a.device()));
+    auto logits = similarity / temperature;
+    auto loss_ab = torch::nn::functional::cross_entropy(logits, targets);
+    auto loss_ba = torch::nn::functional::cross_entropy(logits.transpose(0, 1).contiguous(), targets);
+    auto loss = (loss_ab + loss_ba) * 0.5;
+    auto top1 = similarity.argmax(1).eq(targets).to(torch::kFloat32).mean();
+    auto sorted = similarity.argsort(1, true);
+    auto ranks = sorted.eq(targets.unsqueeze(1)).to(torch::kInt64).argmax(1).to(torch::kFloat32) + 1.0F;
+    auto positive = similarity.diag().mean();
+    auto negative = torch::zeros({}, similarity.options());
+    if (desc_a.size(0) > 1)
+    {
+        auto off_diagonal = torch::eye(desc_a.size(0), torch::TensorOptions().dtype(torch::kBool).device(desc_a.device()))
+                                .logical_not();
+        negative = similarity.index({off_diagonal}).mean();
+    }
+    return DescriptorTrainingMetrics{loss, top1, positive, negative, positive - negative, ranks.mean(),
+                                     torch::zeros({}, desc_a.options())};
+}
+
+torch::Tensor prepare_python_compare_keypoints_for_embedding(const torch::Tensor& points, int64_t meta_dim)
+{
+    auto prepared = points.to(torch::TensorOptions().device(points.device()).dtype(torch::kFloat32));
+    if (prepared.size(0) == 0)
+    {
+        return prepared.new_empty({0, meta_dim});
+    }
+    auto min_xy = std::get<0>(prepared.min(0, true));
+    auto max_xy = std::get<0>(prepared.max(0, true));
+    auto center = (min_xy + max_xy) * 0.5;
+    auto span = std::get<0>((max_xy - min_xy).max(1, true)).clamp_min(1.0e-6);
+    auto centered = (prepared - center) * 2.0 / span;
+    auto radius = centered.pow(2).sum(1, true).sqrt();
+    auto legacy = torch::cat(std::vector<torch::Tensor>{radius, radius.pow(2)}, 1);
+    auto spatial = torch::cat(std::vector<torch::Tensor>{centered, legacy}, 1);
+    if (meta_dim <= spatial.size(1))
+    {
+        return spatial.index({torch::indexing::Slice(), torch::indexing::Slice(0, meta_dim)}).contiguous();
+    }
+    return torch::cat(std::vector<torch::Tensor>{spatial, spatial.new_zeros({spatial.size(0), meta_dim - spatial.size(1)})},
+                      1)
+        .contiguous();
+}
+
+torch::Tensor make_python_compare_graph_metadata(const torch::Tensor& points, int64_t meta_dim)
+{
+    auto base = prepare_python_compare_keypoints_for_embedding(points, std::max<int64_t>(meta_dim, 4));
+    const auto count = points.size(0);
+    auto score = points.new_full({count, 1}, 1.0);
+    auto scale = points.new_zeros({count, 1});
+    auto orientation =
+        torch::cat(std::vector<torch::Tensor>{points.new_full({count, 1}, 1.0), points.new_zeros({count, 1})}, 1);
+    auto affine = torch::cat(std::vector<torch::Tensor>{points.new_full({count, 1}, 1.0), points.new_zeros({count, 2}),
+                                                        points.new_full({count, 1}, 1.0)},
+                             1);
+    auto quality = points.new_full({count, 1}, 1.0);
+    auto contrast = points.new_zeros({count, 1});
+    auto uncertainty = points.new_zeros({count, 1});
+    auto metadata = torch::cat(std::vector<torch::Tensor>{
+                                   base.index({torch::indexing::Slice(), torch::indexing::Slice(0, 4)}), score, scale,
+                                   orientation, affine, quality, contrast, uncertainty},
+                               1);
+    if (metadata.size(1) >= meta_dim)
+    {
+        return metadata.index({torch::indexing::Slice(), torch::indexing::Slice(0, meta_dim)}).contiguous();
+    }
+    return torch::cat(std::vector<torch::Tensor>{metadata, metadata.new_zeros({count, meta_dim - metadata.size(1)})}, 1)
+        .contiguous();
+}
+
+template <typename GraphMatcherT>
+torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const torch::Tensor& desc_a,
+                                             const torch::Tensor& desc_b, const torch::Tensor& points_a,
+                                             const torch::Tensor& points_b, int64_t meta_dim)
+{
+    if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
+    {
+        return torch::zeros({}, desc_a.options());
+    }
+    const auto count = std::min<int64_t>(desc_a.size(0), desc_b.size(0));
+    auto limited_desc_a = desc_a.narrow(0, 0, count);
+    auto limited_desc_b = desc_b.narrow(0, 0, count);
+    auto limited_points_a = points_a.narrow(0, 0, count);
+    auto limited_points_b = points_b.narrow(0, 0, count);
+    auto meta_a = make_python_compare_graph_metadata(limited_points_a, meta_dim).to(desc_a.device());
+    auto meta_b = make_python_compare_graph_metadata(limited_points_b, meta_dim).to(desc_b.device());
+    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b, false);
+    auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
+    auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
+    auto col_logits =
+        output.logits.index({torch::indexing::Slice(), torch::indexing::Slice(0, count)}).transpose(0, 1).contiguous();
+    auto col_loss = torch::nn::functional::cross_entropy(col_logits, targets);
+    return (row_loss + col_loss) * 0.5;
+}
+
+TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, const torch::Tensor& view_a,
+                                                         const torch::Tensor& view_b, const torch::Tensor& warp,
+                                                         const torch::Tensor& valid_mask, SparseHeadOutput sparse_a,
+                                                         SparseHeadOutput sparse_b, const DenseHeadOutput& dense,
+                                                         const TrainConfig& config)
+{
+    (void)view_b;
+    const auto zero = torch::zeros({}, sparse_a.descriptors.options());
+    std::vector<torch::Tensor> descriptor_losses;
+    std::vector<torch::Tensor> graph_losses;
+    std::vector<torch::Tensor> accuracies;
+    std::vector<torch::Tensor> positive_scores;
+    std::vector<torch::Tensor> negative_scores;
+    std::vector<torch::Tensor> margins;
+    std::vector<torch::Tensor> ranks;
+    std::vector<torch::Tensor> counts;
+    const auto batch_size = view_a.size(0);
+    descriptor_losses.reserve(static_cast<size_t>(batch_size));
+    graph_losses.reserve(static_cast<size_t>(batch_size));
+    for (int64_t batch = 0; batch < batch_size; ++batch)
+    {
+        auto sample = sample_python_compare_correspondences(warp, valid_mask, batch, sparse_a.descriptors.size(2),
+                                                            sparse_a.descriptors.size(3), config.samples_per_pair);
+        if (sample.points_a.size(0) == 0)
+        {
+            continue;
+        }
+        auto desc_a = sample_python_descriptor_points(sparse_a.descriptors.index({batch}).unsqueeze(0), sample.points_a);
+        auto desc_b = sample_python_descriptor_points(sparse_b.descriptors.index({batch}).unsqueeze(0), sample.points_b);
+        auto descriptor_metrics = make_python_compare_descriptor_metrics(desc_a, desc_b, config.temperature);
+        descriptor_losses.push_back(descriptor_metrics.loss);
+        accuracies.push_back(descriptor_metrics.accuracy);
+        positive_scores.push_back(descriptor_metrics.positive_score);
+        negative_scores.push_back(descriptor_metrics.hard_negative_score);
+        margins.push_back(descriptor_metrics.positive_margin);
+        ranks.push_back(descriptor_metrics.positive_rank);
+        counts.push_back(torch::full({}, static_cast<float>(sample.points_a.size(0)), sparse_a.descriptors.options()));
+        graph_losses.push_back(make_python_compare_graph_loss(*modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
+                                                              normalize_python_descriptor_rows(desc_b), sample.points_a,
+                                                              sample.points_b, config.graph_keypoint_meta_dim));
+    }
+    auto descriptor_loss = descriptor_losses.empty() ? zero : torch::stack(descriptor_losses).mean();
+    auto graph_loss = graph_losses.empty() ? zero : torch::stack(graph_losses).mean();
+    auto total = descriptor_loss * config.synthetic_loss_weight + graph_loss * config.graph_matcher_loss_weight;
+    auto mean_or_zero = [&](const std::vector<torch::Tensor>& values)
+    {
+        return values.empty() ? zero : torch::stack(values).mean();
+    };
+    auto count = mean_or_zero(counts);
+    return TrainingLossComponents{total,
+                                  zero,
+                                  descriptor_loss,
+                                  zero,
+                                  graph_loss,
+                                  zero,
+                                  zero,
+                                  mean_or_zero(accuracies),
+                                  mean_or_zero(accuracies),
+                                  torch::ones_like(count),
+                                  count,
+                                  count,
+                                  count,
+                                  count,
+                                  mean_or_zero(accuracies),
+                                  torch::ones_like(count),
+                                  count,
+                                  count,
+                                  mean_or_zero(positive_scores),
+                                  mean_or_zero(negative_scores),
+                                  mean_or_zero(margins),
+                                  mean_or_zero(ranks),
+                                  mean_or_zero(accuracies),
+                                  mean_or_zero(margins),
+                                  mean_or_zero(ranks),
+                                  zero,
+                                  zero,
+                                  TrainingBatchForward{view_a, view_b, warp, valid_mask, sparse_a, sparse_b,
+                                                       dense.confidence, dense.offsets}};
+}
 
 torch::Tensor weighted_total_training_loss(const torch::Tensor& repeatability, const torch::Tensor& descriptor,
                                            const torch::Tensor& orientation, const torch::Tensor& graph_matching,
@@ -4220,8 +4579,14 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
         {
             const auto dense_a_self = modules.dense_head->forward(dense_features_a, dense_features_a);
             const auto dense_b_self = modules.dense_head->forward(dense_features_b, dense_features_b);
-            sparse_a = finalize_v21_sparse_output(modules, std::move(raw_sparse_a), view_a, dense_a_self.confidence);
-            sparse_b = finalize_v21_sparse_output(modules, std::move(raw_sparse_b), view_b, dense_b_self.confidence);
+            const auto texture_blend_weight =
+                training_profile == TrainingProfile::PythonCompare ? 1.0 : ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
+            sparse_a =
+                finalize_v21_sparse_output(modules, std::move(raw_sparse_a), view_a, dense_a_self.confidence,
+                                           texture_blend_weight);
+            sparse_b =
+                finalize_v21_sparse_output(modules, std::move(raw_sparse_b), view_b, dense_b_self.confidence,
+                                           texture_blend_weight);
             if (use_dense_pair_loss)
             {
                 dense = adapt_v21_dense_output(modules.dense_head->forward(dense_features_a, dense_features_b));
@@ -4240,10 +4605,15 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     sparse_a = float_sparse_output(std::move(sparse_a));
     sparse_b = float_sparse_output(std::move(sparse_b));
     dense = float_dense_output(std::move(dense));
-    if (config.descriptor_orientation_canonicalization)
+    if (config.descriptor_orientation_canonicalization && training_profile != TrainingProfile::PythonCompare)
     {
         sparse_a.descriptors = canonicalize_descriptor_map_by_orientation(sparse_a.descriptors, sparse_a.orientation);
         sparse_b.descriptors = canonicalize_descriptor_map_by_orientation(sparse_b.descriptors, sparse_b.orientation);
+    }
+    if (training_profile == TrainingProfile::PythonCompare)
+    {
+        return make_python_compare_training_loss(modules, view_a, view_b, warp, valid_mask, std::move(sparse_a),
+                                                 std::move(sparse_b), dense, config);
     }
     const auto sparse_mask = resize_mask_for_heatmap(valid_mask, sparse_a.heatmap);
     const auto dense_mask = resize_mask_for_heatmap(valid_mask, dense.confidence);
@@ -5628,11 +5998,13 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<ImageDataset> dataset;
     if (!config.image_dir.empty())
     {
+        // 原始图像数据集只在在线合成或生成 synthetic cache 时需要；纯 pair archive 训练可以不提供。
         dataset = std::make_unique<ImageDataset>(config.image_dir);
     }
     auto modules = make_modules(config, device);
     if (!config.init_checkpoint.empty())
     {
+        // 初始化检查点加载后重新切到训练模式，随后再根据微调模式冻结部分模块。
         load_checkpoint_into_modules(config.init_checkpoint, config, modules);
         move_modules_to_device(modules, device);
         set_all_modules_train(modules);
@@ -5645,6 +6017,7 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<TrainModules> descriptor_anchor_modules;
     if (should_use_descriptor_finetune_anchor(config))
     {
+        // 描述子微调锚点保留一份冻结 teacher，用于约束已有旋转基线不要漂移过大。
         auto anchor_modules = make_modules(config, device);
         load_checkpoint_into_modules(config.init_checkpoint, config, anchor_modules);
         move_modules_to_device(anchor_modules, device);
@@ -5695,6 +6068,7 @@ TrainResult train_model(const TrainConfig& config)
     pair_config.rotation_step_degrees = static_cast<float>(config.rotation_step_degrees);
     if (!config.synthetic_pair_cache_dir.empty())
     {
+        // 主 synthetic cache 可在训练前自动准备；配置不匹配时由 cache 模块决定是否重建。
         if (!dataset)
         {
             throw std::invalid_argument("synthetic_pair_cache_dir requires image_dir");
@@ -5715,20 +6089,28 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<CompositeSyntheticPairCacheDataset> cache_dataset;
     if (!cache_specs.empty())
     {
+        // 旧式 synthetic cache 支持普通 cache、extra cache 和 hard cache 重复采样。
         cache_dataset = std::make_unique<CompositeSyntheticPairCacheDataset>(cache_specs);
         epoch_size = cache_dataset->size();
     }
     std::shared_ptr<TensorDataset> pair_archive_tensor_dataset;
     if (!config.pair_cache_dirs.empty())
     {
+        // pair archive cache 是当前仿真数据主入口，多个目录会组合成一个 TensorDataset。
         std::vector<std::shared_ptr<TensorDataset>> tensor_datasets;
         tensor_datasets.reserve(config.pair_cache_dirs.size());
+        const auto cache_dir_count = config.pair_cache_dirs.size();
+        const auto per_dir_memory_cache_size =
+            config.pair_memory_cache_size > 0
+                ? std::max<std::size_t>(1, static_cast<std::size_t>(config.pair_memory_cache_size) / cache_dir_count)
+                : 0;
         for (const auto& cache_dir : config.pair_cache_dirs)
         {
             PairArchiveDatasetConfig pair_config_archive;
             pair_config_archive.cache_dir = cache_dir;
             pair_config_archive.limit_pairs = config.pair_cache_limit;
-            tensor_datasets.push_back(std::make_shared<PairArchiveTensorDataset>(std::move(pair_config_archive)));
+            tensor_datasets.push_back(
+                std::make_shared<PairArchiveTensorDataset>(std::move(pair_config_archive), per_dir_memory_cache_size));
         }
         pair_archive_tensor_dataset = std::make_shared<CompositeTensorDataset>(std::move(tensor_datasets));
         epoch_size = pair_archive_tensor_dataset->size();
@@ -5737,6 +6119,9 @@ TrainResult train_model(const TrainConfig& config)
               << " validation_images=" << val_images << " cache_entries=" << cache_specs.size()
               << " pair_archive_dirs=" << config.pair_cache_dirs.size() << " pairs_per_epoch=" << epoch_size
               << " pairs_per_image=" << config.pairs_per_image << " training_profile=" << config.training_profile
+              << " memory_cache_items=" << config.pair_memory_cache_size
+              << " dataloader_workers=" << config.dataloader_workers
+              << " prefetch_batches=" << config.prefetch_batches
               << '\n';
     if (config.max_train_batches > 0)
     {
@@ -5748,6 +6133,7 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<AsyncDataLoader> cache_loader;
     if (cache_dataset && config.dataloader_workers > 0)
     {
+        // cached synthetic pair 可以异步读取；若没有 worker，则走同步 load_cached_pairs，便于调试。
         std::vector<std::shared_ptr<TensorDataset>> tensor_datasets;
         tensor_datasets.reserve(cache_specs.size());
         for (const auto& cache_spec : cache_specs)
@@ -5770,6 +6156,7 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<AsyncDataLoader> pair_archive_loader;
     if (pair_archive_tensor_dataset)
     {
+        // pair archive 默认走异步 DataLoader，保持大规模仿真 cache 读取吞吐。
         pair_archive_loader = std::make_unique<AsyncDataLoader>(
             pair_archive_tensor_dataset, make_cache_training_sampler(pair_archive_tensor_dataset->size(), config),
             make_synthetic_pair_collator(), make_dataloader_options(config));
@@ -5777,6 +6164,7 @@ TrainResult train_model(const TrainConfig& config)
     std::unique_ptr<AsyncDataLoader> online_loader;
     if (should_use_online_dataloader(config))
     {
+        // 在线合成适合小数据 smoke 或无 cache 实验；图像先加载到内存，worker 只负责生成 pair。
         std::vector<torch::Tensor> images;
         images.reserve(train_images);
         for (std::size_t index = 0; index < train_images; ++index)
@@ -5800,6 +6188,7 @@ TrainResult train_model(const TrainConfig& config)
             : std::min<std::size_t>(static_cast<std::size_t>(config.visualization_samples), epoch_size);
     if (!config.visualization_dir.empty() && visualization_limit > 0)
     {
+        // 训练可视化异步写出，避免 PNG 编码阻塞主训练循环。
         std::cout << "training visualization: dir=" << config.visualization_dir << " samples="
                   << (config.visualization_samples_all ? "all" : std::to_string(config.visualization_samples))
                   << " max_keypoints=" << config.max_keypoints << " min_keypoints=" << config.min_keypoints
@@ -5814,6 +6203,7 @@ TrainResult train_model(const TrainConfig& config)
     for (int epoch = 0; epoch < config.epochs; ++epoch)
     {
         Timer epoch_timer;
+        // augmentation curriculum 在每个 epoch 开始时更新，cache 数据不受在线增强档位影响。
         pair_config.augmentation_profile = effective_augmentation_profile_for_epoch(config, epoch);
         if (online_loader)
         {
@@ -5835,6 +6225,8 @@ TrainResult train_model(const TrainConfig& config)
             std::vector<SyntheticPair> pairs;
             if (online_loader)
             {
+                // 数据源优先级：在线 loader、pair archive loader、synthetic cache loader、同步
+                // cache、最后原图在线合成。
                 auto batch = online_loader->next();
                 if (!batch.has_value())
                 {
@@ -5891,6 +6283,7 @@ TrainResult train_model(const TrainConfig& config)
                 descriptor_broad_far_negative_count_for_progress(curriculum_progress);
             const auto current_learning_rate = training_learning_rate_for_step(config, global_step, total_steps);
             set_optimizer_learning_rate(optimizer, current_learning_rate);
+            // training_loss_from_pairs 内部同时计算检测器、描述子、图匹配和稠密分支损失，并返回诊断指标。
             auto loss = training_loss_from_pairs(modules, pairs, config, descriptor_anchor_modules.get(),
                                                  descriptor_broad_far_negative_count);
             if (!torch::isfinite(loss.total.detach()).item<bool>())
@@ -5900,6 +6293,7 @@ TrainResult train_model(const TrainConfig& config)
             }
             if (visualization_writer && offset < visualization_limit)
             {
+                // 可视化使用本 batch 前向结果，不额外跑模型；只对配置要求的样本排队。
                 for (std::size_t pair_offset = 0; pair_offset < pairs.size(); ++pair_offset)
                 {
                     const auto pair_index = offset + pair_offset;
@@ -5916,6 +6310,7 @@ TrainResult train_model(const TrainConfig& config)
             loss.total.backward();
             if (config.gradient_clip_norm > 0.0)
             {
+                // 梯度裁剪对 hard negative 和图匹配损失的尖峰较重要，避免偶发难例打爆优化器。
                 torch::nn::utils::clip_grad_norm_(parameters, config.gradient_clip_norm);
             }
             optimizer.step();
@@ -5930,6 +6325,7 @@ TrainResult train_model(const TrainConfig& config)
                                        iteration % TRAINING_METRIC_LOG_INTERVAL == 0;
             if (should_report)
             {
+                // 控制台和 CSV 使用同一批标量，保证人工观察和离线曲线一致。
                 last_loss = loss.total.detach().item<double>();
                 const auto repeatability_loss_value = loss.repeatability.detach().item<double>();
                 const auto descriptor_loss_value = loss.descriptor.detach().item<double>();
@@ -6069,6 +6465,7 @@ TrainResult train_model(const TrainConfig& config)
         }
         if (val_images > 0)
         {
+            // 验证集仍用合成 pair，但关闭梯度并切到 eval，统计平均 total loss。
             torch::NoGradGuard no_grad;
             set_all_modules_eval(modules);
             double val_total = 0.0;
@@ -6115,6 +6512,7 @@ TrainResult train_model(const TrainConfig& config)
             keep_graph_only_frozen_modules_eval(modules, config);
         }
         ++result.epochs_completed;
+        // 每个 epoch 后写检查点，保存为 CPU 可加载 archive，便于中断后继续训练或推理。
         save_checkpoint(config, modules);
         move_modules_to_device(modules, device);
     }
@@ -6139,6 +6537,7 @@ bool checkpoint_can_load(const std::string& checkpoint)
 {
     try
     {
+        // 只做轻量 archive/config 检查，不完整实例化模型，供 CLI 快速判断 checkpoint 是否可用。
         torch::serialize::InputArchive archive;
         archive.load_from(checkpoint);
         torch::serialize::InputArchive config_archive;

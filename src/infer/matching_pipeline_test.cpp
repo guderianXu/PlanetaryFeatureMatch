@@ -3,7 +3,7 @@
 
 #include <torch/torch.h>
 
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
 #include "infer/matching_pipeline.h"
 #include "models/planetary_graph_matcher.h"
 #include "tests/test_harness.h"

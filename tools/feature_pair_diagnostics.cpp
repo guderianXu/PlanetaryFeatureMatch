@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
 #include "infer/match_metrics.h"
 
 namespace

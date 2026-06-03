@@ -10,7 +10,7 @@
 namespace pfm
 {
 
-/// Supported command line subcommands.
+/// 支持的命令行子命令。
 enum class Command
 {
     None,
@@ -21,9 +21,10 @@ enum class Command
     Export,
 };
 
-/// Parsed command line options for pfm commands.
+/// pfm 命令解析后的选项集合。
 struct CliOptions
 {
+    /// 已选择的子命令。
     Command command = Command::None;
     std::string image_dir;
     std::string image;
@@ -65,6 +66,10 @@ struct CliOptions
     int graph_keypoint_meta_dim = 16;
     bool full_v21 = false;
     std::string training_profile = "full";
+    int samples_per_pair = 512;
+    double synthetic_loss_weight = 0.1;
+    double graph_matcher_loss_weight = 1.0;
+    double temperature = 0.07;
     int pairs_per_image = 1;
     int max_train_batches = 0;
     double learning_rate = 3.0e-4;
@@ -83,6 +88,7 @@ struct CliOptions
     std::vector<std::string> hard_synthetic_pair_cache_dirs;
     std::vector<std::string> pair_cache_dirs;
     int64_t pair_cache_limit = 0;
+    int64_t pair_memory_cache_size = 0;
     int hard_synthetic_pair_cache_repeats = 3;
     std::vector<int64_t> hard_synthetic_pair_cache_indices;
     bool cache_only = false;
@@ -96,21 +102,21 @@ struct CliOptions
     bool synthetic_pair_cache_rebuild = false;
 };
 
-/// Parse command line arguments into CLI options.
-/// @param args Command line arguments including the program name.
-/// @return Parsed command line options.
-/// @throws CLI::ParseError when CLI11 rejects the command line.
+/// 将命令行参数解析为 CLI 选项。
+/// @param args 包含程序名在内的命令行参数。
+/// @return 解析后的命令行选项。
+/// @throws CLI::ParseError 当 CLI11 拒绝命令行参数时抛出。
 CliOptions parse_cli(const std::vector<std::string>& args);
 
-/// Build the CLI11 application and bind parse results into options.
-/// @param options Parsed options object populated by CLI11 callbacks and option bindings.
-/// @return Configured CLI11 application.
+/// 构建 CLI11 应用，并把解析结果绑定到 options。
+/// @param options 由 CLI11 回调和选项绑定填充的解析结果对象。
+/// @return 已配置的 CLI11 应用。
 std::unique_ptr<CLI::App> build_cli_app(CliOptions& options);
 
-/// Run the pfm command line parser.
-/// @param argc Argument count from main.
-/// @param argv Argument values from main.
-/// @return Zero on success, nonzero on parse or runtime errors.
+/// 运行 pfm 命令行解析器。
+/// @param argc main 传入的参数数量。
+/// @param argv main 传入的参数值。
+/// @return 成功返回 0；解析或运行失败返回非 0。
 int run_cli(int argc, char** argv);
 
 } // namespace pfm

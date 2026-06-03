@@ -6,7 +6,7 @@
 #include <torch/torch.h>
 #include <unistd.h>
 
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
 #include "tests/test_harness.h"
 
 namespace

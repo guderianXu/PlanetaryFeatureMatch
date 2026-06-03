@@ -26,6 +26,7 @@ namespace
 constexpr int64_t CACHE_FORMAT_VERSION = 1;
 constexpr int64_t INPUT_CHANNELS = 1;
 
+// cache 文件名使用固定宽度编号，保证文件系统排序和样本索引一致。
 std::filesystem::path cache_path(const std::string& cache_dir)
 {
     return std::filesystem::path(cache_dir);
@@ -55,12 +56,14 @@ std::string source_dir_prefix(std::size_t source_index)
 std::filesystem::path source_dir_path(const std::string& cache_dir, const ImageDataset& dataset,
                                       std::size_t source_index)
 {
+    // 每个源图像单独建目录，便于同时保存 view_a、多个 view_b 和对应的 .pt archive。
     const auto stem = std::filesystem::path(dataset.path(source_index)).stem().string();
     return cache_path(cache_dir) / source_dir_name(source_index, stem);
 }
 
 std::filesystem::path find_source_dir_path(const std::string& cache_dir, std::size_t source_index)
 {
+    // 读取旧 cache 时不知道源图像 stem，只能用 source_000000_ 前缀找回真实目录名。
     const auto prefix = source_dir_prefix(source_index);
     const auto root = cache_path(cache_dir);
     if (!std::filesystem::exists(root))
@@ -183,6 +186,7 @@ bool float_matches(float left, float right)
 
 torch::Tensor ensure_grayscale(const torch::Tensor& image)
 {
+    // 当前 C++ 训练主线按单通道输入组织，多通道图像在 cache 阶段先转灰度。
     require_chw_image(image);
     if (channels(image) == INPUT_CHANNELS)
     {
@@ -193,6 +197,7 @@ torch::Tensor ensure_grayscale(const torch::Tensor& image)
 
 torch::Tensor limit_training_image_size(const torch::Tensor& image, int64_t resize)
 {
+    // cache 中保存缩放后的训练图，避免每个 epoch 重复做 resize。
     const auto height = image.size(1);
     const auto width = image.size(2);
     const auto max_edge = std::max(height, width);
@@ -257,6 +262,7 @@ void save_view_tif(const torch::Tensor& view, const std::filesystem::path& path)
 
 void write_pair_archive(const SyntheticPair& pair, std::size_t source_index, const std::filesystem::path& path)
 {
+    // pair archive 是训练 DataLoader 的机器消费格式，所有张量写成 CPU contiguous 以减少加载分支。
     torch::serialize::OutputArchive archive;
     write_int64(archive, "format_version", CACHE_FORMAT_VERSION);
     write_int64(archive, "source_index", static_cast<int64_t>(source_index));
@@ -276,6 +282,7 @@ void write_pair_archive(const SyntheticPair& pair, std::size_t source_index, con
 
 void write_manifest(const SyntheticPairCacheConfig& config)
 {
+    // manifest 记录会影响训练样本分布的配置；配置变更时必须重建 cache。
     torch::serialize::OutputArchive archive;
     write_int64(archive, "format_version", CACHE_FORMAT_VERSION);
     write_int64(archive, "pair_count", static_cast<int64_t>(config.pair_count));
@@ -304,6 +311,7 @@ void write_manifest(const SyntheticPairCacheConfig& config)
 
 bool manifest_matches(const SyntheticPairCacheConfig& config)
 {
+    // 只有 manifest 中的关键配置完全匹配时才允许复用已有 cache。
     try
     {
         torch::serialize::InputArchive archive;
@@ -338,6 +346,7 @@ bool manifest_matches(const SyntheticPairCacheConfig& config)
 
 bool cache_files_exist(const SyntheticPairCacheConfig& config)
 {
+    // 除 manifest 外，还检查每个 pair archive 和人工可查看的 PNG 视图是否完整。
     if (!std::filesystem::exists(cache_path(config.cache_dir) / "manifest.pt"))
     {
         return false;

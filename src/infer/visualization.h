@@ -5,92 +5,92 @@
 
 #include <torch/torch.h>
 
-#include "infer/feature_codec.h"
-#include "infer/match_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 
 namespace pfm
 {
 
-/// Saves a PNG overlay showing extracted feature points on the input image.
-/// @param image_path Source image path used as the visualization background.
-/// @param feature_set Decoded feature tensors with keypoints in image coordinate order {x, y}.
-/// @param visualization_dir Directory where the PNG will be written; created if missing.
-/// @return Path to the written PNG file.
-/// @throws std::invalid_argument if the image cannot be read or the PNG cannot be written.
+/// 保存显示提取特征点的 PNG 叠加图。
+/// @param image_path 作为可视化背景的源影像路径。
+/// @param feature_set 已解码特征张量，关键点使用影像坐标顺序 {x, y}。
+/// @param visualization_dir PNG 输出目录；不存在时会创建。
+/// @return 已写出的 PNG 文件路径。
+/// @throws std::invalid_argument 当影像无法读取或 PNG 无法写出时抛出。
 std::filesystem::path save_feature_visualization(const std::string& image_path, const FeatureSet& feature_set,
                                                  const std::string& visualization_dir);
 
-/// Saves a PNG overlay after scaling feature-map coordinates to source image pixels.
-/// @param image_path Source image path used as the visualization background.
-/// @param feature_set Decoded feature tensors with keypoints in feature-map coordinates.
-/// @param visualization_dir Directory where the PNG will be written; created if missing.
-/// @param feature_map_width Width of the feature map that produced keypoints.
-/// @param feature_map_height Height of the feature map that produced keypoints.
-/// @return Path to the written PNG file.
-/// @throws std::invalid_argument if dimensions are invalid, the image cannot be read, or the PNG cannot be written.
+/// 将 feature-map 坐标缩放到源影像像素后保存 PNG 叠加图。
+/// @param image_path 作为可视化背景的源影像路径。
+/// @param feature_set 已解码特征张量，关键点使用特征图坐标。
+/// @param visualization_dir PNG 输出目录；不存在时会创建。
+/// @param feature_map_width 产生关键点的特征图宽度。
+/// @param feature_map_height 产生关键点的特征图高度。
+/// @return 已写出的 PNG 文件路径。
+/// @throws std::invalid_argument 当尺寸非法、影像无法读取或 PNG 无法写出时抛出。
 std::filesystem::path save_feature_visualization(const std::string& image_path, const FeatureSet& feature_set,
                                                  const std::string& visualization_dir, int64_t feature_map_width,
                                                  int64_t feature_map_height);
 
-/// Saves a PNG side-by-side overlay showing matched points between two images.
-/// @param image_a_path First source image path.
-/// @param image_b_path Second source image path.
-/// @param match_set Match tensors with points in image coordinate order {x, y} and confidence scores.
-/// @param visualization_dir Directory where the PNG will be written; created if missing.
-/// @return Path to the written PNG file.
-/// @throws std::invalid_argument if either image cannot be read or the PNG cannot be written.
+/// 保存两幅影像之间匹配点的左右拼接 PNG 叠加图。
+/// @param image_a_path 第一幅源影像路径。
+/// @param image_b_path 第二幅源影像路径。
+/// @param match_set 匹配张量，points 使用影像坐标顺序 {x, y}，并包含置信度分数。
+/// @param visualization_dir PNG 输出目录；不存在时会创建。
+/// @return 已写出的 PNG 文件路径。
+/// @throws std::invalid_argument 当任一影像无法读取或 PNG 无法写出时抛出。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const MatchSet& match_set, const std::string& visualization_dir);
 
-/// Saves a PNG side-by-side overlay and colors matches by dense warp correctness.
-/// Correct matches are green and incorrect matches are red.
+/// 保存左右拼接 PNG 叠加图，并按稠密变形场正确性给匹配着色。
+/// 正确匹配为绿色，错误匹配为红色。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const MatchSet& match_set, const std::string& visualization_dir,
                                                const torch::Tensor& warp_a_to_b, double correct_threshold_pixels);
 
-/// Saves a PNG match overlay after scaling feature-map points to source image pixels.
-/// @param image_a_path First source image path.
-/// @param image_b_path Second source image path.
-/// @param match_set Match tensors with points in feature-map coordinates.
-/// @param visualization_dir Directory where the PNG will be written; created if missing.
-/// @param feature_map_a_width Width of the first feature map.
-/// @param feature_map_a_height Height of the first feature map.
-/// @param feature_map_b_width Width of the second feature map.
-/// @param feature_map_b_height Height of the second feature map.
-/// @return Path to the written PNG file.
-/// @throws std::invalid_argument if dimensions are invalid, either image cannot be read, or the PNG cannot be written.
+/// 将 feature-map 点坐标缩放到源影像像素后保存 PNG 匹配叠加图。
+/// @param image_a_path 第一幅源影像路径。
+/// @param image_b_path 第二幅源影像路径。
+/// @param match_set 匹配张量，points 使用 feature-map 坐标。
+/// @param visualization_dir PNG 输出目录；不存在时会创建。
+/// @param feature_map_a_width 第一幅特征图宽度。
+/// @param feature_map_a_height 第一幅特征图高度。
+/// @param feature_map_b_width 第二幅特征图宽度。
+/// @param feature_map_b_height 第二幅特征图高度。
+/// @return 已写出的 PNG 文件路径。
+/// @throws std::invalid_argument 当尺寸非法、任一影像无法读取或 PNG 无法写出时抛出。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const MatchSet& match_set, const std::string& visualization_dir,
                                                int64_t feature_map_a_width, int64_t feature_map_a_height,
                                                int64_t feature_map_b_width, int64_t feature_map_b_height);
 
-/// Saves a scaled PNG match overlay and colors matches by dense warp correctness.
+/// 保存已缩放坐标的 PNG 匹配叠加图，并按稠密变形场正确性给匹配着色。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const MatchSet& match_set, const std::string& visualization_dir,
                                                int64_t feature_map_a_width, int64_t feature_map_a_height,
                                                int64_t feature_map_b_width, int64_t feature_map_b_height,
                                                const torch::Tensor& warp_a_to_b, double correct_threshold_pixels);
 
-/// Saves a PNG match overlay using sparse match indices and feature-map keypoints.
-/// @param image_a_path First source image path.
-/// @param image_b_path Second source image path.
-/// @param features_a First image decoded feature set.
-/// @param features_b Second image decoded feature set.
-/// @param match_set Match tensors containing sparse indices and/or dense points.
-/// @param visualization_dir Directory where the PNG will be written; created if missing.
-/// @param feature_map_a_width Width of the first feature map.
-/// @param feature_map_a_height Height of the first feature map.
-/// @param feature_map_b_width Width of the second feature map.
-/// @param feature_map_b_height Height of the second feature map.
-/// @return Path to the written PNG file.
-/// @throws std::invalid_argument if tensors or dimensions are invalid, either image cannot be read, or writing fails.
+/// 使用稀疏匹配索引和特征图关键点保存 PNG 匹配叠加图。
+/// @param image_a_path 第一幅源影像路径。
+/// @param image_b_path 第二幅源影像路径。
+/// @param features_a 第一幅影像的已解码特征集合。
+/// @param features_b 第二幅影像的已解码特征集合。
+/// @param match_set 包含稀疏索引和/或稠密点的匹配张量。
+/// @param visualization_dir PNG 输出目录；不存在时会创建。
+/// @param feature_map_a_width 第一幅特征图宽度。
+/// @param feature_map_a_height 第一幅特征图高度。
+/// @param feature_map_b_width 第二幅特征图宽度。
+/// @param feature_map_b_height 第二幅特征图高度。
+/// @return 已写出的 PNG 文件路径。
+/// @throws std::invalid_argument 当张量或尺寸非法、任一影像无法读取或写出失败时抛出。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const FeatureSet& features_a, const FeatureSet& features_b,
                                                const MatchSet& match_set, const std::string& visualization_dir,
                                                int64_t feature_map_a_width, int64_t feature_map_a_height,
                                                int64_t feature_map_b_width, int64_t feature_map_b_height);
 
-/// Saves a sparse/dense PNG match overlay and colors matches by dense warp correctness.
+/// 保存稀疏/稠密 PNG 匹配叠加图，并按稠密变形场正确性给匹配着色。
 std::filesystem::path save_match_visualization(const std::string& image_a_path, const std::string& image_b_path,
                                                const FeatureSet& features_a, const FeatureSet& features_b,
                                                const MatchSet& match_set, const std::string& visualization_dir,

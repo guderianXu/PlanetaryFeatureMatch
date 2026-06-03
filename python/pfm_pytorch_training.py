@@ -43,6 +43,7 @@ class PairArchiveCache:
         self._items: OrderedDict[Path, SyntheticPair] = OrderedDict()
         self.hits = 0
         self.misses = 0
+        self.prefetch_inserts = 0
 
     def get(self, path: Path, *, device: torch.device) -> SyntheticPair:
         key = path.resolve(strict=False)
@@ -58,6 +59,21 @@ class PairArchiveCache:
                 while len(self._items) > self.max_items:
                     self._items.popitem(last=False)
         return move_pair_to_device(pair, device=device)
+
+    def put(self, path: Path, pair: SyntheticPair) -> None:
+        if self.max_items <= 0:
+            return
+        key = path.resolve(strict=False)
+        if key in self._items:
+            self._items.pop(key)
+        self._items[key] = pair
+        self.prefetch_inserts += 1
+        while len(self._items) > self.max_items:
+            self._items.popitem(last=False)
+
+    def put_batch(self, pairs: dict[Path, SyntheticPair]) -> None:
+        for path, pair in pairs.items():
+            self.put(path, pair)
 
     @property
     def size(self) -> int:
@@ -2488,6 +2504,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--balanced-cache-sampling", action="store_true")
     parser.add_argument("--epoch-shuffle-sampling", action="store_true")
     parser.add_argument("--pair-cache-size", type=int, default=0)
+    parser.add_argument(
+        "--memory-cache-items",
+        type=int,
+        default=None,
+        help="Alias for --pair-cache-size; number of CPU pair archives kept in the LRU memory pool.",
+    )
     parser.add_argument("--prefetch-batches", type=int, default=0)
     parser.add_argument("--prefetch-workers", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
@@ -2571,6 +2593,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--training-weak-texture-fraction must be in [0, 1]")
     if args.training_spatial_bins < 0:
         parser.error("--training-spatial-bins must be nonnegative")
+    if args.memory_cache_items is not None:
+        if args.memory_cache_items < 0:
+            parser.error("--memory-cache-items must be nonnegative")
+        if args.pair_cache_size != 0 and args.pair_cache_size != args.memory_cache_items:
+            parser.error("--pair-cache-size and --memory-cache-items disagree")
+        args.pair_cache_size = args.memory_cache_items
     if args.pair_cache_size < 0:
         parser.error("--pair-cache-size must be nonnegative")
     if args.prefetch_batches < 0:
@@ -3004,6 +3032,8 @@ def main() -> int:
                 future = prefetch_futures.pop(step, None)
                 if future is not None:
                     prefetched_pairs = future.result()
+                    if pair_cache is not None:
+                        pair_cache.put_batch(prefetched_pairs)
                 schedule_prefetch(step + args.prefetch_batches)
             metrics = train_step(
                 model,
@@ -3105,6 +3135,7 @@ def main() -> int:
             if step == 1 or step % 10 == 0 or step == args.steps:
                 cache_text = (
                     f" cache={pair_cache.hits}/{pair_cache.misses}/{pair_cache.size}"
+                    f"/{pair_cache.max_items} prefetch_cached={pair_cache.prefetch_inserts}"
                     if pair_cache is not None
                     else ""
                 )

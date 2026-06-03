@@ -8,8 +8,8 @@
 
 #include "augment/transform_sampler.h"
 #include "core/tensor_utils.h"
-#include "image/normalization.h"
 #include "geometry/warp.h"
+#include "image/normalization.h"
 
 namespace pfm
 {
@@ -20,6 +20,7 @@ constexpr float PI = 3.14159265358979323846F;
 
 AffineTransform makePairTransform(const torch::Tensor& image, const ImagePairTransformParameters& params)
 {
+    // 几何增强以图像中心为旋转/缩放中心，再叠加平移，避免尺度变化把主体直接移出画面。
     const auto cx = static_cast<float>(width(image) - 1) * 0.5F;
     const auto cy = static_cast<float>(height(image) - 1) * 0.5F;
     auto transform = AffineTransform::scale_rotate(params.scale, params.rotation_degrees * PI / 180.0F, cx, cy);
@@ -30,6 +31,7 @@ AffineTransform makePairTransform(const torch::Tensor& image, const ImagePairTra
 
 ProjectiveTransform makeProjectivePairTransform(const torch::Tensor& image, const ImagePairTransformParameters& params)
 {
+    // viewpoint/compound-viewpoint 档位需要剪切和轻量透视项，因此在仿射矩阵外再组合 3x3 投影矩阵。
     const auto affine = makePairTransform(image, params);
     const auto cx = static_cast<float>(width(image) - 1) * 0.5F;
     const auto cy = static_cast<float>(height(image) - 1) * 0.5F;
@@ -75,6 +77,7 @@ ProjectiveTransform makeProjectivePairTransform(const torch::Tensor& image, cons
 
 torch::Tensor projectiveWarpChw(const torch::Tensor& image, const ProjectiveTransform& transform)
 {
+    // grid_sampler 使用目标到源的反向采样坐标，因此先对投影矩阵求逆。
     const auto h = height(image);
     const auto w = width(image);
     const auto inverse = transform.inverse();
@@ -92,6 +95,7 @@ torch::Tensor projectiveWarpChw(const torch::Tensor& image, const ProjectiveTran
 
 torch::Tensor makeDeterministicNoiseLike(const torch::Tensor& image)
 {
+    // 使用坐标哈希噪声代替随机数，保证相同 source/variant 每次生成完全一致。
     const auto grid = make_xy_grid(height(image), width(image), image.device());
     using torch::indexing::Slice;
 
@@ -104,6 +108,7 @@ torch::Tensor makeDeterministicNoiseLike(const torch::Tensor& image)
 
 void applyPhotometric(const ImagePairTransformParameters& params, torch::Tensor& view_b)
 {
+    // 光度扰动只作用于 B 图，让训练目标同时学习几何对应和亮度差异鲁棒性。
     if (std::abs(params.gamma - 1.0F) > 1.0e-6F)
     {
         view_b = torch::pow(torch::clamp(view_b, 1.0e-4F, 1.0F), params.gamma);
@@ -133,6 +138,7 @@ ImagePairSample ImagePairAugmentor::augment(const torch::Tensor& image) const
     require_chw_image(image);
     const auto params = sampleImagePairTransform(_config);
 
+    // view_a 保持原图，view_b 经过几何、光度和噪声扰动；warp 字段记录 A 像素在 B 中的位置。
     auto view_a = clamp_unit(image.clone());
     auto transform = makeProjectivePairTransform(image, params);
     auto view_b = projectiveWarpChw(image, transform);

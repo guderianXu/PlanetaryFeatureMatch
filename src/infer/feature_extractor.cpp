@@ -15,6 +15,7 @@ namespace pfm
 namespace
 {
 
+// 描述子局部池化采用中心、主方向轴和对角线三个权重层级，避免单点采样对噪声过敏。
 constexpr float DESCRIPTOR_POOL_CENTER_WEIGHT = 8.0F;
 constexpr float DESCRIPTOR_POOL_AXIS_WEIGHT = 1.0F;
 constexpr float DESCRIPTOR_POOL_DIAGONAL_WEIGHT = 0.5F;
@@ -86,6 +87,7 @@ void validateDecodeConfig(const FeatureDecodeConfig& config)
 
 void validateRawMaps(const RawFeatureMaps& maps)
 {
+    // 推理端只解码单张影像的 CPU 特征图；这里统一收紧张量契约，避免后续裸指针访问越界。
     validateMap(maps.heatmap, "heatmap");
     validateMap(maps.descriptors, "descriptors");
     validateMap(maps.scale, "scale");
@@ -159,6 +161,7 @@ bool isSuppressedBySelected(const std::vector<SparseCandidate>& selected, const 
 std::vector<SparseCandidate> makeNmsCandidates(const torch::Tensor& heatmap, const torch::Tensor& valid_mask,
                                                int nms_radius)
 {
+    // 先按响应值全局排序，再做半径抑制；相同分数用坐标固定顺序，保证测试和离线复现实验稳定。
     std::vector<SparseCandidate> candidates;
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
@@ -268,6 +271,7 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(const std::vector<Spar
                                                           const FeatureDecodeConfig& config, int64_t height,
                                                           int64_t width)
 {
+    // 第一阶段按网格均匀取点，避免强纹理区域吃掉全部稀疏关键点。
     std::vector<SparseCandidate> grid_candidates;
     const int per_cell = resolvedKeypointsPerCell(config);
     for (int row = 0; row < config.keypoint_grid_rows; ++row)
@@ -301,6 +305,7 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(const std::vector<Spar
         }
         selected.push_back(candidate);
     }
+    // 第二阶段用 NMS 后的全局高分点补满 max_keypoints，兼顾均匀性和响应强度。
     for (const auto& candidate : candidates)
     {
         if (static_cast<int>(selected.size()) >= config.max_keypoints)
@@ -309,6 +314,7 @@ std::vector<SparseCandidate> selectGridBalancedCandidates(const std::vector<Spar
         }
         appendCandidateUntilLimit(selected, candidate, config.max_keypoints);
     }
+    // 第三阶段允许未经过 NMS 的点补到 min_keypoints，弱纹理图像不会因为过强 NMS 得到过少关键点。
     for (const auto& candidate : unfiltered_candidates)
     {
         if (static_cast<int>(selected.size()) >= config.min_keypoints ||
@@ -383,6 +389,7 @@ void appendOrientationPooledDescriptor(std::vector<float>& output, const float* 
                                        int64_t descriptor_channels, int64_t height, int64_t width, int64_t y, int64_t x,
                                        int descriptor_pool_radius)
 {
+    // 方向感知池化沿预测主方向和正交方向取样，提升旋转场景下 sparse descriptor 的局部稳定性。
     if (descriptor_pool_radius <= 0)
     {
         appendRawDescriptor(output, descriptor_data, descriptor_channels, height, width, y, x);
@@ -490,6 +497,7 @@ int64_t predictedOrientationQuarterTurn(const float* orientation_data, int64_t h
 void canonicalizeLastDescriptorOrientation(std::vector<float>& descriptors, int64_t descriptor_channels,
                                            int64_t quarter_turns)
 {
+    // 描述子通道按 0/90/180/270 度分组时，将最后一行滚动到局部方向坐标系。
     if (quarter_turns == 0 || descriptor_channels < 4 || descriptor_channels % 4 != 0 ||
         static_cast<int64_t>(descriptors.size()) < descriptor_channels)
     {
@@ -508,6 +516,7 @@ void canonicalizeLastDescriptorOrientation(std::vector<float>& descriptors, int6
 
 torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width)
 {
+    // mask 使用原图或特征图坐标均可，统一最近邻缩放到当前解码分辨率。
     if (!mask.defined())
     {
         return torch::ones({height, width}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
@@ -573,6 +582,7 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, const FeatureDecodeCo
     const int64_t height = heatmap.size(2);
     const int64_t width = heatmap.size(3);
     const auto valid_mask = prepare_decode_mask(intensity_mask, height, width);
+    // 保留两套候选：NMS 候选保证质量，未过滤候选只在弱纹理下用于达到 min_keypoints。
     const auto unfiltered_candidates = makeNmsCandidates(heatmap, valid_mask, 0);
     const auto nms_candidates = makeNmsCandidates(heatmap, valid_mask, config.nms_radius);
     const auto selected_candidates =
@@ -598,6 +608,7 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, const FeatureDecodeCo
     const auto* orientation_data = orientation.data_ptr<float>();
     const auto* affine_data = affine.data_ptr<float>();
     const auto* valid_mask_data = valid_mask.data_ptr<bool>();
+    // 稀疏分支逐点收集坐标、分数、描述子和几何头输出，输出坐标保持 {x, y} 顺序。
     for (const auto& candidate : selected_candidates)
     {
         const int64_t y = candidate.y;
@@ -631,6 +642,7 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, const FeatureDecodeCo
     const auto dense_valid_mask = prepare_decode_mask(intensity_mask, dense_height, dense_width);
     const auto* dense_confidence_data = dense_confidence_map.data_ptr<float>();
     const auto* dense_mask_data = dense_valid_mask.data_ptr<bool>();
+    // 稠密/半稠密分支只按置信度阈值输出可观测位置，不参与 NMS。
     for (int64_t y = 0; y < dense_height; ++y)
     {
         for (int64_t x = 0; x < dense_width; ++x)

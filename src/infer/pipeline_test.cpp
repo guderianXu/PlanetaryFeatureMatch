@@ -15,9 +15,9 @@
 #include <unistd.h>
 
 #include "cli/commands.h"
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "infer/feature_extractor.h"
-#include "infer/match_codec.h"
 #include "infer/pipeline.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"

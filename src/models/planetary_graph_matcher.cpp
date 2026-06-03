@@ -65,6 +65,7 @@ void validate_matcher_inputs(const torch::Tensor& descriptors_a, const torch::Te
 
 torch::Tensor prepare_keypoints_for_embedding(const torch::Tensor& keypoints)
 {
+    // 关键点坐标先归一化到局部图范围，再转为半径特征，提升平移/尺度鲁棒性。
     auto prepared = keypoints.to(torch::TensorOptions().dtype(torch::kFloat32).device(keypoints.device()));
     if (prepared.size(0) == 0)
     {
@@ -109,6 +110,7 @@ std::pair<torch::Tensor, torch::Tensor> PlanetaryGraphAttentionLayerImpl::forwar
                                                                                   const torch::Tensor& features_b)
 {
     validate_graph_features(features_a, features_b, _hidden_dim);
+    // 每层先做各图内部上下文聚合，再做跨图信息交互，最后通过前馈层稳定特征。
     auto self_a = attend(_self_query(features_a), _self_key(features_a), _self_value(features_a), _hidden_dim);
     auto self_b = attend(_self_query(features_b), _self_key(features_b), _self_value(features_b), _hidden_dim);
     auto refined_a = _self_norm(features_a + _attention_dropout(_self_output(self_a)));
@@ -154,6 +156,7 @@ PlanetaryGraphMatcherOutput PlanetaryGraphMatcherImpl::forward(const torch::Tens
     auto kp_b = prepare_keypoints_for_embedding(keypoints_b).to(desc_b.device());
     auto embed_a = torch::relu(_descriptor_projection(desc_a) + _keypoint_projection(kp_a));
     auto embed_b = torch::relu(_descriptor_projection(desc_b) + _keypoint_projection(kp_b));
+    // 多层图注意力逐步传播邻域和跨图上下文，再用归一化点积得到匹配 logits。
     for (const auto& layer : *_attention_layers)
     {
         auto refined = layer->as<PlanetaryGraphAttentionLayerImpl>()->forward(embed_a, embed_b);
@@ -180,6 +183,7 @@ PlanetaryGraphMatcherOutput PlanetaryGraphMatcherImpl::forward(const torch::Tens
     auto inlier_mask = best_indices.lt(descriptors_b.size(0));
     if (descriptors_a.size(0) > 0 && descriptors_b.size(0) > 0)
     {
+        // 输出阶段只保留互为最佳的匹配，dustbin 或单向最佳会被过滤掉。
         auto mutual_sources = reverse_best.index_select(0, best_indices.clamp(0, descriptors_b.size(0) - 1));
         inlier_mask = inlier_mask.logical_and(mutual_sources.eq(source_indices));
     }

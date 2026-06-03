@@ -243,7 +243,7 @@ def render_camera_depth(
     links_dir.mkdir(parents=True, exist_ok=True)
     render_dir.mkdir(parents=True, exist_ok=True)
     link = links_dir / f"A_{seq:05d}.tsai"
-    link.symlink_to(camera_path)
+    shutil.copy2(camera_path, link)
     camera_list = work_dir / "camera_list.txt"
     camera_list.write_text(str(link) + "\n", encoding="utf-8")
     dem_vrt = ensure_dem_vrt(output_root, dem)

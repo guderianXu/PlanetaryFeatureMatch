@@ -15,6 +15,7 @@ namespace
 
 cv::Mat tensor_to_bgr_u8(const torch::Tensor& image)
 {
+    // 训练内部使用 RGB/灰度 float 张量，OpenCV 写 PNG 需要转换成 BGR uint8。
     if (!image.defined())
     {
         throw std::invalid_argument("visualization image tensor must be defined");
@@ -104,6 +105,7 @@ void AsyncVisualizationWriter::enqueueImage(const std::filesystem::path& output_
     {
         throw std::invalid_argument("visualization image tensor must be defined");
     }
+    // 入队前复制到 CPU，避免后台线程访问训练步骤中可能被释放或复用的 GPU/临时张量。
     auto cpu_image = image.detach().to(torch::kCPU).contiguous();
     enqueueJob(
         [output_path, cpu_image, overlay]()
@@ -138,6 +140,7 @@ void AsyncVisualizationWriter::enqueueJob(std::function<void()> job)
 
 void AsyncVisualizationWriter::join()
 {
+    // join 可以重复调用；第一次负责停止 worker，后续只重新抛出已记录的错误。
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_joined)
@@ -174,6 +177,7 @@ void AsyncVisualizationWriter::run()
             VisualizationJob job;
             {
                 std::unique_lock<std::mutex> lock(_mutex);
+                // worker 在队列为空时休眠；析构或显式 join 时即使无任务也会被唤醒退出。
                 _not_empty.wait(lock,
                                 [this]()
                                 {

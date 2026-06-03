@@ -22,13 +22,19 @@ namespace
 {
 
 constexpr double PI = 3.14159265358979323846;
+
+// 半周旋转一致性过滤用于火星/小行星等视角剧烈变化样本，先用极坐标结构剔除明显错误匹配。
 constexpr int64_t ROTATION_CONSISTENCY_MIN_MATCHES = 32;
 constexpr int64_t ROTATION_CONSISTENCY_BINS = 72;
 constexpr double ROTATION_CONSISTENCY_MAX_ANGLE_ERROR = PI / 36.0;
 constexpr double ROTATION_CONSISTENCY_MAX_RADIUS_ERROR = 2.0;
 constexpr double ROTATION_CONSISTENCY_MAX_POSITION_ERROR = 0.5;
+
+// 图匹配器的 logits 是二次规模，大关键点数量时优先走描述子和几何过滤，避免推理耗时失控。
 constexpr int64_t GRAPH_GREEDY_MAX_MATCHES = 256;
 constexpr int64_t GRAPH_MATCHER_MAX_SPARSE_KEYPOINTS = 1024;
+
+// 投影/局部位移过滤负责把描述子候选收紧为几何一致匹配，阈值保持保守以降低误报。
 constexpr int64_t GEOMETRIC_CONSISTENCY_MIN_MATCHES = 8;
 constexpr int64_t GEOMETRIC_CONSISTENCY_MIN_INLIERS = 4;
 constexpr double GEOMETRIC_CONSISTENCY_RANSAC_THRESHOLD = 0.75;
@@ -46,6 +52,8 @@ constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_NEIGHBORS = 12;
 constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_MIN_INLIERS = 4;
 constexpr int64_t LOCAL_DISPLACEMENT_CONSISTENCY_MAX_ADAPTIVE_CANDIDATES = 8192;
 constexpr int64_t LOCAL_DISPLACEMENT_ADAPTIVE_MIN_GAIN = 8;
+
+// Top-K 描述子候选是已学习匹配器失效时的主回退路径；不同宽度用于常规、保守和弱纹理救援。
 constexpr int64_t DESCRIPTOR_TOPK_CANDIDATES_PER_SOURCE = 4;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE = 2;
 constexpr int64_t DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES = 64;
@@ -104,6 +112,7 @@ bool useTopKGeometryForDebug()
 
 bool shouldUseGraphMatcherForSparseCount(int64_t keypoint_count_a, int64_t keypoint_count_b)
 {
+    // 已学习图匹配器的显存和时间随 NxM 增长；大规模稀疏点交给 Top-K 候选处理。
     return keypoint_count_a <= GRAPH_MATCHER_MAX_SPARSE_KEYPOINTS &&
            keypoint_count_b <= GRAPH_MATCHER_MAX_SPARSE_KEYPOINTS;
 }
@@ -1332,6 +1341,11 @@ template <typename GraphMatcherT>
 std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& features_a, const FeatureSet& features_b,
                                                             GraphMatcherT& matcher)
 {
+    // 稀疏匹配流程：
+    // 1. 计算互为最近邻描述子匹配，作为低成本基线和最终兜底。
+    // 2. 关键点数量可控时运行已学习图匹配器。
+    // 3. 构造描述子 Top-K 候选，先用旋转一致性过滤，再用投影/局部几何过滤。
+    // 4. 当常规过滤过少时，尝试投影救援、保守 Top-K、宽 Top-K 或互逆 Top-K。
     const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
     const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
     if (!features_a.descriptors.defined() || !features_b.descriptors.defined())
@@ -1363,6 +1377,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                                                    torch::empty({0}, float_options)};
     if (shouldUseGraphMatcherForSparseCount(features_a.descriptors.size(0), features_b.descriptors.size(0)))
     {
+        // 先使用互匹配图 logits；数量不足时逐步放宽为贪心/宽松模式，以保留可被几何过滤验证的候选。
         const auto output = matcher.forward(features_a.descriptors.to(matcher_device, torch::kFloat32),
                                             features_a.keypoints.to(matcher_device, torch::kFloat32),
                                             features_b.descriptors.to(matcher_device, torch::kFloat32),
@@ -1398,6 +1413,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         return {matches, scores};
     }
     Timer debug_timer;
+    // Top-K 描述子候选覆盖非互为最近邻但几何上可成立的匹配，主要服务大视角和弱纹理样本。
     auto descriptor_topk =
         useTopKGeometryForDebug()
             ? matchDescriptorTopKFeatures(features_a, features_b, descriptorTopKCandidatesPerSource(), matcher_device)
@@ -1412,6 +1428,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     {
         if (descriptorTopKProjectiveBeforeRotation())
         {
+            // 调试开关：直接用投影几何过滤原始 Top-K，便于比较旋转过滤是否过严。
             auto unique_projective_topk =
                 mergeSparseMatchCandidates(descriptor_topk.first, descriptor_topk.second,
                                            torch::empty({0, 2}, long_options), torch::empty({0}, float_options));
@@ -1432,6 +1449,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         }
         auto topk_rotation =
             filterRotationConsistentMatches(features_a, features_b, descriptor_topk.first, descriptor_topk.second);
+        // 旋转过滤可能产生重复索引，进入投影模型前先去重，避免 RANSAC 被重复候选放大权重。
         auto unique_rotation =
             mergeSparseMatchCandidates(topk_rotation.first, topk_rotation.second, torch::empty({0, 2}, long_options),
                                        torch::empty({0}, float_options));
@@ -1448,6 +1466,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         if (sparseGeometryFilter() == SparseGeometryFilter::RotationOnly &&
             unique_rotation.first.size(0) < DESCRIPTOR_PROJECTIVE_RESCUE_MAX_BASE_MATCHES)
         {
+            // 仅旋转模式下仍保留投影救援，防止旋转分桶在弱纹理/小重叠样本中过滤过狠。
             auto unique_projective_topk =
                 mergeSparseMatchCandidates(descriptor_topk.first, descriptor_topk.second,
                                            torch::empty({0, 2}, long_options), torch::empty({0}, float_options));
@@ -1473,6 +1492,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         }
         if (unique_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES)
         {
+            // 常规路径：旋转一致性先降低外点比例，再由投影或局部位移模型确认几何一致性。
             auto topk_consistent = filterSparseGeometryConsistentMatches(features_a, features_b, unique_rotation.first,
                                                                          unique_rotation.second);
             if (debug)
@@ -1489,6 +1509,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
             {
                 if (descriptor_matches.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES)
                 {
+                    // Top-K 数量接近互为最近邻时优先选择更保守的互匹配，降低误匹配扩张风险。
                     auto descriptor_consistent = filterSparseGeometryConsistentMatches(
                         features_a, features_b, descriptor_matches.first, descriptor_matches.second);
                     if (debug)
@@ -1505,6 +1526,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                 }
                 if (topk_consistent.first.size(0) < DESCRIPTOR_PROJECTIVE_RESCUE_MAX_BASE_MATCHES)
                 {
+                    // 若旋转后的结果仍偏少，再对原始 Top-K 做一次投影救援，找回被旋转分桶漏掉的内点。
                     auto unique_projective_topk = mergeSparseMatchCandidates(
                         descriptor_topk.first, descriptor_topk.second, torch::empty({0, 2}, long_options),
                         torch::empty({0}, float_options));
@@ -1523,6 +1545,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                 if (descriptorTopKCandidatesPerSource() > DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE &&
                     topk_consistent.first.size(0) <= DESCRIPTOR_CONSERVATIVE_TOPK_FALLBACK_MAX_BASE_MATCHES)
                 {
+                    // 保守 Top-K 用更窄候选集合重跑，避免宽候选在极少匹配时带来错误模型。
                     auto conservative_topk = matchDescriptorTopKFeatures(
                         features_a, features_b, DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE, matcher_device);
                     auto conservative_rotation = filterRotationConsistentMatches(
@@ -1550,6 +1573,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                 }
                 if (topk_consistent.first.size(0) <= DESCRIPTOR_WIDE_TOPK_FALLBACK_MAX_BASE_MATCHES)
                 {
+                    // 宽 Top-K 只在基础结果极少且均分很高时启用，用于补救强重复纹理或弱响应场景。
                     auto wide_topk = matchDescriptorTopKFeatures(
                         features_a, features_b, DESCRIPTOR_WIDE_TOPK_CANDIDATES_PER_SOURCE, matcher_device);
                     auto wide_rotation =
@@ -1586,6 +1610,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         }
         if (descriptorReciprocalTopKFallback())
         {
+            // 互逆 Top-K 是较慢的实验性 fallback，默认关闭，仅用于诊断难例。
             auto reciprocal_topk = matchDescriptorReciprocalTopKFeatures(
                 features_a, features_b, descriptorTopKCandidatesPerSource(), matcher_device);
             auto reciprocal_rotation =
@@ -1611,6 +1636,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     }
     if (descriptor_matches.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES)
     {
+        // 当 Top-K 路径无法形成稳定模型时，回到互为最近邻描述子并再做一次几何验证。
         auto descriptor_consistent = filterSparseGeometryConsistentMatches(
             features_a, features_b, descriptor_matches.first, descriptor_matches.second);
         if (debug)

@@ -15,8 +15,8 @@
 #include "cache_eval/cache_eval_metrics.h"
 #include "cache_eval/cache_eval_quality.h"
 #include "cache_eval/cache_eval_training.h"
-#include "infer/feature_codec.h"
-#include "infer/match_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "infer/match_metrics.h"
 
 namespace

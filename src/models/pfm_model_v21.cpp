@@ -15,6 +15,7 @@ namespace
 constexpr int64_t CORRELATION_RADIUS = 4;
 constexpr int64_t CORRELATION_CHANNELS = (CORRELATION_RADIUS * 2 + 1) * (CORRELATION_RADIUS * 2 + 1);
 
+// 当前 C++ v2.1 模型镜像 Python 训练结构，辅助函数尽量保持和 state_dict 命名/形状兼容。
 void requirePositive(int64_t value, const char* name)
 {
     if (value <= 0)
@@ -25,6 +26,7 @@ void requirePositive(int64_t value, const char* name)
 
 int64_t groupCount(int64_t channels)
 {
+    // 分组归一化优先使用较大组数，但保证每组至少两个通道，适配不同 base_channels。
     for (const auto groups : {32, 16, 8, 4, 2})
     {
         if (channels % groups == 0 && channels / groups >= 2)
@@ -47,6 +49,7 @@ torch::Tensor finiteOrZero(const torch::Tensor& tensor)
 
 torch::Tensor normalizeChannelsStable(const torch::Tensor& tensor)
 {
+    // 非有限值先清零，再做尺度归一化，避免损坏 checkpoint 在推理端继续传播 NaN。
     const auto finite = finiteOrZero(tensor);
     const auto scale = finite.detach().abs().amax({1}, true).clamp_min(1.0);
     const auto scaled = finite / scale;
@@ -71,6 +74,7 @@ torch::nn::Sequential makeStageRefinement(int64_t channels)
 
 void zeroModule(torch::nn::Module& module)
 {
+    // 零初始化残差支路让新模块初始接近恒等映射，便于加载旧 checkpoint 后稳定微调。
     torch::NoGradGuard no_grad;
     for (auto& parameter : module.parameters())
     {
@@ -90,6 +94,7 @@ void zeroConv(torch::nn::Conv2d& module)
 
 void initConcatIdentityProjection(torch::nn::Conv2d& module, int64_t descriptor_dim)
 {
+    // 融合适配器输入是 learned/texture 拼接，初始化为直接保留 learned descriptor。
     torch::NoGradGuard no_grad;
     module->weight.zero_();
     if (module->bias.defined())
@@ -127,6 +132,7 @@ torch::Tensor rotateFeatureMap(const torch::Tensor& tensor, int64_t turns)
 
 torch::Tensor alignDescriptorOrientationChannels(const torch::Tensor& tensor, int64_t turns)
 {
+    // 描述子通道按四个方向分组，旋转特征图时同步滚动通道，保持方向语义对齐。
     const auto channels = tensor.size(1);
     if (channels < 4 || channels % 4 != 0)
     {
@@ -172,6 +178,7 @@ torch::nn::Sequential makeDescriptorTower(int64_t input_channels, int64_t descri
 
 torch::Tensor makeMultiscaleDescriptorContext(const torch::Tensor& context)
 {
+    // 局部和较大窗口平均池化提供多尺度纹理上下文，帮助弱纹理区域描述子稳定。
     auto local = torch::avg_pool2d(context, {3, 3}, {1, 1}, {1, 1}, false, false);
     auto wider = torch::avg_pool2d(context, {5, 5}, {1, 1}, {2, 2}, false, false);
     return torch::cat({context, local, wider}, 1);
@@ -207,6 +214,7 @@ torch::Tensor conv1x1ChannelSlice(torch::nn::Conv2d& projection, const torch::Te
 
 torch::Tensor applyAnisotropicViewpointProjection(torch::nn::Conv2d& projection, const torch::Tensor& context)
 {
+    // 横向/纵向大核上下文模拟视角拉伸下的各向异性纹理支持区域。
     const auto channels = context.size(1);
     auto result = conv1x1ChannelSlice(projection, context, 0, true);
     auto horizontal = torch::avg_pool2d(context, {1, 7}, {1, 1}, {0, 3}, false, false);
@@ -886,7 +894,8 @@ torch::Tensor PfmV21GraphMatcherImpl::acceptanceLogits(const torch::Tensor& raw_
 PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& descriptors_a,
                                                          const torch::Tensor& keypoints_a,
                                                          const torch::Tensor& descriptors_b,
-                                                         const torch::Tensor& keypoints_b)
+                                                         const torch::Tensor& keypoints_b,
+                                                         bool apply_candidate_mask)
 {
     using torch::indexing::Slice;
 
@@ -926,9 +935,12 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     auto delta_scale = _graph_delta_scale.clamp(0.0, 2.0);
     auto accept_scale = _accept_logit_scale.clamp(0.0, 2.0);
     auto pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits;
-    auto mask = candidateMask(desc_a, desc_b);
-    pair_logits = pair_logits.masked_fill(mask.logical_not(), -1.0e4);
-    accept_logits = accept_logits.masked_fill(mask.logical_not(), -1.0e4);
+    if (apply_candidate_mask)
+    {
+        auto mask = candidateMask(desc_a, desc_b);
+        pair_logits = pair_logits.masked_fill(mask.logical_not(), -1.0e4);
+        accept_logits = accept_logits.masked_fill(mask.logical_not(), -1.0e4);
+    }
     auto logits =
         torch::zeros({descriptors_a.size(0) + 1, descriptors_b.size(0) + 1}, pair_logits.options()) + _dustbin_bias;
     logits.index_put_({Slice(0, descriptors_a.size(0)), Slice(0, descriptors_b.size(0))}, pair_logits);

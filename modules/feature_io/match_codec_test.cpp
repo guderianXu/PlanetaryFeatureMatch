@@ -6,7 +6,7 @@
 #include <torch/torch.h>
 #include <unistd.h>
 
-#include "infer/match_codec.h"
+#include "feature_io/match_codec.h"
 #include "tests/test_harness.h"
 
 namespace

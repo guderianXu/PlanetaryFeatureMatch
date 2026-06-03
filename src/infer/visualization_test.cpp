@@ -7,8 +7,8 @@
 #include <torch/torch.h>
 #include <unistd.h>
 
-#include "infer/feature_codec.h"
-#include "infer/match_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "infer/visualization.h"
 #include "tests/test_harness.h"
 

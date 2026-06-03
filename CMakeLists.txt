@@ -178,6 +178,26 @@ target_include_directories(pfm_eval PUBLIC
 target_link_libraries(pfm_eval PUBLIC ${TORCH_LIBRARIES})
 target_compile_options(pfm_eval PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(pfm_checkpoint_gate_core STATIC
+    modules/checkpoint_gate/checkpoint_gate.cpp
+)
+target_include_directories(pfm_checkpoint_gate_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_compile_options(pfm_checkpoint_gate_core PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(pfm_feature_io STATIC
+    modules/feature_io/feature_codec.cpp
+    modules/feature_io/match_codec.cpp
+)
+target_include_directories(pfm_feature_io PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules
+)
+target_link_libraries(pfm_feature_io PUBLIC ${TORCH_LIBRARIES})
+target_compile_options(pfm_feature_io PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(pfm STATIC
     src/cli/commands.cpp
     src/data/image_dataset.cpp
@@ -186,10 +206,7 @@ add_library(pfm STATIC
     src/data/synthetic_pair_cache.cpp
     src/data/synthetic_pair_dataset.cpp
     src/infer/eval_pipeline.cpp
-    src/infer/checkpoint_gate.cpp
-    src/infer/feature_codec.cpp
     src/infer/feature_extractor.cpp
-    src/infer/match_codec.cpp
     src/infer/match_metrics.cpp
     src/infer/matching_pipeline.cpp
     src/infer/pipeline.cpp
@@ -207,7 +224,7 @@ target_include_directories(pfm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/modules
 )
 
-target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_dataloader pfm_logging pfm_optim pfm_losses ${TORCH_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(pfm PUBLIC pfm_core pfm_image pfm_geometry pfm_augment pfm_eval pfm_checkpoint_gate_core pfm_feature_io pfm_dataloader pfm_logging pfm_optim pfm_losses ${TORCH_LIBRARIES} ${OpenCV_LIBS})
 target_compile_options(pfm PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(pfm_cli src/main.cpp)
@@ -257,12 +274,12 @@ add_executable(pfm_tests
     modules/match_quality/spatial_match_quality_test.cpp
     modules/training_schedule/training_schedule_test.cpp
     modules/adaptive_match_policy/adaptive_match_policy.test.cpp
+    modules/checkpoint_gate/checkpoint_gate_test.cpp
+    modules/feature_io/feature_codec_test.cpp
+    modules/feature_io/match_codec_test.cpp
     src/infer/eval_pipeline_test.cpp
-    src/infer/feature_codec_test.cpp
     src/infer/feature_extractor_test.cpp
-    src/infer/match_codec_test.cpp
     src/infer/match_metrics_test.cpp
-    src/infer/checkpoint_gate_test.cpp
     src/infer/matching_pipeline_test.cpp
     src/infer/pipeline_test.cpp
     src/infer/visualization_test.cpp

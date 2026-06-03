@@ -19,6 +19,7 @@ namespace
 
 void parseVisualizationSamples(CliOptions& options)
 {
+    // --visualization-samples 同时支持整数和 all，这里集中解析，避免每个子命令重复校验。
     if (options.visualization_samples_option == "all")
     {
         options.visualization_samples_all = true;
@@ -46,6 +47,7 @@ void parseVisualizationSamples(CliOptions& options)
 
 std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
 {
+    // 所有子命令共享同一个 CliOptions，CLI11 负责把命令行值直接写入字段。
     auto app = std::make_unique<CLI::App>("Planetary feature matching");
     app->require_subcommand(1);
     app->get_formatter()->enable_footer_formatting(false);
@@ -57,7 +59,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         "[--augmentation-curriculum] [--rotation-step-degrees 15] "
         "[--extreme-pair-ratio 0.2] [--learning-rate 0.0003] [--lr-warmup-steps 0] "
         "[--min-learning-rate-ratio 0.01] [--training-profile full] [--full-v21] "
-        "[--pair-cache-dir cache/train] [--pair-cache-limit 0] "
+        "[--pair-cache-dir cache/train] [--pair-cache-limit 0] [--memory-cache-items 0] "
         "[--synthetic-pair-cache-dir build/pair_cache] [--cache-only] "
         "[--extra-synthetic-pair-cache-dir img/Rotate] [--graph-keypoint-meta-dim 16] [--log-csv metrics.csv] "
         "[--dataloader-workers 0] [--prefetch-batches 2] [--pin-memory] "
@@ -123,8 +125,16 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                     "Use full v2.1 model dimensions: base=64, descriptor=256, graph_hidden=512, graph_layers=8");
     train
         ->add_option("--training-profile", options.training_profile,
-                     "Training loss profile: smoke, detector, descriptor, graph, or full")
-        ->check(CLI::IsMember({"smoke", "detector", "descriptor", "graph", "full"}));
+                     "Training loss profile: smoke, detector, descriptor, graph, full, or python-compare")
+        ->check(CLI::IsMember({"smoke", "detector", "descriptor", "graph", "full", "python-compare"}));
+    train->add_option("--samples-per-pair", options.samples_per_pair,
+                      "Python-compatible sampled correspondence count per pair")
+        ->check(CLI::PositiveNumber);
+    train->add_option("--synthetic-loss-weight", options.synthetic_loss_weight,
+                      "Python-compatible descriptor synthetic loss weight");
+    train->add_option("--graph-matcher-loss-weight", options.graph_matcher_loss_weight,
+                      "Python-compatible graph matcher loss weight");
+    train->add_option("--temperature", options.temperature, "Python-compatible descriptor contrastive temperature");
     train->add_option("--pairs-per-image", options.pairs_per_image,
                       "Synthetic training pairs generated per source image");
     train
@@ -164,6 +174,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train
         ->add_option("--pair-cache-limit", options.pair_cache_limit,
                      "Optional positive pair archive limit per --pair-cache-dir; 0 uses all discovered pairs")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--memory-cache-items,--pair-memory-cache-size", options.pair_memory_cache_size,
+                     "CPU pair archive LRU memory cache size in samples; 0 disables the memory pool")
         ->check(CLI::NonNegativeNumber);
     train->add_option("--log-csv", options.log_csv, "CSV path for per-iteration training metrics");
     train

@@ -131,6 +131,30 @@ static void pfm_v21_graph_matcher_scalar_parameters_match_python_shapes()
     PFM_REQUIRE(found_accept_scale);
 }
 
+static void pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    auto descriptors_a = torch::zeros({3, 8}, torch::kFloat32);
+    auto descriptors_b = torch::zeros({3, 8}, torch::kFloat32);
+    descriptors_a.index_put_({0, 0}, 1.0F);
+    descriptors_a.index_put_({1, 0}, -1.0F);
+    descriptors_a.index_put_({2, 0}, -1.0F);
+    descriptors_b.index_put_({0, 0}, -1.0F);
+    descriptors_b.index_put_({1, 0}, 1.0F);
+    descriptors_b.index_put_({2, 0}, 1.0F);
+    auto metadata = torch::zeros({3, 16}, torch::kFloat32);
+
+    const auto masked = matcher->forward(descriptors_a, metadata, descriptors_b, metadata);
+    const auto unmasked = matcher->forward(descriptors_a, metadata, descriptors_b, metadata, false);
+
+    PFM_REQUIRE(masked.logits.index({0, 0}).item<float>() < -9000.0F);
+    PFM_REQUIRE(unmasked.logits.index({0, 0}).item<float>() > -9000.0F);
+    PFM_REQUIRE(torch::isfinite(unmasked.logits).all().item<bool>());
+}
+
 static void pfm_v21_optimizer_step_updates_parameters()
 {
     torch::manual_seed(7);
@@ -177,5 +201,7 @@ void register_pfm_model_v21_tests()
     register_test("pfm v21 graph matcher accepts full metadata", pfm_v21_graph_matcher_accepts_full_metadata);
     register_test("pfm v21 graph matcher scalar parameters match python shapes",
                   pfm_v21_graph_matcher_scalar_parameters_match_python_shapes);
+    register_test("pfm v21 graph matcher can disable candidate mask for training loss",
+                  pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss);
     register_test("pfm v21 optimizer step updates parameters", pfm_v21_optimizer_step_updates_parameters);
 }

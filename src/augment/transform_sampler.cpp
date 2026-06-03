@@ -22,11 +22,13 @@ struct ProfileStrength
 
 float deterministicWave(int64_t source_index, int64_t variant_index, float frequency, float phase)
 {
+    // 使用 source/variant 的确定性正弦波代替随机数，保证 cache 重建和单测完全可复现。
     return std::sin(static_cast<float>(source_index + 1) * phase + static_cast<float>(variant_index + 1) * frequency);
 }
 
 AugmentationProfile mixedProfileForVariant(const ImagePairAugmentationConfig& config)
 {
+    // mixed 档位轮换 mild/medium/hard，并按配置插入 extreme 难例。
     if (config.extreme_pair_ratio > 0.0 && config.variant_index % 4 == 1)
     {
         return AugmentationProfile::Extreme;
@@ -44,6 +46,7 @@ AugmentationProfile mixedProfileForVariant(const ImagePairAugmentationConfig& co
 
 ProfileStrength profileStrength(AugmentationProfile profile)
 {
+    // 每个档位只定义扰动幅度，具体符号和数值由 deterministicWave 采样。
     switch (profile)
     {
     case AugmentationProfile::Mild:
@@ -127,6 +130,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
 
     if (config.profile == AugmentationProfile::RotationOnly)
     {
+        // rotation-only 用作旋转不变性锚点，关闭平移、光度和噪声，只改变角度。
         params.translation_x = 0.0F;
         params.translation_y = 0.0F;
         params.rotation_degrees = static_cast<float>(config.variant_index) * config.rotation_step_degrees;
@@ -158,6 +162,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
 
     if (mixed_quarter_turn)
     {
+        // mixed 中定期插入 90 度旋转锚点，避免模型只适应小角度扰动。
         params.rotation_degrees += deterministicWave(source, index, 0.23F, 0.61F) >= 0.0F ? 90.0F : -90.0F;
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
@@ -165,6 +170,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     }
     if (mixed_half_turn)
     {
+        // 180 度锚点用于训练半周旋转一致性。
         params.rotation_degrees += deterministicWave(source, index, 0.19F, 0.43F) >= 0.0F ? 180.0F : -180.0F;
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
@@ -172,6 +178,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     }
     if (mixed_full_rotation_anchor)
     {
+        // 偶数 variant 覆盖完整 0-345 度离散角度，提供稳定旋转课程。
         params.rotation_degrees += static_cast<float>((config.variant_index % 24) * 15);
         params.gamma = 1.0F;
         params.shadow_strength = 0.0F;
@@ -197,6 +204,7 @@ ImagePairTransformParameters sampleImagePairTransform(const ImagePairAugmentatio
     params.shadow_strength = profile == AugmentationProfile::Extreme ? 0.30F : 0.12F;
     if (viewpoint_profile)
     {
+        // viewpoint 档位额外加入剪切和透视项，模拟跨轨道/跨高度拍摄的局部投影变化。
         params.shear_x = deterministicWave(source, index, 0.89F, 0.47F) * strength.shear;
         params.shear_y = deterministicWave(source, index, 1.07F, 0.73F) * strength.shear * 0.55F;
         params.perspective_x = deterministicWave(source, index, 0.53F, 1.17F) * strength.perspective;

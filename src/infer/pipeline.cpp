@@ -16,12 +16,12 @@
 
 #include "core/device.h"
 #include "core/timer.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "image/image_io.h"
 #include "image/intensity_mask.h"
 #include "infer/eval_pipeline.h"
-#include "infer/feature_codec.h"
 #include "infer/feature_extractor.h"
-#include "infer/match_codec.h"
 #include "infer/match_metrics.h"
 #include "infer/matching_pipeline.h"
 #include "infer/visualization.h"
@@ -35,6 +35,7 @@ namespace pfm
 namespace
 {
 
+// 推理阶段的阈值按“先快后稳”组织：常规输出不足时才进入更贵的高密度解码或纹理融合重跑。
 constexpr int64_t SPARSE_FEATURE_CHANNEL_MULTIPLIER = 2;
 constexpr double ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT = 1.0;
 constexpr int64_t DESCRIPTOR_GRID_FALLBACK_MIN_SPARSE_MATCHES = 16;
@@ -269,6 +270,7 @@ torch::Tensor adapt_image_channels(const torch::Tensor& image, int64_t input_cha
 torch::Tensor make_rotation_invariant_texture_saliency(const torch::Tensor& image, int64_t target_height,
                                                        int64_t target_width)
 {
+    // 用低频差分和一阶梯度构造旋转不敏感纹理热力图，作为推理阶段已学习热力图的稳定补充。
     auto base = image;
     if (base.size(1) != 1)
     {
@@ -390,6 +392,7 @@ torch::Tensor resize_dense_confidence_for_heatmap(const torch::Tensor& confidenc
 RawFeatureMaps run_mvp_model(const torch::Tensor& image, InferenceModules& modules, const CheckpointConfig& config,
                              torch::Device device, double texture_blend_weight)
 {
+    // C++ 推理复现 v2.1 Python 结构：backbone/FPN/稀疏头产生候选，纹理描述子再与已学习描述子融合。
     torch::NoGradGuard no_grad;
     const auto input = adapt_image_channels(image, config.input_channels).unsqueeze(0).contiguous().to(device);
     const auto feature_pyramid = modules.backbone->forward(input);
@@ -430,6 +433,7 @@ struct ExtractedFeatureSet
 FeatureSet make_descriptor_grid_feature_set(const RawFeatureMaps& maps, const FeatureDecodeConfig& config,
                                             const torch::Tensor& intensity_mask)
 {
+    // 描述子网格回退不依赖热力图响应，直接按网格抽取描述子；用于热力图过稀但描述子仍可匹配的样本。
     const auto descriptor_height = maps.descriptors.size(2);
     const auto descriptor_width = maps.descriptors.size(3);
     const auto max_points = std::max<int>(1, config.max_keypoints);
@@ -581,6 +585,7 @@ MatchSet filterMatchMode(const MatchSet& match_set, const std::string& match_mod
 
 bool shouldUseHighDensitySparseMatches(int64_t base_sparse_matches, int64_t high_density_sparse_matches)
 {
+    // 高密度重解码只在明显增加有效稀疏匹配时替换基础结果，避免单纯增加噪声候选。
     if (base_sparse_matches <= ADAPTIVE_HIGH_DENSITY_LOW_BASE_MAX_MATCHES)
     {
         return high_density_sparse_matches >= ADAPTIVE_HIGH_DENSITY_LOW_BASE_MIN_MATCHES ||
@@ -620,6 +625,7 @@ FeatureDecodeConfig makeHighDensityDecodeConfig(FeatureDecodeConfig decode_confi
 
 FeatureSet decode_high_density_feature_set(const ExtractedFeatureSet& extracted, FeatureDecodeConfig decode_config)
 {
+    // 复用已经前向得到的原始特征图，仅提高 min_keypoints，避免为了补点重复跑网络。
     decode_config = makeHighDensityDecodeConfig(decode_config);
     auto features = decode_feature_maps(extracted.maps, decode_config, extracted.intensity_mask);
     features.feature_map_width = extracted.feature_map_width;
@@ -647,6 +653,7 @@ ExtractedFeatureSet extract_feature_set(const std::string& image_path, Inference
                                         const FeatureDecodeConfig& decode_config, double min_keypoint_intensity,
                                         double texture_blend_weight = rotationInvariantTextureBlendWeight())
 {
+    // 单张影像提取被匹配/评估/提取命令共用，同时记录分阶段耗时，方便定位慢在 IO、前向还是解码。
     ExtractionTiming timing;
     Timer image_timer;
     const auto image = load_image_tensor(image_path);
@@ -736,6 +743,10 @@ int run_train_command(const CliOptions& options)
         config.graph_attention_layers = options.graph_attention_layers;
         config.graph_keypoint_meta_dim = options.graph_keypoint_meta_dim;
         config.training_profile = options.training_profile;
+        config.samples_per_pair = options.samples_per_pair;
+        config.synthetic_loss_weight = options.synthetic_loss_weight;
+        config.graph_matcher_loss_weight = options.graph_matcher_loss_weight;
+        config.temperature = options.temperature;
         config.pairs_per_image = options.pairs_per_image;
         config.max_train_batches = options.max_train_batches;
         config.learning_rate = options.learning_rate;
@@ -754,6 +765,7 @@ int run_train_command(const CliOptions& options)
         config.hard_synthetic_pair_cache_dirs = options.hard_synthetic_pair_cache_dirs;
         config.pair_cache_dirs = options.pair_cache_dirs;
         config.pair_cache_limit = options.pair_cache_limit;
+        config.pair_memory_cache_size = options.pair_memory_cache_size;
         config.hard_synthetic_pair_cache_repeats = options.hard_synthetic_pair_cache_repeats;
         config.hard_synthetic_pair_cache_indices = options.hard_synthetic_pair_cache_indices;
         config.cache_only = options.cache_only;
@@ -878,6 +890,7 @@ int run_match_command(const CliOptions& options)
         ExtractedFeatureSet extracted_b;
         if (use_feature_files)
         {
+            // 使用预先保存的 .pt 特征时不重新解码，特征图尺寸来自 archive，用于坐标缩放和可视化。
             extracted_a.features = load_feature_set(options.feature_a);
             extracted_b.features = load_feature_set(options.feature_b);
             extracted_a.feature_map_width = extracted_a.features.feature_map_width;
@@ -907,6 +920,7 @@ int run_match_command(const CliOptions& options)
             extracted_a.maps.descriptors.defined() && extracted_b.maps.descriptors.defined() &&
             extracted_a.intensity_mask.defined() && extracted_b.intensity_mask.defined())
         {
+            // 常规热力图匹配很少时，网格描述子回退可验证是否是关键点检测过稀而不是描述子失效。
             const auto decode_config = makeFeatureDecodeConfig(options);
             auto grid_features_a =
                 make_descriptor_grid_feature_set(extracted_a.maps, decode_config, extracted_a.intensity_mask);
@@ -929,6 +943,7 @@ int run_match_command(const CliOptions& options)
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS && extracted_a.maps.descriptors.defined() &&
             extracted_b.maps.descriptors.defined())
         {
+            // 如果用户允许高上限但默认 min_keypoints 较低，尝试高密度重解码补足弱纹理区域。
             const auto decode_config = makeFeatureDecodeConfig(options);
             auto high_density_features_a = decode_high_density_feature_set(extracted_a, decode_config);
             auto high_density_features_b = decode_high_density_feature_set(extracted_b, decode_config);
@@ -947,6 +962,7 @@ int run_match_command(const CliOptions& options)
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS &&
             rotationInvariantTextureBlendWeight() != ALTERNATE_TEXTURE_BLEND_WEIGHT)
         {
+            // 纹理融合权重为 0 的重跑保留纯 learned descriptor 路径，用于纹理先验干扰时的补救。
             const auto decode_config = makeFeatureDecodeConfig(options);
             auto alternate_a = extract_feature_set(options.image_a, modules, checkpoint_config, device, decode_config,
                                                    options.min_keypoint_intensity, ALTERNATE_TEXTURE_BLEND_WEIGHT);
@@ -983,6 +999,7 @@ int run_match_command(const CliOptions& options)
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS &&
             rotationInvariantTextureBlendWeight() != BALANCED_TEXTURE_BLEND_WEIGHT)
         {
+            // 平衡纹理融合只接受小幅增益，避免为了少量匹配替换掉已经稳定的基础结果。
             const auto decode_config = makeFeatureDecodeConfig(options);
             auto balanced_a = extract_feature_set(options.image_a, modules, checkpoint_config, device, decode_config,
                                                   options.min_keypoint_intensity, BALANCED_TEXTURE_BLEND_WEIGHT);
@@ -1023,6 +1040,7 @@ int run_match_command(const CliOptions& options)
         torch::Tensor warp_a_to_b;
         if (!options.warp_a_to_b.empty())
         {
+            // 合成影像对提供真实稠密变形场时，直接输出正确/错误匹配数，供检查点质量门控和回归测试使用。
             warp_a_to_b = load_warp_a_to_b_tensor(options.warp_a_to_b);
             warp_metrics = compute_warp_match_metrics(metric_features_a, metric_features_b, match_set, warp_a_to_b,
                                                       options.match_correct_threshold_pixels);
@@ -1035,6 +1053,7 @@ int run_match_command(const CliOptions& options)
             if (metric_features_a.feature_map_width > 0 && metric_features_a.feature_map_height > 0 &&
                 metric_features_b.feature_map_width > 0 && metric_features_b.feature_map_height > 0)
             {
+                // 有特征图尺寸时按解码坐标缩放到原图，预提取特征和在线提取都能共用这一条路径。
                 if (warp_a_to_b.defined())
                 {
                     (void)save_match_visualization(
@@ -1054,6 +1073,7 @@ int run_match_command(const CliOptions& options)
             }
             else
             {
+                // 旧 archive 可能没有特征图尺寸，只能按已经写入的点坐标直接可视化。
                 if (warp_a_to_b.defined())
                 {
                     (void)save_match_visualization(options.image_a, options.image_b, match_set,

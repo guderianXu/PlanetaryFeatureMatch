@@ -7,8 +7,8 @@
 #include <tuple>
 #include <vector>
 
-#include "infer/feature_codec.h"
-#include "infer/match_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "infer/match_metrics.h"
 
 namespace

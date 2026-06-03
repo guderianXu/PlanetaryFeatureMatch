@@ -12,6 +12,7 @@ namespace
 
 bool isPairArchivePath(const std::filesystem::path& path)
 {
+    // 只接受 pair_*.pt，避免递归扫描时把 manifest.pt 或诊断文件误当训练样本。
     const auto name = path.filename().string();
     return path.extension() == ".pt" && name.rfind("pair_", 0) == 0;
 }
@@ -31,6 +32,7 @@ torch::Tensor requireTensor(const torch::jit::Module& module, const char* name, 
 
 void validatePairArchiveSample(const PairArchiveSample& sample, bool require_nonempty_valid_mask)
 {
+    // pair archive 是训练入口，形状和有限值在这里一次性收紧，后续 DataLoader 不再做重复防御。
     if (sample.view_a.dim() != 3 || sample.view_b.dim() != 3)
     {
         throw std::invalid_argument(sample.path.string() + " view tensors must have shape CxHxW");
@@ -81,6 +83,7 @@ std::vector<std::filesystem::path> discoverPairArchivePaths(const std::filesyste
     }
 
     std::vector<std::filesystem::path> paths;
+    // 递归扫描允许 cache 按 source_* 子目录组织，同时保持全局路径排序的确定性。
     for (const auto& entry : std::filesystem::recursive_directory_iterator(cache_dir))
     {
         if (entry.is_regular_file() && isPairArchivePath(entry.path()))
@@ -98,6 +101,7 @@ std::vector<std::filesystem::path> discoverPairArchivePaths(const std::filesyste
 
 PairArchiveSample loadPairArchiveSample(const std::filesystem::path& path, bool require_nonempty_valid_mask)
 {
+    // 脚本侧生成的缓存使用 TorchScript 归档，C++ 侧统一在 CPU 上加载和校验。
     if (!std::filesystem::exists(path))
     {
         throw std::invalid_argument("pair archive does not exist: " + path.string());

@@ -173,6 +173,8 @@ static void parse_train_command()
         "sim_cache_train",
         "--pair-cache-limit",
         "9",
+        "--memory-cache-items",
+        "11",
         "--synthetic-pair-cache-rebuild",
         "--log-csv",
         "metrics.csv",
@@ -238,6 +240,7 @@ static void parse_train_command()
     PFM_REQUIRE(parsed.hard_synthetic_pair_cache_indices == std::vector<int64_t>({3, 8}));
     PFM_REQUIRE(parsed.pair_cache_dirs == std::vector<std::string>({"sim_cache_train"}));
     PFM_REQUIRE(parsed.pair_cache_limit == 9);
+    PFM_REQUIRE(parsed.pair_memory_cache_size == 11);
     PFM_REQUIRE(parsed.synthetic_pair_cache_rebuild);
     PFM_REQUIRE(parsed.log_csv == "metrics.csv");
     PFM_REQUIRE(parsed.dataloader_workers == 2);
@@ -276,6 +279,34 @@ static void parse_train_full_v21_sets_large_model_dimensions()
     PFM_REQUIRE(parsed.graph_hidden_dim == 512);
     PFM_REQUIRE(parsed.graph_attention_layers == 8);
     PFM_REQUIRE(parsed.graph_keypoint_meta_dim == 16);
+}
+
+static void parse_train_python_compare_profile_options()
+{
+    const auto parsed = pfm::parse_cli({
+        "pfm",
+        "train",
+        "--pair-cache-dir",
+        "cache/train",
+        "--checkpoint",
+        "model.pt",
+        "--training-profile",
+        "python-compare",
+        "--samples-per-pair",
+        "512",
+        "--synthetic-loss-weight",
+        "0.1",
+        "--graph-matcher-loss-weight",
+        "1.0",
+        "--temperature",
+        "0.07",
+    });
+
+    PFM_REQUIRE(parsed.training_profile == "python-compare");
+    PFM_REQUIRE(parsed.samples_per_pair == 512);
+    PFM_REQUIRE_CLOSE(parsed.synthetic_loss_weight, 0.1, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_loss_weight, 1.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.temperature, 0.07, 1.0e-12);
 }
 
 static void parse_train_visualization_defaults_to_four_samples()
@@ -565,6 +596,7 @@ void register_cli_tests()
     register_test("parse_train_defaults_to_bounded_resize", parse_train_defaults_to_bounded_resize);
     register_test("parse_train_command", parse_train_command);
     register_test("parse_train_full_v21_sets_large_model_dimensions", parse_train_full_v21_sets_large_model_dimensions);
+    register_test("parse_train_python_compare_profile_options", parse_train_python_compare_profile_options);
     register_test("parse_train_visualization_defaults_to_four_samples",
                   parse_train_visualization_defaults_to_four_samples);
     register_test("parse_train_visualization_samples_all", parse_train_visualization_samples_all);

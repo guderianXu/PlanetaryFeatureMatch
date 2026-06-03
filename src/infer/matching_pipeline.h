@@ -1,36 +1,36 @@
 #pragma once
 
-#include "infer/feature_codec.h"
-#include "infer/match_codec.h"
+#include "feature_io/feature_codec.h"
+#include "feature_io/match_codec.h"
 #include "models/pfm_model_v21.h"
 #include "models/planetary_graph_matcher.h"
 
 namespace pfm
 {
 
-/// Matches two decoded feature sets with the learned planetary graph matcher.
-/// @param features_a First image feature set.
-/// @param features_b Second image feature set.
-/// @param matcher Learned graph matcher module.
-/// @return MatchSet containing learned sparse index pairs/scores and semi-dense point correspondences/confidence.
-/// @throws std::invalid_argument if required sparse or dense tensors are undefined or have invalid dimensions.
+/// 使用已学习的行星图匹配器匹配两组已解码特征。
+/// @param features_a 第一幅影像的特征集合。
+/// @param features_b 第二幅影像的特征集合。
+/// @param matcher 已学习的图匹配模块。
+/// @return MatchSet，包含已学习稀疏索引对/分数以及半稠密点对应关系/置信度。
+/// @throws std::invalid_argument 当必需稀疏或稠密张量未定义，或维度非法时抛出。
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           PlanetaryGraphMatcherImpl& matcher);
 
-/// Matches two decoded feature sets with the v2.1 planetary graph matcher.
-/// @param features_a First image feature set.
-/// @param features_b Second image feature set.
-/// @param matcher v2.1 learned graph matcher module.
-/// @return MatchSet containing learned sparse index pairs/scores and semi-dense point correspondences/confidence.
-/// @throws std::invalid_argument if required sparse or dense tensors are undefined or have invalid dimensions.
+/// 使用 v2.1 行星图匹配器匹配两组已解码特征。
+/// @param features_a 第一幅影像的特征集合。
+/// @param features_b 第二幅影像的特征集合。
+/// @param matcher v2.1 已学习图匹配模块。
+/// @return MatchSet，包含已学习稀疏索引对/分数以及半稠密点对应关系/置信度。
+/// @throws std::invalid_argument 当必需稀疏或稠密张量未定义，或维度非法时抛出。
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           v21::PfmV21GraphMatcherImpl& matcher);
 
-/// Matches two decoded feature sets with the default learned planetary graph matcher.
-/// @param features_a First image feature set.
-/// @param features_b Second image feature set.
-/// @return MatchSet containing learned sparse index pairs/scores and semi-dense point correspondences/confidence.
-/// @throws std::invalid_argument if required sparse or dense tensors are undefined or have invalid dimensions.
+/// 使用默认已学习行星图匹配器匹配两组已解码特征。
+/// @param features_a 第一幅影像的特征集合。
+/// @param features_b 第二幅影像的特征集合。
+/// @return MatchSet，包含已学习稀疏索引对/分数以及半稠密点对应关系/置信度。
+/// @throws std::invalid_argument 当必需稀疏或稠密张量未定义，或维度非法时抛出。
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b);
 
 } // namespace pfm

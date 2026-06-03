@@ -1,4 +1,4 @@
-#include "infer/feature_codec.h"
+#include "feature_io/feature_codec.h"
 
 #include <stdexcept>
 #include <string>
