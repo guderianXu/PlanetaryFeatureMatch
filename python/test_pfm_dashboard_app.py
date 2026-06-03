@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -25,6 +26,11 @@ class DashboardAppTest(unittest.TestCase):
                     with urllib.request.urlopen(base + path, timeout=5) as response:
                         self.assertEqual(response.status, 200)
                         self.assertIn(b"PFM Lab", response.read())
+                with urllib.request.urlopen(base + "/train", timeout=5) as response:
+                    train_html = response.read().decode("utf-8")
+                self.assertIn("C++ 对齐 Python 训练定义", train_html)
+                self.assertIn('name="align_python_compare"', train_html)
+                self.assertNotIn('name="profile"', train_html)
                 with urllib.request.urlopen(base + "/api/runs", timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["runs"][0]["name"], "python_sample")
@@ -42,6 +48,37 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("创建时间".encode("utf-8"), runs_html)
                 self.assertIn("完成时间".encode("utf-8"), runs_html)
                 self.assertIn("删除".encode("utf-8"), runs_html)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_train_post_uses_checkbox_for_cpp_alignment_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache = root / "cache" / "train"
+            cache.mkdir(parents=True)
+            server = make_server("127.0.0.1", 0, project_root=root)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                form = {
+                    "experiment_name": "align_on",
+                    "backend": "cpp",
+                    "cache_dirs": str(cache),
+                    "align_python_compare": "1",
+                }
+                data = urllib.parse.urlencode(form).encode("utf-8")
+                urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
+                script = next((root / "runs").glob("align_on*/train.sh")).read_text(encoding="utf-8")
+                self.assertIn("--training-profile python-compare", script)
+
+                form["experiment_name"] = "align_off"
+                form.pop("align_python_compare")
+                data = urllib.parse.urlencode(form).encode("utf-8")
+                urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
+                script = next((root / "runs").glob("align_off*/train.sh")).read_text(encoding="utf-8")
+                self.assertIn("--training-profile full", script)
             finally:
                 server.shutdown()
                 server.server_close()

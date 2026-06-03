@@ -310,9 +310,13 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>输入缩放 <input type="number" name="resize" value="512" min="0"></label>
       <label>每对采样点 <input type="number" name="samples_per_pair" value="512" min="1"></label>
       <label>学习率 <input name="learning_rate" value="3e-5"></label>
-      <label>训练配置 <input name="profile" value="python-compare"></label>
       <label>最大批次数 <input type="number" name="max_train_batches" value="0" min="0"></label>
     </div>
+    <label class="check-row">
+      <input type="checkbox" name="align_python_compare" value="1" checked>
+      <span>C++ 对齐 Python 训练定义</span>
+      <small>默认开启，便于比较 Python/C++ 的 loss 和指标；关闭后 C++ 使用完整训练配置。</small>
+    </label>
   </section>
   <section class="panel">
     <div class="panel-head"><div><h2>缓存与加载器</h2><p>提前把 pair tensor 加载到内存，减少 GPU 等 IO。</p></div></div>
@@ -474,6 +478,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         fields = parse_qs(self.rfile.read(length).decode("utf-8"))
         value = lambda name, default="": fields.get(name, [default])[0]
         lines = lambda name: [line.strip() for line in value(name).splitlines() if line.strip()]
+        align_python_compare = value("align_python_compare", "") == "1"
         request = TrainingRequest(
             experiment_name=value("experiment_name", "dashboard_run"),
             backend=value("backend", "compare"),
@@ -488,7 +493,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             training_crop_size=int(value("training_crop_size", "512")),
             samples_per_pair=int(value("samples_per_pair", "512")),
             learning_rate=float(value("learning_rate", "3e-5")),
-            profile=value("profile", "python-compare"),
+            profile="python-compare" if align_python_compare else "full",
             memory_cache_items=int(value("memory_cache_items", "64")),
             prefetch_batches=int(value("prefetch_batches", "4")),
             prefetch_workers=int(value("prefetch_workers", "2")),
@@ -858,6 +863,32 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .form-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 label { display: block; color: var(--muted-strong); font-size: 12px; font-weight: 800; }
+.check-row {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 3px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.check-row input {
+  width: auto;
+  margin: 2px 0 0;
+}
+.check-row span {
+  color: var(--text);
+  font-size: 13px;
+}
+.check-row small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
 input, select, textarea {
   width: 100%;
   margin-top: 6px;
