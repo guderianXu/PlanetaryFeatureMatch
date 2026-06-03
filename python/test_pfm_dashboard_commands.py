@@ -55,7 +55,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--memory-cache-items 16", script)
         self.assertIn("--training-crop-size 512", script)
 
-    def test_compare_backend_creates_python_and_cpp_runs(self) -> None:
+    def test_compare_backend_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             request = TrainingRequest(
                 experiment_name="exp",
@@ -64,11 +64,8 @@ class DashboardCommandsTest(unittest.TestCase):
                 output_root=Path(temp),
             )
 
-            runs = create_training_runs(request)
-
-        self.assertEqual([run.backend for run in runs], ["python", "cpp"])
-        self.assertIn("exp_python", runs[0].run_dir.name)
-        self.assertIn("exp_cpp", runs[1].run_dir.name)
+            with self.assertRaisesRegex(ValueError, "backend must be python or cpp"):
+                create_training_runs(request)
 
 
 if __name__ == "__main__":

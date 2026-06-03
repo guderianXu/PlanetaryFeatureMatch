@@ -62,7 +62,17 @@ def _script_option(script_path: Path, *names: str) -> float | None:
 def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoint_count: int) -> tuple[float, str]:
     latest = metrics.latest
     script_path = run_path / "train.sh"
-    current_step = _number(latest.get("step")) or _number(latest.get("global_step")) or _number(latest.get("batch"))
+    current_step = (
+        _number(latest.get("step"))
+        or _number(latest.get("global_step"))
+        or _number(latest.get("batch"))
+        or _number(latest.get("iteration"))
+    )
+    total_iterations = _number(latest.get("total_iterations"))
+    if current_step is not None and total_iterations and total_iterations > 0:
+        percent = min(100.0, max(0.0, current_step / total_iterations * 100.0))
+        return percent, f"{int(current_step)}/{int(total_iterations)} 步"
+
     target_steps = _script_option(script_path, "--max-train-batches", "--steps")
     if current_step is not None and target_steps and target_steps > 0:
         percent = min(100.0, max(0.0, current_step / target_steps * 100.0))

@@ -305,14 +305,13 @@ def render_train(project_root: Path, message: str = "") -> str:
 </section>
 <form method="post" action="/train" class="train-workbench">
   <section class="panel launch-panel">
-    <div class="panel-head"><div><h2>实验配置</h2><p>一次提交可以启动 Python、C++ 或两边同时跑，用于直接对比。</p></div></div>
+    <div class="panel-head"><div><h2>实验配置</h2><p>默认启动 C++ 训练；Python 只作为单独验证入口。</p></div></div>
     <div class="form-grid two">
-      <label>实验名称 <input name="experiment_name" value="dashboard_compare"></label>
+      <label>实验名称 <input name="experiment_name" value="dashboard_cpp"></label>
       <label>训练后端
         <select name="backend">
-          <option value="compare">Python + C++ 对比</option>
-          <option value="python">只跑 Python</option>
-          <option value="cpp">只跑 C++</option>
+          <option value="cpp">C++ 训练</option>
+          <option value="python">Python 验证</option>
         </select>
       </label>
       <label>设备 <input name="device" value="cuda"></label>
@@ -325,7 +324,7 @@ def render_train(project_root: Path, message: str = "") -> str:
     </div>
   </section>
   <section class="panel data-panel">
-    <div class="panel-head"><div><h2>训练数据</h2><p>缓存目录会直接写入 Python 和 C++ 的启动脚本。</p></div><a href="/datasets">查看数据集</a></div>
+    <div class="panel-head"><div><h2>训练数据</h2><p>缓存目录会写入当前后端的启动脚本。</p></div><a href="/datasets">查看数据集</a></div>
     <label>训练缓存目录<textarea name="cache_dirs" rows="7">{html.escape(default_cache)}</textarea></label>
     <label>验证缓存目录<textarea name="validation_cache_dirs" rows="3" placeholder="可选，每行一个路径"></textarea></label>
   </section>
@@ -504,7 +503,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         lines = lambda name: [line.strip() for line in value(name).splitlines() if line.strip()]
         request = TrainingRequest(
             experiment_name=value("experiment_name", "dashboard_run"),
-            backend=value("backend", "compare"),
+            backend=value("backend", "cpp"),
             cache_dirs=lines("cache_dirs"),
             validation_cache_dirs=lines("validation_cache_dirs"),
             output_root=self.project_root / "runs",
@@ -1247,6 +1246,9 @@ function renderLiveChart(svg, seriesList) {
     }).join(' ');
     return `<path class="live-chart-line" d="${path}" stroke="${series.color}"></path>`;
   }).join('');
+  const dots = seriesList.map((series) => series.points.map((point) => (
+    `<circle class="live-chart-dot" cx="${xScale(point.x).toFixed(1)}" cy="${yScale(point.y).toFixed(1)}" r="2.8" fill="${series.color}"></circle>`
+  )).join('')).join('');
   svg.innerHTML = `
     <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}"></line>
     <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}"></line>
@@ -1255,6 +1257,7 @@ function renderLiveChart(svg, seriesList) {
     <text class="live-chart-label" x="${pad.left}" y="${height - 8}">${formatMetric(xMin, 4)}</text>
     <text class="live-chart-label" x="${pad.left + plotW - 32}" y="${height - 8}">${formatMetric(xMax, 4)}</text>
     ${lines}
+    ${dots}
   `;
 }
 
@@ -1269,9 +1272,9 @@ function renderLiveRuns(container, runs) {
     const runName = escapeHtml(run.name);
     const backend = ['python', 'cpp', 'unknown'].includes(run.backend) ? run.backend : 'unknown';
     const status = run.status === 'running' ? 'running' : 'done';
-    const loss = formatMetric(metricFromLatest(latest, ['loss', 'total_loss', 'train_loss']));
-    const top1 = formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1', 'mean_top1']));
-    const rank = formatMetric(metricFromLatest(latest, ['descriptor_positive_rank', 'mean_rank']));
+    const loss = formatMetric(metricFromLatest(latest, ['loss', 'loss_total', 'total_loss', 'train_loss']));
+    const top1 = formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
+    const rank = formatMetric(metricFromLatest(latest, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
     const rows = Object.keys(latest).length ? '已更新' : '无指标';
     const percent = Math.max(0, Math.min(100, Number(run.progress_percent) || 0));
     return `
@@ -1323,14 +1326,14 @@ async function refreshLiveTraining() {
     if (element) element.textContent = value;
   };
   setText('[data-live-running]', String(runningCount));
-  setText('[data-live-loss]', formatMetric(metricFromLatest(latest, ['loss', 'total_loss', 'train_loss'])));
-  setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1', 'mean_top1'])));
+  setText('[data-live-loss]', formatMetric(metricFromLatest(latest, ['loss', 'loss_total', 'total_loss', 'train_loss'])));
+  setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'])));
   setText('[data-live-rows]', String(newestRows));
   setText('[data-live-updated]', '更新 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}));
-  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, selectedRuns, ['loss', 'total_loss', 'train_loss']));
-  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_accuracy', 'top1', 'mean_top1']));
+  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, selectedRuns, ['loss', 'loss_total', 'total_loss', 'train_loss']));
+  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
   renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, selectedRuns, ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy']));
-  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_positive_rank', 'mean_rank']));
+  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
 }
 
 function installLiveTraining() {
@@ -1374,8 +1377,8 @@ async function loadCompareChart() {
   runs.forEach((run, index) => {
     const rows = (payload.metrics[run] || {}).rows || [];
     const points = rows.map((row, step) => ({
-      x: numericValue(row, ['step', 'global_step', 'epoch']) || step + 1,
-      y: numericValue(row, ['loss', 'total_loss', 'train_loss'])
+      x: numericValue(row, ['step', 'global_step', 'iteration', 'epoch']) || step + 1,
+      y: numericValue(row, ['loss', 'loss_total', 'total_loss', 'train_loss'])
     })).filter(point => point.y !== null);
     datasets.push({label: run + ' 损失', data: points, color: colors[index % colors.length]});
   });

@@ -32,6 +32,9 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('data-live-training', train_html)
                 self.assertIn('data-live-chart="loss"', train_html)
                 self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
+                self.assertIn('value="dashboard_cpp"', train_html)
+                self.assertIn('<option value="cpp">C++ 训练</option>', train_html)
+                self.assertNotIn("Python + C++ 对比", train_html)
                 self.assertNotIn('name="align_python_compare"', train_html)
                 self.assertNotIn('name="profile"', train_html)
                 with urllib.request.urlopen(base + "/api/runs", timeout=5) as response:
@@ -46,7 +49,9 @@ class DashboardAppTest(unittest.TestCase):
                     self.assertIn(b"--bg: #0b1015", response.read())
                 with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")
-                    self.assertIn(b"installLiveTraining", response.read())
+                    dashboard_js = response.read()
+                    self.assertIn(b"installLiveTraining", dashboard_js)
+                    self.assertIn(b"loss_total", dashboard_js)
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
                 self.assertIn("进度".encode("utf-8"), runs_html)

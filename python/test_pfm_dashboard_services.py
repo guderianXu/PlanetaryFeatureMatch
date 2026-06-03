@@ -71,6 +71,22 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(runs[0].progress_label, "4/10 步")
         self.assertTrue(runs[0].can_start)
 
+    def test_discover_runs_infers_cpp_iteration_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "cpp_run"
+            run.mkdir()
+            (run / "metrics.csv").write_text(
+                "epoch,total_epochs,iteration,total_iterations,loss_total\n"
+                "1,1,25,100,3.5\n",
+                encoding="utf-8",
+            )
+
+            runs = discover_runs(root)
+
+        self.assertEqual(runs[0].progress_percent, 25.0)
+        self.assertEqual(runs[0].progress_label, "25/100 步")
+
     def test_tail_text_returns_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             log = Path(temp) / "train.log"

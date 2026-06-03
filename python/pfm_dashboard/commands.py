@@ -242,14 +242,13 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
 def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
     if not request.cache_dirs:
         raise ValueError("at least one cache dir is required")
-    backends = ["python", "cpp"] if request.backend == "compare" else [request.backend]
+    backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
-        raise ValueError("backend must be python, cpp, or compare")
+        raise ValueError("backend must be python or cpp")
     request.output_root.mkdir(parents=True, exist_ok=True)
     generated: list[GeneratedRun] = []
     for backend in backends:
-        suffix = backend if request.backend == "compare" else ""
-        run_name = _safe_name("_".join(part for part in [request.experiment_name, suffix] if part))
+        run_name = _safe_name(request.experiment_name)
         run_dir = _unique_run_dir(request.output_root, run_name)
         run_dir.mkdir(parents=True)
         script_text = build_python_training_script(request, run_dir) if backend == "python" else build_cpp_training_script(request, run_dir)
