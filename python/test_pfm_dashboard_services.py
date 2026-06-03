@@ -1,5 +1,7 @@
 import csv
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -8,6 +10,8 @@ from pfm_dashboard.services import (
     discover_runs,
     pid_status,
     read_metrics_csv,
+    start_run_script,
+    stop_run,
     tail_text,
 )
 
@@ -47,6 +51,21 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(runs[0].latest_metrics["loss"], 9.0)
         self.assertEqual(runs[0].checkpoint_count, 1)
         self.assertTrue(runs[0].has_report)
+        self.assertEqual(runs[0].progress_percent, 100.0)
+
+    def test_discover_runs_infers_step_progress_from_script(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "python_run"
+            run.mkdir()
+            (run / "metrics.csv").write_text("step,loss\n4,1.0\n", encoding="utf-8")
+            (run / "train.sh").write_text("#!/usr/bin/env bash\npython train.py --steps 10\n", encoding="utf-8")
+
+            runs = discover_runs(root)
+
+        self.assertEqual(runs[0].progress_percent, 40.0)
+        self.assertEqual(runs[0].progress_label, "4/10 steps")
+        self.assertTrue(runs[0].can_start)
 
     def test_tail_text_returns_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -77,6 +96,31 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(counts["val"], 1)
         self.assertEqual(counts["test"], 3)
         self.assertEqual(counts["total"], 6)
+
+    def test_start_and_stop_run_script_manage_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "run"
+            run.mkdir()
+            script = run / "train.sh"
+            script.write_text("#!/usr/bin/env bash\nsleep 60\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            pid = start_run_script(run)
+            try:
+                self.assertEqual(pid_status(run / "train.pid"), "running")
+                self.assertEqual(stop_run(run), pid)
+                deadline = time.time() + 5.0
+                while time.time() < deadline and pid_status(run / "train.pid") == "running":
+                    waited, _ = os.waitpid(pid, os.WNOHANG)
+                    if waited == pid:
+                        break
+                    time.sleep(0.05)
+                self.assertNotEqual(pid_status(run / "train.pid"), "running")
+            finally:
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":

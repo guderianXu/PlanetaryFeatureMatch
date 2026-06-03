@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import signal
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,48 @@ def infer_backend(run_name: str, run_path: Path) -> str:
     return "unknown"
 
 
+def _number(value: Any) -> float | None:
+    if isinstance(value, (float, int)):
+        return float(value)
+    return None
+
+
+def _script_option(script_path: Path, *names: str) -> float | None:
+    if not script_path.exists():
+        return None
+    text = script_path.read_text(encoding="utf-8", errors="replace")
+    for name in names:
+        match = re.search(rf"{re.escape(name)}\s+([0-9]+(?:\.[0-9]+)?)", text)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoint_count: int) -> tuple[float, str]:
+    latest = metrics.latest
+    script_path = run_path / "train.sh"
+    current_step = _number(latest.get("step")) or _number(latest.get("global_step")) or _number(latest.get("batch"))
+    target_steps = _script_option(script_path, "--max-train-batches", "--steps")
+    if current_step is not None and target_steps and target_steps > 0:
+        percent = min(100.0, max(0.0, current_step / target_steps * 100.0))
+        return percent, f"{int(current_step)}/{int(target_steps)} steps"
+
+    current_epoch = _number(latest.get("epoch"))
+    target_epochs = _script_option(script_path, "--epochs")
+    if current_epoch is not None and target_epochs and target_epochs > 0:
+        percent = min(100.0, max(0.0, current_epoch / target_epochs * 100.0))
+        return percent, f"{int(current_epoch)}/{int(target_epochs)} epochs"
+
+    if status == "running":
+        metric_rows = len(metrics.rows)
+        return min(95.0, max(6.0, float(metric_rows % 20) * 4.5)), f"{metric_rows} metric rows"
+    if checkpoint_count > 0:
+        return 100.0, "checkpoint written"
+    if metrics.rows:
+        return 100.0 if status in {"logged", "stopped"} else 0.0, f"{len(metrics.rows)} metric rows"
+    return 0.0, "not started"
+
+
 def pid_status(pid_file: Path) -> str:
     if not pid_file.exists():
         return "missing"
@@ -65,16 +108,21 @@ def discover_runs(root: Path) -> list[RunSummary]:
         status = pid_status(run_path / "train.pid")
         if status == "missing" and (run_path / "train.log").exists():
             status = "logged"
+        progress_percent, progress_label = infer_progress(run_path, metrics, status, len(checkpoints))
         summaries.append(
             RunSummary(
                 name=run_path.name,
                 path=run_path,
                 backend=infer_backend(run_path.name, run_path),
                 status=status,
+                progress_percent=progress_percent,
+                progress_label=progress_label,
                 latest_metrics=metrics.latest,
                 checkpoint_count=len(checkpoints),
                 has_report=(run_path / "run.html").exists() or (run_path / "report").exists(),
                 has_log=(run_path / "train.log").exists(),
+                can_start=(run_path / "train.sh").exists() and status != "running",
+                can_stop=status == "running",
                 updated_at=run_path.stat().st_mtime,
             )
         )
@@ -124,3 +172,38 @@ def active_training_processes() -> list[str]:
         return [line.strip() for line in stream.readlines() if line.strip()]
     finally:
         stream.close()
+
+
+def start_run_script(run_path: Path) -> int:
+    script_path = run_path / "train.sh"
+    if not script_path.exists():
+        raise FileNotFoundError(f"missing train script: {script_path}")
+    status = pid_status(run_path / "train.pid")
+    if status == "running":
+        raise RuntimeError(f"run is already running: {run_path.name}")
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        log_path = run_path / "train.log"
+        with log_path.open("ab", buffering=0) as log:
+            os.dup2(log.fileno(), 1)
+            os.dup2(log.fileno(), 2)
+            os.execv("/bin/bash", ["/bin/bash", str(script_path)])
+    (run_path / "train.pid").write_text(str(pid), encoding="utf-8")
+    return pid
+
+
+def stop_run(run_path: Path) -> int:
+    pid_file = run_path / "train.pid"
+    if not pid_file.exists():
+        raise FileNotFoundError(f"missing pid file: {pid_file}")
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        os.kill(pid, signal.SIGTERM)
+    return pid

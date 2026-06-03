@@ -19,10 +19,14 @@ class RunSummary:
     path: Path
     backend: str
     status: str
+    progress_percent: float
+    progress_label: str
     latest_metrics: dict[str, Any]
     checkpoint_count: int
     has_report: bool
     has_log: bool
+    can_start: bool
+    can_stop: bool
     updated_at: float
 
 

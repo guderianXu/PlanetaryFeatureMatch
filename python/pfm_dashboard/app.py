@@ -9,11 +9,19 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .commands import TrainingRequest, create_training_runs, start_generated_run
 from .models import RunSummary
-from .services import active_training_processes, discover_runs, read_metrics_csv, summarize_dataset, tail_text
+from .services import (
+    active_training_processes,
+    discover_runs,
+    read_metrics_csv,
+    start_run_script,
+    stop_run,
+    summarize_dataset,
+    tail_text,
+)
 
 
 DEFAULT_DATASETS = [
@@ -138,31 +146,49 @@ def _runs_table(runs: list[RunSummary]) -> str:
     for run in runs[:80]:
         escaped_name = html.escape(run.name)
         encoded_name = quote(run.name)
-        report = f'<a href="/runs/{run.name}/report">report</a>' if run.has_report else "-"
-        log = f'<a href="/runs/{run.name}/log">log</a>' if run.has_log else "-"
+        report = f'<a href="/runs/{encoded_name}/report">report</a>' if run.has_report else "-"
+        log = f'<a href="/runs/{encoded_name}/log">log</a>' if run.has_log else "-"
         loss = _metric_number(run, "loss", "total_loss")
         top1 = _metric_number(run, "descriptor_accuracy", "top1", "mean_top1")
         quality = top1 if top1 is not None else loss
         quality_width = 0
         if quality is not None:
             quality_width = max(4, min(100, int((1.0 - quality) * 100 if quality == loss else quality * 100)))
+        start_button = (
+            f'<form class="action-form" method="post" action="/runs/{encoded_name}/start">'
+            '<button class="button small" type="submit">Start</button></form>'
+            if run.can_start
+            else ""
+        )
+        stop_button = (
+            f'<form class="action-form" method="post" action="/runs/{encoded_name}/stop">'
+            '<button class="button small danger" type="submit">Stop</button></form>'
+            if run.can_stop
+            else ""
+        )
+        actions = start_button + stop_button
+        if not actions:
+            actions = '<span class="muted">idle</span>'
         rows.append(
             "<tr>"
             f"<td><a class=\"run-link\" href=\"/compare?runs={encoded_name}\">{escaped_name}</a>"
             f"<span class=\"run-time\">{_format_time(run.updated_at)}</span></td>"
             f"<td><span class=\"backend backend-{html.escape(run.backend)}\">{html.escape(run.backend)}</span></td>"
             f"<td><span class=\"status-pill {_status_class(run.status)}\">{html.escape(run.status)}</span></td>"
+            f"<td><div class=\"progress-cell\"><div class=\"progress-track\"><span style=\"width:{run.progress_percent:.1f}%\"></span></div>"
+            f"<small>{html.escape(run.progress_label)}</small></div></td>"
             f"<td>{_metric(run, 'loss', 'total_loss')}</td>"
             f"<td>{_metric(run, 'descriptor_accuracy', 'top1', 'mean_top1')}</td>"
             f"<td>{_metric(run, 'descriptor_positive_rank', 'mean_rank')}</td>"
             f"<td><div class=\"quality-bar\"><span style=\"width:{quality_width}%\"></span></div></td>"
             f"<td>{run.checkpoint_count}</td>"
             f"<td class=\"row-actions\">{log} {report}</td>"
+            f"<td class=\"run-actions\">{actions}</td>"
             "</tr>"
         )
     return (
-        "<div class=\"table-wrap\"><table><thead><tr><th>Run</th><th>Backend</th><th>Status</th><th>Loss</th>"
-        "<th>Top1</th><th>Rank</th><th>Signal</th><th>CKPT</th><th>Artifacts</th></tr></thead>"
+        "<div class=\"table-wrap\"><table><thead><tr><th>Run</th><th>Backend</th><th>Status</th><th>Progress</th><th>Loss</th>"
+        "<th>Top1</th><th>Rank</th><th>Signal</th><th>CKPT</th><th>Artifacts</th><th>Control</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
@@ -270,9 +296,11 @@ def render_train(project_root: Path, message: str = "") -> str:
     return _layout("Train", body, active="/train")
 
 
-def render_runs(project_root: Path) -> str:
+def render_runs(project_root: Path, message: str = "") -> str:
     runs = discover_runs(project_root / "runs")
+    notice = f'<p class="notice">{html.escape(message)}</p>' if message else ""
     body = f"""
+{notice}
 <section class="panel">
   <div class="panel-head"><div><h2>Runs</h2><p>All discovered training folders under <code>runs/</code>.</p></div><a href="/train">New run</a></div>
   {_runs_table(runs)}
@@ -395,6 +423,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/runs/") and (parsed.path.endswith("/start") or parsed.path.endswith("/stop")):
+            self._handle_run_action(parsed.path)
+            return
         if parsed.path != "/train":
             self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
             return
@@ -430,6 +461,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             message = f"Launch failed: {exc}"
         self._send_html(render_train(self.project_root, message=message))
+
+    def _handle_run_action(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 3:
+            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            return
+        name = unquote(parts[1])
+        action = parts[2]
+        run_path = (self.project_root / "runs" / name).resolve()
+        runs_root = (self.project_root / "runs").resolve()
+        if runs_root not in run_path.parents or not run_path.exists():
+            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            return
+        try:
+            if action == "start":
+                pid = start_run_script(run_path)
+                message = f"Started {name} pid={pid}"
+            elif action == "stop":
+                pid = stop_run(run_path)
+                message = f"Sent stop signal to {name} pid={pid}"
+            else:
+                self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+                return
+        except Exception as exc:
+            message = f"{action} failed for {name}: {exc}"
+        self._send_html(render_runs(self.project_root, message=message))
 
 
 STYLE = """
@@ -585,6 +642,20 @@ main { padding: 22px 28px 36px; }
 }
 .button.primary:hover, button[type="submit"]:hover { filter: brightness(1.08); text-decoration: none; }
 .button.secondary { background: rgba(255, 255, 255, 0.04); color: var(--text); border-color: var(--line-strong); }
+.button.small {
+  min-height: 28px;
+  padding: 5px 9px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent-strong);
+  border-color: rgba(114, 242, 223, 0.24);
+  box-shadow: none;
+}
+.button.danger {
+  color: #ffd0c8;
+  background: rgba(255, 122, 102, 0.13);
+  border-color: rgba(255, 122, 102, 0.34);
+}
 .hero-panel {
   display: flex;
   align-items: center;
@@ -690,8 +761,40 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .status-muted { background: rgba(145, 161, 180, 0.09); color: #9dadbf; border: 1px solid rgba(145, 161, 180, 0.16); }
 .quality-bar { width: 96px; height: 7px; background: rgba(255, 255, 255, 0.08); border-radius: 999px; overflow: hidden; }
 .quality-bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--amber)); border-radius: inherit; }
+.progress-cell {
+  min-width: 142px;
+  display: grid;
+  gap: 5px;
+}
+.progress-cell small, .muted {
+  color: var(--muted);
+  font-size: 11px;
+}
+.progress-track {
+  width: 142px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  background: linear-gradient(90deg, #1dd6c3, #70a7ff);
+  box-shadow: 0 0 18px rgba(29, 214, 195, 0.28);
+  border-radius: inherit;
+}
 .row-actions { color: var(--muted); }
 .row-actions a { margin-right: 8px; font-weight: 700; }
+.run-actions {
+  min-width: 96px;
+}
+.action-form {
+  display: inline-flex;
+  margin: 0 6px 0 0;
+}
 .processes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .processes li { padding: 10px; background: rgba(255, 255, 255, 0.035); border: 1px solid var(--line); border-radius: 6px; line-height: 1.45; overflow-wrap: anywhere; }
 .train-workbench { display: grid; grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
@@ -774,6 +877,13 @@ function installPresets() {
       Object.entries(preset).forEach(([name, value]) => setField(name, value));
     });
   });
+}
+
+function installAutoRefresh() {
+  if (!['/', '/runs'].includes(window.location.pathname)) return;
+  window.setTimeout(() => {
+    if (document.visibilityState === 'visible') window.location.reload();
+  }, 10000);
 }
 
 function numericValue(row, names) {
@@ -860,6 +970,7 @@ async function loadCompareChart() {
   });
 }
 installPresets();
+installAutoRefresh();
 loadCompareChart();
 """
 
