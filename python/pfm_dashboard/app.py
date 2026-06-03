@@ -295,10 +295,10 @@ def render_train(project_root: Path, message: str = "") -> str:
         <article><span>指标行数</span><strong data-live-rows>0</strong></article>
       </div>
       <div class="live-chart-grid">
-        <div class="live-chart-card"><div><strong>损失</strong><span>loss / total_loss</span></div><svg data-live-chart="loss" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>Top1</strong><span>descriptor_accuracy</span></div><svg data-live-chart="top1" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>图匹配</strong><span>graph accuracy</span></div><svg data-live-chart="graph" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
-        <div class="live-chart-card"><div><strong>排名</strong><span>positive rank</span></div><svg data-live-chart="rank" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>图匹配</strong><span data-live-chart-meta="graph">最近 300 batch</span></div><svg data-live-chart="graph" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       </div>
     </div>
   </div>
@@ -981,7 +981,7 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-chart-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 .live-chart-card {
@@ -1008,13 +1008,13 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .live-chart-card svg {
   display: block;
   width: 100%;
-  height: 170px;
+  height: 220px;
   border-radius: 6px;
   background:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     rgba(4, 8, 13, 0.48);
-  background-size: 100% 42px, 72px 100%, auto;
+  background-size: 100% 44px, 86px 100%, auto;
 }
 .live-chart-axis {
   stroke: rgba(168, 181, 194, 0.32);
@@ -1023,7 +1023,22 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-chart-line {
   fill: none;
-  stroke-width: 2.3;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.live-chart-dot {
+  opacity: 0.74;
+}
+.live-chart-endpoint {
+  stroke: #071018;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.live-chart-guide {
+  stroke: rgba(168, 181, 194, 0.14);
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 .live-chart-label {
@@ -1207,13 +1222,21 @@ function runMetricRows(metricsPayload, runName) {
   return (((metricsPayload.metrics || {})[runName] || {}).rows || []);
 }
 
+const LIVE_CHART_WINDOW_BATCHES = 300;
+const LIVE_CHART_MAX_DOTS = 80;
+
+function visibleMetricRows(rows) {
+  return rows.slice(Math.max(0, rows.length - LIVE_CHART_WINDOW_BATCHES));
+}
+
 function chartPoints(metricsPayload, selectedRuns, names) {
-  return selectedRuns.map((run, runIndex) => {
+  return selectedRuns.map((run) => {
     const rows = runMetricRows(metricsPayload, run.name);
+    const visibleRows = visibleMetricRows(rows);
     return {
       name: run.name,
-      color: ['#48bfc1', '#83a8cf', '#d37b49', '#79bf70'][runIndex % 4],
-      points: rows.map((row, index) => ({
+      color: run.backend === 'cpp' ? '#48bfc1' : '#83a8cf',
+      points: visibleRows.map((row, index) => ({
         x: rowStep(row, index),
         y: numericValue(row, names)
       })).filter((point) => point.y !== null)
@@ -1223,9 +1246,9 @@ function chartPoints(metricsPayload, selectedRuns, names) {
 
 function renderLiveChart(svg, seriesList) {
   if (!svg) return;
-  const width = 360;
-  const height = 170;
-  const pad = {left: 38, right: 12, top: 16, bottom: 28};
+  const width = 520;
+  const height = 220;
+  const pad = {left: 52, right: 18, top: 18, bottom: 34};
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const points = seriesList.flatMap((series) => series.points);
@@ -1239,6 +1262,10 @@ function renderLiveChart(svg, seriesList) {
   const yMax = Math.max(...points.map((point) => point.y));
   const xScale = (value) => pad.left + ((value - xMin) / Math.max(1, xMax - xMin)) * plotW;
   const yScale = (value) => pad.top + (1 - ((value - yMin) / Math.max(1e-9, yMax - yMin))) * plotH;
+  const guides = [0.25, 0.5, 0.75].map((ratio) => {
+    const y = pad.top + ratio * plotH;
+    return `<line class="live-chart-guide" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}"></line>`;
+  }).join('');
   const lines = seriesList.map((series) => {
     const path = series.points.map((point, index) => {
       const command = index === 0 ? 'M' : 'L';
@@ -1246,19 +1273,48 @@ function renderLiveChart(svg, seriesList) {
     }).join(' ');
     return `<path class="live-chart-line" d="${path}" stroke="${series.color}"></path>`;
   }).join('');
-  const dots = seriesList.map((series) => series.points.map((point) => (
-    `<circle class="live-chart-dot" cx="${xScale(point.x).toFixed(1)}" cy="${yScale(point.y).toFixed(1)}" r="2.8" fill="${series.color}"></circle>`
-  )).join('')).join('');
+  const dots = seriesList.map((series) => {
+    const stride = Math.max(1, Math.ceil(series.points.length / LIVE_CHART_MAX_DOTS));
+    return series.points
+      .filter((point, index) => index % stride === 0 || index === series.points.length - 1)
+      .map((point) => (
+        `<circle class="live-chart-dot" cx="${xScale(point.x).toFixed(1)}" cy="${yScale(point.y).toFixed(1)}" r="2.2" fill="${series.color}"></circle>`
+      )).join('');
+  }).join('');
+  const endpoints = seriesList.map((series) => {
+    const point = series.points[series.points.length - 1];
+    if (!point) return '';
+    return `<circle class="live-chart-endpoint" cx="${xScale(point.x).toFixed(1)}" cy="${yScale(point.y).toFixed(1)}" r="4.2" fill="${series.color}"></circle>
+      <text class="live-chart-label" x="${Math.min(width - 78, xScale(point.x) + 8).toFixed(1)}" y="${Math.max(14, yScale(point.y) - 8).toFixed(1)}">${formatMetric(point.y, 4)}</text>`;
+  }).join('');
   svg.innerHTML = `
+    ${guides}
     <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}"></line>
     <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}"></line>
     <text class="live-chart-label" x="4" y="${pad.top + 4}">${formatMetric(yMax, 4)}</text>
     <text class="live-chart-label" x="4" y="${pad.top + plotH}">${formatMetric(yMin, 4)}</text>
-    <text class="live-chart-label" x="${pad.left}" y="${height - 8}">${formatMetric(xMin, 4)}</text>
-    <text class="live-chart-label" x="${pad.left + plotW - 32}" y="${height - 8}">${formatMetric(xMax, 4)}</text>
+    <text class="live-chart-label" x="${pad.left}" y="${height - 10}">batch ${formatMetric(xMin, 4)}</text>
+    <text class="live-chart-label" x="${pad.left + plotW - 58}" y="${height - 10}">batch ${formatMetric(xMax, 4)}</text>
     ${lines}
     ${dots}
+    ${endpoints}
   `;
+}
+
+function liveChartRun(selectedRuns) {
+  return selectedRuns.find((run) => run.status === 'running') || selectedRuns[0] || null;
+}
+
+function updateChartMeta(chartKey, run, metricsPayload) {
+  const element = document.querySelector(`[data-live-chart-meta="${chartKey}"]`);
+  if (!element) return;
+  if (!run) {
+    element.textContent = '等待任务';
+    return;
+  }
+  const rows = runMetricRows(metricsPayload, run.name);
+  const visibleCount = visibleMetricRows(rows).length;
+  element.textContent = `${run.name.slice(0, 28)} · 最近 ${visibleCount} batch`;
 }
 
 function renderLiveRuns(container, runs) {
@@ -1318,6 +1374,8 @@ async function refreshLiveTraining() {
   const query = selectedRuns.map((run) => 'runs=' + encodeURIComponent(run.name)).join('&');
   const metricsPayload = query ? await fetch('/api/metrics?' + query, {cache: 'no-store'}).then((response) => response.json()) : {metrics: {}};
   renderLiveRuns(document.querySelector('[data-live-runs]'), selectedRuns);
+  const chartRun = liveChartRun(selectedRuns);
+  const chartRuns = chartRun ? [chartRun] : [];
   const newest = selectedRuns[0] || {};
   const latest = newest.latest_metrics || {};
   const newestRows = selectedRuns.reduce((count, run) => count + runMetricRows(metricsPayload, run.name).length, 0);
@@ -1330,10 +1388,11 @@ async function refreshLiveTraining() {
   setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'])));
   setText('[data-live-rows]', String(newestRows));
   setText('[data-live-updated]', '更新 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}));
-  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, selectedRuns, ['loss', 'loss_total', 'total_loss', 'train_loss']));
-  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
-  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, selectedRuns, ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy']));
-  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
+  ['loss', 'top1', 'graph', 'rank'].forEach((chartKey) => updateChartMeta(chartKey, chartRun, metricsPayload));
+  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, ['loss', 'loss_total', 'total_loss', 'train_loss']));
+  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
+  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, chartRuns, ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy']));
+  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
 }
 
 function installLiveTraining() {

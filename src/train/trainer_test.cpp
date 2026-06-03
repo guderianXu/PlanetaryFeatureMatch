@@ -2343,12 +2343,15 @@ static void trainer_writes_csv_metric_log()
     std::ifstream input(config.log_csv);
     std::string header;
     std::string row;
+    std::string second_row;
     std::getline(input, header);
     std::getline(input, row);
+    std::getline(input, second_row);
     PFM_REQUIRE(header.find("loss_total") != std::string::npos);
     PFM_REQUIRE(header.find("graph_matching_loss") != std::string::npos);
     PFM_REQUIRE(header.find("offset_error_px") != std::string::npos);
     PFM_REQUIRE(row.find("1,1,1,2") == 0);
+    PFM_REQUIRE(second_row.find("1,1,2,2") == 0);
 }
 
 static void trainer_uses_online_dataloader_when_workers_requested()

@@ -52,6 +52,9 @@ class DashboardAppTest(unittest.TestCase):
                     dashboard_js = response.read()
                     self.assertIn(b"installLiveTraining", dashboard_js)
                     self.assertIn(b"loss_total", dashboard_js)
+                    self.assertIn(b"LIVE_CHART_WINDOW_BATCHES = 300", dashboard_js)
+                    self.assertIn(b"liveChartRun", dashboard_js)
+                    self.assertIn(b"updateChartMeta", dashboard_js)
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
                 self.assertIn("进度".encode("utf-8"), runs_html)
