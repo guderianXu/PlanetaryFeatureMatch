@@ -567,6 +567,11 @@ TrainingMetric make_iteration_metric(const TrainConfig& config, int epoch, int i
     return metric;
 }
 
+bool is_no_valid_correspondence_error(const std::runtime_error& exc)
+{
+    return std::string(exc.what()) == "no valid correspondences sampled";
+}
+
 torch::Tensor ensure_grayscale(const torch::Tensor& image)
 {
     require_chw_image(image);
@@ -6460,8 +6465,24 @@ TrainResult train_model(const TrainConfig& config)
             const auto current_learning_rate = training_learning_rate_for_step(config, global_step, total_steps);
             set_optimizer_learning_rate(optimizer, current_learning_rate);
             // training_loss_from_pairs 内部同时计算检测器、描述子、图匹配和稠密分支损失，并返回诊断指标。
-            auto loss = training_loss_from_pairs(modules, pairs, config, descriptor_anchor_modules.get(),
-                                                 descriptor_broad_far_negative_count);
+            TrainingLossComponents loss;
+            try
+            {
+                loss = training_loss_from_pairs(modules, pairs, config, descriptor_anchor_modules.get(),
+                                                descriptor_broad_far_negative_count);
+            }
+            catch (const std::runtime_error& exc)
+            {
+                if (!is_no_valid_correspondence_error(exc))
+                {
+                    throw;
+                }
+                const auto iteration = static_cast<int>((offset / static_cast<std::size_t>(config.batch_size)) + 1);
+                std::cerr << "training batch skipped: no valid correspondences sampled epoch=" << (epoch + 1)
+                          << " iteration=" << iteration << '\n';
+                optimizer.zero_grad();
+                continue;
+            }
             if (!torch::isfinite(loss.total.detach()).item<bool>())
             {
                 optimizer.zero_grad();
@@ -6669,7 +6690,21 @@ TrainResult train_model(const TrainConfig& config)
                 auto val_pairs =
                     make_synthetic_pairs_from_batch(stack_batch(val_img_batch, BatchTensorLayout::Chw).to(device),
                                                     val_src_indices, val_var_indices, pair_config);
-                auto val_loss = training_loss_from_pairs(modules, val_pairs, config, descriptor_anchor_modules.get());
+                TrainingLossComponents val_loss;
+                try
+                {
+                    val_loss = training_loss_from_pairs(modules, val_pairs, config, descriptor_anchor_modules.get());
+                }
+                catch (const std::runtime_error& exc)
+                {
+                    if (!is_no_valid_correspondence_error(exc))
+                    {
+                        throw;
+                    }
+                    std::cerr << "validation batch skipped: no valid correspondences sampled epoch=" << (epoch + 1)
+                              << " offset=" << val_offset << '\n';
+                    continue;
+                }
                 if (!torch::isfinite(val_loss.total.detach()).item<bool>())
                 {
                     continue;
