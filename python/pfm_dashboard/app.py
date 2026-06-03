@@ -290,6 +290,8 @@ def render_train(project_root: Path, message: str = "") -> str:
     <div class="live-metrics">
       <div class="live-stat-grid">
         <article><span>运行中</span><strong data-live-running>0</strong></article>
+        <article><span>当前 Epoch</span><strong data-live-epoch>-</strong></article>
+        <article><span>当前 Batch</span><strong data-live-batch>-</strong></article>
         <article><span>最新损失</span><strong data-live-loss>-</strong></article>
         <article><span>最新 Top1</span><strong data-live-top1>-</strong></article>
         <article><span>指标行数</span><strong data-live-rows>0</strong></article>
@@ -930,7 +932,7 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-run-footer {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: 10px;
 }
@@ -948,6 +950,7 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .live-metrics {
   min-width: 0;
@@ -956,7 +959,7 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 .live-stat-grid article {
@@ -1222,6 +1225,32 @@ function metricFromLatest(latest, names) {
   return numericValue(latest || {}, names);
 }
 
+function integerMetric(latest, names) {
+  const value = metricFromLatest(latest, names);
+  return value === null ? null : Math.max(0, Math.round(value));
+}
+
+function formatProgressPart(current, total, unit) {
+  if (current === null && total === null) return '-';
+  if (current !== null && total !== null && total > 0) return `${current}/${total} ${unit}`;
+  if (current !== null) return `${current} ${unit}`;
+  return `-/${total} ${unit}`;
+}
+
+function runEpochLabel(run) {
+  const latest = run.latest_metrics || {};
+  const current = integerMetric(latest, ['epoch']);
+  const total = integerMetric(latest, ['total_epochs']);
+  return formatProgressPart(current, total, '轮');
+}
+
+function runBatchLabel(run) {
+  const latest = run.latest_metrics || {};
+  const current = integerMetric(latest, ['iteration', 'batch', 'step', 'global_step']);
+  const total = integerMetric(latest, ['total_iterations', 'total_batches']);
+  return formatProgressPart(current, total, '批');
+}
+
 function rowStep(row, index) {
   return numericValue(row, ['step', 'global_step', 'batch', 'iteration']) || index + 1;
 }
@@ -1361,6 +1390,8 @@ function renderLiveRuns(container, runs) {
     const top1 = formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
     const rank = formatMetric(metricFromLatest(latest, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
     const rows = Object.keys(latest).length ? '已更新' : '无指标';
+    const epoch = runEpochLabel(run);
+    const batch = runBatchLabel(run);
     const percent = Math.max(0, Math.min(100, Number(run.progress_percent) || 0));
     return `
       <article class="live-run-card">
@@ -1379,6 +1410,8 @@ function renderLiveRuns(container, runs) {
           <small>${run.progress_label || '未开始'} · ${percent.toFixed(1)}%</small>
         </div>
         <div class="live-run-footer">
+          <div><span>Epoch</span><strong>${epoch}</strong></div>
+          <div><span>Batch</span><strong>${batch}</strong></div>
           <div><span>损失</span><strong>${loss}</strong></div>
           <div><span>Top1</span><strong>${top1}</strong></div>
           <div><span>排名</span><strong>${rank}</strong></div>
@@ -1413,6 +1446,8 @@ async function refreshLiveTraining() {
     if (element) element.textContent = value;
   };
   setText('[data-live-running]', String(runningCount));
+  setText('[data-live-epoch]', chartRun ? runEpochLabel(chartRun) : '-');
+  setText('[data-live-batch]', chartRun ? runBatchLabel(chartRun) : '-');
   setText('[data-live-loss]', formatMetric(metricFromLatest(latest, ['loss', 'loss_total', 'total_loss', 'train_loss'])));
   setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'])));
   setText('[data-live-rows]', String(newestRows));

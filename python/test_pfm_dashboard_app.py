@@ -30,6 +30,8 @@ class DashboardAppTest(unittest.TestCase):
                     train_html = response.read().decode("utf-8")
                 self.assertIn("实时训练进度", train_html)
                 self.assertIn('data-live-training', train_html)
+                self.assertIn('data-live-epoch', train_html)
+                self.assertIn('data-live-batch', train_html)
                 self.assertIn('data-live-chart="loss"', train_html)
                 self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
                 self.assertIn('value="dashboard_cpp"', train_html)
@@ -57,6 +59,8 @@ class DashboardAppTest(unittest.TestCase):
                     self.assertIn(b"updateChartMeta", dashboard_js)
                     self.assertIn(b"movingAveragePoints", dashboard_js)
                     self.assertIn(b"live-chart-line-smooth", dashboard_js)
+                    self.assertIn(b"runEpochLabel", dashboard_js)
+                    self.assertIn(b"runBatchLabel", dashboard_js)
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
                 self.assertIn("进度".encode("utf-8"), runs_html)
