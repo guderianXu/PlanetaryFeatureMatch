@@ -34,6 +34,23 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(parsed.rows[-1]["loss"], 3.25)
         self.assertEqual(parsed.latest["descriptor_accuracy"], 0.5)
 
+    def test_read_metrics_csv_ignores_partial_tail_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            metrics = Path(temp) / "metrics.csv"
+            metrics.write_text(
+                "iteration,total_iterations,loss_total,descriptor_accuracy,descriptor_positive_rank\n"
+                "9,10,0.7,0.002,240\n"
+                "10,10,0.6\n",
+                encoding="utf-8",
+            )
+
+            parsed = read_metrics_csv(metrics)
+
+        self.assertEqual(len(parsed.rows), 1)
+        self.assertEqual(parsed.latest["iteration"], 9.0)
+        self.assertEqual(parsed.latest["descriptor_accuracy"], 0.002)
+        self.assertEqual(parsed.latest["descriptor_positive_rank"], 240.0)
+
     def test_discover_runs_reports_metrics_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -27,7 +27,11 @@ def read_metrics_csv(path: Path) -> MetricSeries:
         return MetricSeries(path=path, columns=[], rows=[], latest={})
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        rows = [{key: _parse_value(value or "") for key, value in row.items()} for row in reader]
+        rows = []
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                continue
+            rows.append({key: _parse_value(value or "") for key, value in row.items()})
         columns = list(reader.fieldnames or [])
     latest = rows[-1] if rows else {}
     return MetricSeries(path=path, columns=columns, rows=rows, latest=latest)
