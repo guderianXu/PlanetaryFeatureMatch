@@ -142,6 +142,7 @@ int64_t descriptor_broad_far_negative_count_for_progress_for_test(double progres
 int64_t training_variant_index_for_pair_for_test(std::size_t pair_index, std::size_t train_image_count, int epoch,
                                                  int pairs_per_image);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
+SyntheticPair limit_training_pair_size_for_test(const SyntheticPair& pair, int64_t max_edge);
 torch::Tensor stack_chw_batch_for_test(const std::vector<torch::Tensor>& tensors);
 torch::Tensor stack_hw_batch_for_test(const std::vector<torch::Tensor>& tensors);
 torch::Tensor stack_hwc_batch_for_test(const std::vector<torch::Tensor>& tensors);
@@ -160,6 +161,10 @@ torch::Tensor make_heatmap_positive_target_loss_for_test(const torch::Tensor& he
 torch::Tensor make_training_valid_mask_for_test(const torch::Tensor& view_a, const torch::Tensor& view_b,
                                                 const torch::Tensor& warp, const torch::Tensor& valid_mask,
                                                 double min_keypoint_intensity);
+torch::Tensor make_pair_loss_valid_mask_for_test(const torch::Tensor& view_a, const torch::Tensor& view_b,
+                                                 const torch::Tensor& warp, const torch::Tensor& valid_mask,
+                                                 double min_keypoint_intensity,
+                                                 const std::string& training_profile);
 torch::Tensor make_warp_aligned_keypoint_targets_for_test(const torch::Tensor& view_a, const torch::Tensor& view_b,
                                                           const torch::Tensor& warp, const torch::Tensor& mask,
                                                           int64_t target_height, int64_t target_width);
@@ -1582,6 +1587,34 @@ static void trainer_training_valid_mask_requires_bright_source_and_target_pixels
     PFM_REQUIRE(torch::equal(masked, expected));
 }
 
+static void trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples()
+{
+    auto view_a = torch::zeros({1, 1, 9, 9}, torch::kFloat32);
+    auto view_b = torch::zeros({1, 1, 9, 9}, torch::kFloat32);
+    view_a.index_put_({0, 0, 4, 4}, 1.0F);
+    view_b.index_put_({0, 0, 4, 4}, 1.0F);
+
+    auto warp = torch::zeros({1, 9, 9, 2}, torch::kFloat32);
+    for (int64_t y = 0; y < 9; ++y)
+    {
+        for (int64_t x = 0; x < 9; ++x)
+        {
+            warp.index_put_({0, y, x, 0}, static_cast<float>(x));
+            warp.index_put_({0, y, x, 1}, static_cast<float>(y));
+        }
+    }
+    auto valid_mask = torch::zeros({1, 9, 9}, torch::kBool);
+    valid_mask.index_put_({0, 4, 4}, true);
+
+    const auto python_mask =
+        pfm::testing::make_pair_loss_valid_mask_for_test(view_a, view_b, warp, valid_mask, 0.1, "python-compare");
+    const auto descriptor_mask =
+        pfm::testing::make_pair_loss_valid_mask_for_test(view_a, view_b, warp, valid_mask, 0.1, "descriptor");
+
+    PFM_REQUIRE(python_mask.index({0, 4, 4}).item<bool>());
+    PFM_REQUIRE(!descriptor_mask.index({0, 4, 4}).item<bool>());
+}
+
 static void trainer_descriptor_candidates_do_not_repeat_positive_target()
 {
     auto target_indices = torch::tensor({{0, 4}}, torch::kLong);
@@ -2153,6 +2186,27 @@ static void trainer_uses_configured_resize()
 
     PFM_REQUIRE(resized.sizes() == torch::IntArrayRef({1, 300, 200}));
     PFM_REQUIRE(resized.is_contiguous());
+}
+
+static void trainer_resizes_pair_warp_coordinates_in_view_b_space()
+{
+    auto view_a = torch::zeros({1, 4, 8}, torch::kFloat32);
+    auto view_b = torch::zeros({1, 10, 20}, torch::kFloat32);
+    auto warp = torch::zeros({4, 8, 2}, torch::kFloat32);
+    warp.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 0}, 19.0F);
+    warp.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 1}, 9.0F);
+    auto valid_mask = torch::ones({4, 8}, torch::kBool);
+
+    const auto resized =
+        pfm::testing::limit_training_pair_size_for_test(pfm::SyntheticPair{view_a, view_b, warp, valid_mask}, 4);
+    const auto bottom_right_x = resized.warp_a_to_b.index({1, 3, 0}).item<float>();
+    const auto bottom_right_y = resized.warp_a_to_b.index({1, 3, 1}).item<float>();
+
+    PFM_REQUIRE(resized.view_a.sizes() == torch::IntArrayRef({1, 2, 4}));
+    PFM_REQUIRE(resized.view_b.sizes() == torch::IntArrayRef({1, 2, 4}));
+    PFM_REQUIRE(resized.warp_a_to_b.sizes() == torch::IntArrayRef({2, 4, 2}));
+    PFM_REQUIRE_CLOSE(bottom_right_x, 3.0F, 1.0e-5F);
+    PFM_REQUIRE_CLOSE(bottom_right_y, 1.0F, 1.0e-5F);
 }
 
 static void trainer_training_and_validation_indices_use_dataloader_split()
@@ -2962,6 +3016,8 @@ void register_trainer_tests()
                   trainer_stacks_variable_spatial_training_tensors_with_padding);
     register_test("trainer_training_valid_mask_requires_bright_source_and_target_pixels",
                   trainer_training_valid_mask_requires_bright_source_and_target_pixels);
+    register_test("trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples",
+                  trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",
@@ -3043,6 +3099,8 @@ void register_trainer_tests()
     register_test("trainer_trains_with_online_dataloader_workers", trainer_trains_with_online_dataloader_workers);
     register_test("trainer_resizes_large_training_image", trainer_resizes_large_training_image);
     register_test("trainer_uses_configured_resize", trainer_uses_configured_resize);
+    register_test("trainer_resizes_pair_warp_coordinates_in_view_b_space",
+                  trainer_resizes_pair_warp_coordinates_in_view_b_space);
     register_test("trainer_training_and_validation_indices_use_dataloader_split",
                   trainer_training_and_validation_indices_use_dataloader_split);
     register_test("trainer_variant_indices_advance_across_epochs", trainer_variant_indices_advance_across_epochs);

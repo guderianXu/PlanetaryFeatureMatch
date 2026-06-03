@@ -946,11 +946,14 @@ torch::Tensor limit_training_image_size(const torch::Tensor& image, int64_t resi
         .contiguous();
 }
 
-torch::Tensor resize_training_warp(const torch::Tensor& warp, int64_t target_height, int64_t target_width)
+torch::Tensor resize_training_warp(const torch::Tensor& warp, int64_t target_height, int64_t target_width,
+                                   int64_t source_b_height, int64_t source_b_width, int64_t target_b_height,
+                                   int64_t target_b_width)
 {
     const auto source_height = warp.size(0);
     const auto source_width = warp.size(1);
-    if (source_height == target_height && source_width == target_width)
+    if (source_height == target_height && source_width == target_width && source_b_height == target_b_height &&
+        source_b_width == target_b_width)
     {
         return warp.contiguous();
     }
@@ -965,12 +968,12 @@ torch::Tensor resize_training_warp(const torch::Tensor& warp, int64_t target_hei
                        .contiguous();
     resized.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 0},
                        resized.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}) *
-                           (static_cast<double>(target_width - 1) /
-                            static_cast<double>(std::max<int64_t>(1, source_width - 1))));
+                           (static_cast<double>(target_b_width - 1) /
+                            static_cast<double>(std::max<int64_t>(1, source_b_width - 1))));
     resized.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 1},
                        resized.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}) *
-                           (static_cast<double>(target_height - 1) /
-                            static_cast<double>(std::max<int64_t>(1, source_height - 1))));
+                           (static_cast<double>(target_b_height - 1) /
+                            static_cast<double>(std::max<int64_t>(1, source_b_height - 1))));
     return resized;
 }
 
@@ -1093,16 +1096,24 @@ SyntheticPair limit_training_pair_size(const SyntheticPair& pair, int64_t resize
 {
     const auto original_height = pair.view_a.size(1);
     const auto original_width = pair.view_a.size(2);
+    const auto original_b_height = pair.view_b.size(1);
+    const auto original_b_width = pair.view_b.size(2);
     auto view_a = limit_training_image_size(pair.view_a, resize);
     auto view_b = limit_training_image_size(pair.view_b, resize);
     const auto target_height = view_a.size(1);
     const auto target_width = view_a.size(2);
-    if (target_height == original_height && target_width == original_width)
+    const auto target_b_height = view_b.size(1);
+    const auto target_b_width = view_b.size(2);
+    if (target_height == original_height && target_width == original_width && target_b_height == original_b_height &&
+        target_b_width == original_b_width)
     {
         return SyntheticPair{view_a, view_b, pair.warp_a_to_b.contiguous(), pair.valid_mask.contiguous()};
     }
 
-    return SyntheticPair{view_a, view_b, resize_training_warp(pair.warp_a_to_b, target_height, target_width),
+    return SyntheticPair{view_a,
+                         view_b,
+                         resize_training_warp(pair.warp_a_to_b, target_height, target_width, original_b_height,
+                                              original_b_width, target_b_height, target_b_width),
                          resize_training_valid_mask(pair.valid_mask, target_height, target_width)};
 }
 
@@ -3160,6 +3171,17 @@ torch::Tensor make_training_valid_mask(const torch::Tensor& view_a, const torch:
     return valid_mask.to(torch::kBool).logical_and(mask_a).logical_and(warp_mask_to_view_b(mask_b, warp));
 }
 
+torch::Tensor make_pair_loss_valid_mask(const torch::Tensor& view_a, const torch::Tensor& view_b,
+                                        const torch::Tensor& warp, const torch::Tensor& valid_mask,
+                                        double min_keypoint_intensity, TrainingProfile training_profile)
+{
+    if (training_profile_uses_python_aligned_pair_loss(training_profile))
+    {
+        return valid_mask.to(torch::kBool).contiguous();
+    }
+    return make_training_valid_mask(view_a, view_b, warp, valid_mask, min_keypoint_intensity);
+}
+
 torch::Tensor warp_heatmap_for_repeatability(const torch::Tensor& heatmap, const torch::Tensor& warp)
 {
     using torch::indexing::Slice;
@@ -4719,8 +4741,9 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     const auto view_a = stack_batch(views_a, BatchTensorLayout::Chw);
     const auto view_b = stack_batch(views_b, BatchTensorLayout::Chw);
     const auto warp = stack_batch(warps, BatchTensorLayout::Hwc);
-    const auto valid_mask = make_training_valid_mask(
-        view_a, view_b, warp, stack_batch(valid_masks, BatchTensorLayout::Hw), config.min_keypoint_intensity);
+    const auto raw_valid_mask = stack_batch(valid_masks, BatchTensorLayout::Hw);
+    const auto valid_mask =
+        make_pair_loss_valid_mask(view_a, view_b, warp, raw_valid_mask, config.min_keypoint_intensity, training_profile);
 
     std::vector<torch::Tensor> feature_pyramid_a;
     std::vector<torch::Tensor> feature_pyramid_b;
@@ -6017,6 +6040,11 @@ torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int
     return limit_training_image_size(image, max_edge);
 }
 
+SyntheticPair limit_training_pair_size_for_test(const SyntheticPair& pair, int64_t max_edge)
+{
+    return limit_training_pair_size(pair, max_edge);
+}
+
 torch::Tensor stack_chw_batch_for_test(const std::vector<torch::Tensor>& tensors)
 {
     return stack_batch(tensors, BatchTensorLayout::Chw);
@@ -6082,6 +6110,15 @@ torch::Tensor make_training_valid_mask_for_test(const torch::Tensor& view_a, con
                                                 double min_keypoint_intensity)
 {
     return make_training_valid_mask(view_a, view_b, warp, valid_mask, min_keypoint_intensity);
+}
+
+torch::Tensor make_pair_loss_valid_mask_for_test(const torch::Tensor& view_a, const torch::Tensor& view_b,
+                                                 const torch::Tensor& warp, const torch::Tensor& valid_mask,
+                                                 double min_keypoint_intensity,
+                                                 const std::string& training_profile)
+{
+    return make_pair_loss_valid_mask(view_a, view_b, warp, valid_mask, min_keypoint_intensity,
+                                     parse_training_profile(training_profile));
 }
 
 torch::Tensor make_warp_aligned_keypoint_targets_for_test(const torch::Tensor& view_a, const torch::Tensor& view_b,
