@@ -275,6 +275,34 @@ def render_train(project_root: Path, message: str = "") -> str:
     notice = f'<p class="notice">{html.escape(message)}</p>' if message else ""
     body = f"""
 {notice}
+<section class="panel live-training-panel" data-live-training>
+  <div class="panel-head">
+    <div><h2>实时训练进度</h2><p>自动刷新当前训练任务、进度和关键指标曲线。</p></div>
+    <div class="live-refresh">
+      <span data-live-updated>等待刷新</span>
+      <button class="button small" type="button" data-live-refresh>立即刷新</button>
+    </div>
+  </div>
+  <div class="live-grid">
+    <div class="live-run-list" data-live-runs>
+      <p class="muted">正在读取训练任务...</p>
+    </div>
+    <div class="live-metrics">
+      <div class="live-stat-grid">
+        <article><span>运行中</span><strong data-live-running>0</strong></article>
+        <article><span>最新损失</span><strong data-live-loss>-</strong></article>
+        <article><span>最新 Top1</span><strong data-live-top1>-</strong></article>
+        <article><span>指标行数</span><strong data-live-rows>0</strong></article>
+      </div>
+      <div class="live-chart-grid">
+        <div class="live-chart-card"><div><strong>损失</strong><span>loss / total_loss</span></div><svg data-live-chart="loss" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>Top1</strong><span>descriptor_accuracy</span></div><svg data-live-chart="top1" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>图匹配</strong><span>graph accuracy</span></div><svg data-live-chart="graph" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
+        <div class="live-chart-card"><div><strong>排名</strong><span>positive rank</span></div><svg data-live-chart="rank" viewBox="0 0 360 170" preserveAspectRatio="none"></svg></div>
+      </div>
+    </div>
+  </div>
+</section>
 <form method="post" action="/train" class="train-workbench">
   <section class="panel launch-panel">
     <div class="panel-head"><div><h2>实验配置</h2><p>一次提交可以启动 Python、C++ 或两边同时跑，用于直接对比。</p></div></div>
@@ -852,6 +880,157 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .processes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .processes li { padding: 10px; background: rgba(255, 255, 255, 0.035); border: 1px solid var(--line); border-radius: 6px; line-height: 1.45; overflow-wrap: anywhere; }
+.live-training-panel {
+  margin-bottom: 16px;
+}
+.live-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.live-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.86fr) minmax(0, 1.44fr);
+  gap: 14px;
+}
+.live-run-list {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.live-run-card {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(5, 10, 16, 0.55);
+}
+.live-run-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.live-run-name {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.live-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.live-run-card .progress-track {
+  width: 100%;
+}
+.live-run-footer {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.live-run-footer span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+.live-run-footer strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-metrics {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+.live-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.live-stat-grid article {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.live-stat-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.live-stat-grid strong {
+  display: block;
+  margin-top: 6px;
+  color: #ffffff;
+  font-size: 21px;
+  line-height: 1;
+}
+.live-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.live-chart-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+.live-chart-card > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.live-chart-card strong {
+  color: #ffffff;
+  font-size: 13px;
+}
+.live-chart-card span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.live-chart-card svg {
+  display: block;
+  width: 100%;
+  height: 170px;
+  border-radius: 6px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    rgba(4, 8, 13, 0.48);
+  background-size: 100% 42px, 72px 100%, auto;
+}
+.live-chart-axis {
+  stroke: rgba(168, 181, 194, 0.32);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.live-chart-line {
+  fill: none;
+  stroke-width: 2.3;
+  vector-effect: non-scaling-stroke;
+}
+.live-chart-label {
+  fill: #9dadbf;
+  font-size: 10px;
+}
 .train-workbench { display: grid; grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
 .launch-panel, .data-panel { grid-column: auto; }
 .form-grid { display: grid; gap: 12px; }
@@ -926,7 +1105,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(72, 191, 193
 select option { background: #0d141d; color: var(--text); }
 @media (max-width: 1180px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .content-grid, .train-workbench, .compare-layout { grid-template-columns: 1fr; }
+  .content-grid, .train-workbench, .compare-layout, .live-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -935,7 +1114,7 @@ select option { background: #0d141d; color: var(--text); }
   .topbar, .hero-panel, .sticky-submit { align-items: stretch; flex-direction: column; }
   main { padding: 16px; }
   .topbar { position: static; padding: 18px 16px; }
-  .metric-grid, .form-grid.two, .form-grid.three { grid-template-columns: 1fr; }
+  .metric-grid, .form-grid.two, .form-grid.three, .live-stat-grid, .live-chart-grid, .live-run-footer { grid-template-columns: 1fr; }
 }
 """
 
@@ -983,6 +1162,192 @@ function numericValue(row, names) {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
   }
   return null;
+}
+
+function formatMetric(value, digits = 5) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  if (Math.abs(value) >= 1000) return value.toFixed(1);
+  if (Math.abs(value) >= 10) return value.toFixed(3);
+  return value.toPrecision(digits).replace(/0+$/, '').replace(/\\.$/, '');
+}
+
+function statusLabel(status) {
+  return {
+    running: '运行中',
+    logged: '有日志',
+    stopped: '已停止',
+    missing: '未启动',
+    invalid: 'PID 异常',
+    unknown: '未知'
+  }[status] || status || '未知';
+}
+
+function backendLabel(backend) {
+  return {python: 'Python', cpp: 'C++', unknown: '未知'}[backend] || backend || '未知';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
+}
+
+function metricFromLatest(latest, names) {
+  return numericValue(latest || {}, names);
+}
+
+function rowStep(row, index) {
+  return numericValue(row, ['step', 'global_step', 'batch', 'epoch']) || index + 1;
+}
+
+function runMetricRows(metricsPayload, runName) {
+  return (((metricsPayload.metrics || {})[runName] || {}).rows || []);
+}
+
+function chartPoints(metricsPayload, selectedRuns, names) {
+  return selectedRuns.map((run, runIndex) => {
+    const rows = runMetricRows(metricsPayload, run.name);
+    return {
+      name: run.name,
+      color: ['#48bfc1', '#83a8cf', '#d37b49', '#79bf70'][runIndex % 4],
+      points: rows.map((row, index) => ({
+        x: rowStep(row, index),
+        y: numericValue(row, names)
+      })).filter((point) => point.y !== null)
+    };
+  }).filter((series) => series.points.length);
+}
+
+function renderLiveChart(svg, seriesList) {
+  if (!svg) return;
+  const width = 360;
+  const height = 170;
+  const pad = {left: 38, right: 12, top: 16, bottom: 28};
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const points = seriesList.flatMap((series) => series.points);
+  if (!points.length) {
+    svg.innerHTML = '<text class="live-chart-label" x="18" y="84">暂无可绘制指标</text>';
+    return;
+  }
+  const xMin = Math.min(...points.map((point) => point.x));
+  const xMax = Math.max(...points.map((point) => point.x));
+  const yMin = Math.min(...points.map((point) => point.y));
+  const yMax = Math.max(...points.map((point) => point.y));
+  const xScale = (value) => pad.left + ((value - xMin) / Math.max(1, xMax - xMin)) * plotW;
+  const yScale = (value) => pad.top + (1 - ((value - yMin) / Math.max(1e-9, yMax - yMin))) * plotH;
+  const lines = seriesList.map((series) => {
+    const path = series.points.map((point, index) => {
+      const command = index === 0 ? 'M' : 'L';
+      return `${command}${xScale(point.x).toFixed(1)},${yScale(point.y).toFixed(1)}`;
+    }).join(' ');
+    return `<path class="live-chart-line" d="${path}" stroke="${series.color}"></path>`;
+  }).join('');
+  svg.innerHTML = `
+    <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}"></line>
+    <line class="live-chart-axis" x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}"></line>
+    <text class="live-chart-label" x="4" y="${pad.top + 4}">${formatMetric(yMax, 4)}</text>
+    <text class="live-chart-label" x="4" y="${pad.top + plotH}">${formatMetric(yMin, 4)}</text>
+    <text class="live-chart-label" x="${pad.left}" y="${height - 8}">${formatMetric(xMin, 4)}</text>
+    <text class="live-chart-label" x="${pad.left + plotW - 32}" y="${height - 8}">${formatMetric(xMax, 4)}</text>
+    ${lines}
+  `;
+}
+
+function renderLiveRuns(container, runs) {
+  if (!container) return;
+  if (!runs.length) {
+    container.innerHTML = '<p class="muted">暂时没有训练任务。启动训练后这里会实时显示进度。</p>';
+    return;
+  }
+  container.innerHTML = runs.map((run) => {
+    const latest = run.latest_metrics || {};
+    const runName = escapeHtml(run.name);
+    const backend = ['python', 'cpp', 'unknown'].includes(run.backend) ? run.backend : 'unknown';
+    const status = run.status === 'running' ? 'running' : 'done';
+    const loss = formatMetric(metricFromLatest(latest, ['loss', 'total_loss', 'train_loss']));
+    const top1 = formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1', 'mean_top1']));
+    const rank = formatMetric(metricFromLatest(latest, ['descriptor_positive_rank', 'mean_rank']));
+    const rows = Object.keys(latest).length ? '已更新' : '无指标';
+    const percent = Math.max(0, Math.min(100, Number(run.progress_percent) || 0));
+    return `
+      <article class="live-run-card">
+        <header>
+          <div>
+            <a class="live-run-name" href="/compare?runs=${encodeURIComponent(run.name)}">${runName}</a>
+            <div class="live-run-meta">
+              <span class="backend backend-${backend}">${backendLabel(run.backend)}</span>
+              <span class="status-pill status-${status}">${statusLabel(run.status)}</span>
+            </div>
+          </div>
+          <a href="/runs/${encodeURIComponent(run.name)}/log">日志</a>
+        </header>
+        <div class="progress-cell">
+          <div class="progress-track"><span style="width:${percent.toFixed(1)}%"></span></div>
+          <small>${run.progress_label || '未开始'} · ${percent.toFixed(1)}%</small>
+        </div>
+        <div class="live-run-footer">
+          <div><span>损失</span><strong>${loss}</strong></div>
+          <div><span>Top1</span><strong>${top1}</strong></div>
+          <div><span>排名</span><strong>${rank}</strong></div>
+          <div><span>状态</span><strong>${rows}</strong></div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+async function refreshLiveTraining() {
+  const panel = document.querySelector('[data-live-training]');
+  if (!panel) return;
+  const runsResponse = await fetch('/api/runs', {cache: 'no-store'});
+  const runsPayload = await runsResponse.json();
+  const allRuns = runsPayload.runs || [];
+  const selectedRuns = allRuns
+    .filter((run) => run.status === 'running')
+    .concat(allRuns.filter((run) => run.status !== 'running'))
+    .slice(0, 4);
+  const runningCount = allRuns.filter((run) => run.status === 'running').length;
+  const query = selectedRuns.map((run) => 'runs=' + encodeURIComponent(run.name)).join('&');
+  const metricsPayload = query ? await fetch('/api/metrics?' + query, {cache: 'no-store'}).then((response) => response.json()) : {metrics: {}};
+  renderLiveRuns(document.querySelector('[data-live-runs]'), selectedRuns);
+  const newest = selectedRuns[0] || {};
+  const latest = newest.latest_metrics || {};
+  const newestRows = selectedRuns.reduce((count, run) => count + runMetricRows(metricsPayload, run.name).length, 0);
+  const setText = (selector, value) => {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  };
+  setText('[data-live-running]', String(runningCount));
+  setText('[data-live-loss]', formatMetric(metricFromLatest(latest, ['loss', 'total_loss', 'train_loss'])));
+  setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1', 'mean_top1'])));
+  setText('[data-live-rows]', String(newestRows));
+  setText('[data-live-updated]', '更新 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}));
+  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, selectedRuns, ['loss', 'total_loss', 'train_loss']));
+  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_accuracy', 'top1', 'mean_top1']));
+  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, selectedRuns, ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy']));
+  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, selectedRuns, ['descriptor_positive_rank', 'mean_rank']));
+}
+
+function installLiveTraining() {
+  const panel = document.querySelector('[data-live-training]');
+  if (!panel) return;
+  const refresh = () => {
+    refreshLiveTraining().catch((error) => {
+      const updated = document.querySelector('[data-live-updated]');
+      if (updated) updated.textContent = '刷新失败：' + error.message;
+    });
+  };
+  const button = document.querySelector('[data-live-refresh]');
+  if (button) button.addEventListener('click', refresh);
+  refresh();
+  window.setInterval(() => {
+    if (document.visibilityState === 'visible') refresh();
+  }, 2000);
 }
 
 async function loadCompareChart() {
@@ -1063,6 +1428,7 @@ async function loadCompareChart() {
 installPresets();
 installAutoRefresh();
 installConfirmButtons();
+installLiveTraining();
 loadCompareChart();
 """
 

@@ -28,6 +28,9 @@ class DashboardAppTest(unittest.TestCase):
                         self.assertIn(b"PFM Lab", response.read())
                 with urllib.request.urlopen(base + "/train", timeout=5) as response:
                     train_html = response.read().decode("utf-8")
+                self.assertIn("实时训练进度", train_html)
+                self.assertIn('data-live-training', train_html)
+                self.assertIn('data-live-chart="loss"', train_html)
                 self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
                 self.assertNotIn('name="align_python_compare"', train_html)
                 self.assertNotIn('name="profile"', train_html)
@@ -35,11 +38,15 @@ class DashboardAppTest(unittest.TestCase):
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["runs"][0]["name"], "python_sample")
                 self.assertEqual(payload["runs"][0]["progress_label"], "1/2 步")
+                with urllib.request.urlopen(base + "/api/metrics?runs=python_sample", timeout=5) as response:
+                    metrics = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(metrics["metrics"]["python_sample"]["rows"][0]["loss"], 2.5)
                 with urllib.request.urlopen(base + "/static/dashboard.css", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/css")
                     self.assertIn(b"--bg: #0b1015", response.read())
                 with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")
+                    self.assertIn(b"installLiveTraining", response.read())
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
                 self.assertIn("进度".encode("utf-8"), runs_html)
