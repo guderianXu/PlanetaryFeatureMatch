@@ -82,6 +82,27 @@ def _status_class(status: str) -> str:
     return "status-muted"
 
 
+def _status_label(status: str) -> str:
+    labels = {
+        "running": "运行中",
+        "logged": "有日志",
+        "stopped": "已停止",
+        "missing": "未启动",
+        "invalid": "PID 异常",
+        "unknown": "未知",
+    }
+    return labels.get(status, status)
+
+
+def _backend_label(backend: str) -> str:
+    labels = {
+        "python": "Python",
+        "cpp": "C++",
+        "unknown": "未知",
+    }
+    return labels.get(backend, backend)
+
+
 def _nav_item(path: str, label: str, active: str) -> str:
     selected = " active" if active == path else ""
     return f'<a class="nav-item{selected}" href="{path}">{label}</a>'
@@ -90,11 +111,11 @@ def _nav_item(path: str, label: str, active: str) -> str:
 def _layout(title: str, body: str, active: str = "/") -> str:
     nav = "".join(
         [
-            _nav_item("/", "Overview", active),
-            _nav_item("/train", "Train", active),
-            _nav_item("/runs", "Runs", active),
-            _nav_item("/compare", "Compare", active),
-            _nav_item("/datasets", "Datasets", active),
+            _nav_item("/", "总览", active),
+            _nav_item("/train", "训练", active),
+            _nav_item("/runs", "任务", active),
+            _nav_item("/compare", "对比", active),
+            _nav_item("/datasets", "数据集", active),
         ]
     )
     return f"""<!doctype html>
@@ -112,25 +133,25 @@ def _layout(title: str, body: str, active: str = "/") -> str:
         <div class="brand-mark"><span>PFM</span></div>
         <div>
           <div class="brand-title">PFM Lab</div>
-          <div class="brand-subtitle">Mars Matching Ops</div>
+          <div class="brand-subtitle">行星匹配训练台</div>
         </div>
       </div>
       <nav>{nav}</nav>
       <div class="sidebar-note">
-        <strong>Local Control Node</strong>
-        <span>127.0.0.1:7860 · Python/C++ training orchestration.</span>
+        <strong>本地控制节点</strong>
+        <span>127.0.0.1:7860 · Python/C++ 训练编排。</span>
       </div>
     </aside>
     <div class="page">
       <header class="topbar">
         <div>
           <h1>{title}</h1>
-          <p>Planetary feature matching training, simulation checks, run comparison, and dataset readiness.</p>
+          <p>行星影像特征匹配训练、仿真检查、实验对比和数据集状态。</p>
         </div>
         <div class="topbar-actions">
-          <span class="system-chip">CUDA lab</span>
-          <a class="button secondary" href="/runs">View runs</a>
-          <a class="button primary" href="/train">New train</a>
+          <span class="system-chip">CUDA 实验机</span>
+          <a class="button secondary" href="/runs">查看任务</a>
+          <a class="button primary" href="/train">新建训练</a>
         </div>
       </header>
       <main>{body}</main>
@@ -146,8 +167,8 @@ def _runs_table(runs: list[RunSummary]) -> str:
     for run in runs[:80]:
         escaped_name = html.escape(run.name)
         encoded_name = quote(run.name)
-        report = f'<a href="/runs/{encoded_name}/report">report</a>' if run.has_report else "-"
-        log = f'<a href="/runs/{encoded_name}/log">log</a>' if run.has_log else "-"
+        report = f'<a href="/runs/{encoded_name}/report">报告</a>' if run.has_report else "-"
+        log = f'<a href="/runs/{encoded_name}/log">日志</a>' if run.has_log else "-"
         loss = _metric_number(run, "loss", "total_loss")
         top1 = _metric_number(run, "descriptor_accuracy", "top1", "mean_top1")
         quality = top1 if top1 is not None else loss
@@ -156,25 +177,25 @@ def _runs_table(runs: list[RunSummary]) -> str:
             quality_width = max(4, min(100, int((1.0 - quality) * 100 if quality == loss else quality * 100)))
         start_button = (
             f'<form class="action-form" method="post" action="/runs/{encoded_name}/start">'
-            '<button class="button small" type="submit">Start</button></form>'
+            '<button class="button small" type="submit">开始</button></form>'
             if run.can_start
             else ""
         )
         stop_button = (
             f'<form class="action-form" method="post" action="/runs/{encoded_name}/stop">'
-            '<button class="button small danger" type="submit">Stop</button></form>'
+            '<button class="button small danger" type="submit">停止</button></form>'
             if run.can_stop
             else ""
         )
         actions = start_button + stop_button
         if not actions:
-            actions = '<span class="muted">idle</span>'
+            actions = '<span class="muted">空闲</span>'
         rows.append(
             "<tr>"
             f"<td><a class=\"run-link\" href=\"/compare?runs={encoded_name}\">{escaped_name}</a>"
             f"<span class=\"run-time\">{_format_time(run.updated_at)}</span></td>"
-            f"<td><span class=\"backend backend-{html.escape(run.backend)}\">{html.escape(run.backend)}</span></td>"
-            f"<td><span class=\"status-pill {_status_class(run.status)}\">{html.escape(run.status)}</span></td>"
+            f"<td><span class=\"backend backend-{html.escape(run.backend)}\">{html.escape(_backend_label(run.backend))}</span></td>"
+            f"<td><span class=\"status-pill {_status_class(run.status)}\">{html.escape(_status_label(run.status))}</span></td>"
             f"<td><div class=\"progress-cell\"><div class=\"progress-track\"><span style=\"width:{run.progress_percent:.1f}%\"></span></div>"
             f"<small>{html.escape(run.progress_label)}</small></div></td>"
             f"<td>{_metric(run, 'loss', 'total_loss')}</td>"
@@ -187,8 +208,8 @@ def _runs_table(runs: list[RunSummary]) -> str:
             "</tr>"
         )
     return (
-        "<div class=\"table-wrap\"><table><thead><tr><th>Run</th><th>Backend</th><th>Status</th><th>Progress</th><th>Loss</th>"
-        "<th>Top1</th><th>Rank</th><th>Signal</th><th>CKPT</th><th>Artifacts</th><th>Control</th></tr></thead>"
+        "<div class=\"table-wrap\"><table><thead><tr><th>任务</th><th>后端</th><th>状态</th><th>进度</th><th>损失</th>"
+        "<th>Top1</th><th>排名</th><th>信号</th><th>检查点</th><th>产物</th><th>控制</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
@@ -198,7 +219,7 @@ def render_index(project_root: Path) -> str:
     runs = discover_runs(project_root / "runs")
     active = active_training_processes()
     disk = shutil.disk_usage(project_root)
-    active_rows = "".join(f"<li><code>{html.escape(line)}</code></li>" for line in active) or "<li>No active training process</li>"
+    active_rows = "".join(f"<li><code>{html.escape(line)}</code></li>" for line in active) or "<li>没有发现活动训练进程</li>"
     running_count = sum(1 for run in runs if run.status == "running")
     checkpoint_count = sum(run.checkpoint_count for run in runs)
     latest_loss = _metric(runs[0], "loss", "total_loss") if runs else "-"
@@ -206,32 +227,32 @@ def render_index(project_root: Path) -> str:
     body = f"""
 <section class="hero-panel">
   <div>
-    <h2>Training operations cockpit</h2>
-    <p>Start matched Python/C++ experiments, watch live run state, inspect metrics, and keep HTML records in one place.</p>
+    <h2>训练作业控制台</h2>
+    <p>启动 Python/C++ 对比实验，查看实时进度、指标曲线、日志和 HTML 留档。</p>
   </div>
   <div class="hero-actions">
-    <a class="button primary" href="/train">Launch compare run</a>
-    <a class="button secondary" href="/compare">Open comparison</a>
+    <a class="button primary" href="/train">启动对比训练</a>
+    <a class="button secondary" href="/compare">打开对比</a>
   </div>
 </section>
 <section class="metric-grid">
-  <article class="metric-card"><span>Runs</span><strong>{len(runs)}</strong><small>{running_count} running</small></article>
-  <article class="metric-card"><span>Latest loss</span><strong>{latest_loss}</strong><small>from newest run</small></article>
-  <article class="metric-card"><span>Checkpoints</span><strong>{checkpoint_count}</strong><small>discovered artifacts</small></article>
-  <article class="metric-card"><span>Disk free</span><strong>{_format_bytes(disk.free)}</strong><small>{disk_used_percent}% used</small></article>
+  <article class="metric-card"><span>训练任务</span><strong>{len(runs)}</strong><small>{running_count} 个运行中</small></article>
+  <article class="metric-card"><span>最新损失</span><strong>{latest_loss}</strong><small>来自最新任务</small></article>
+  <article class="metric-card"><span>检查点</span><strong>{checkpoint_count}</strong><small>已发现模型产物</small></article>
+  <article class="metric-card"><span>磁盘剩余</span><strong>{_format_bytes(disk.free)}</strong><small>已用 {disk_used_percent}%</small></article>
 </section>
 <section class="content-grid">
   <article class="panel wide">
-    <div class="panel-head"><div><h2>Recent Runs</h2><p>Newest experiments and training artifacts.</p></div><a href="/runs">All runs</a></div>
+    <div class="panel-head"><div><h2>近期任务</h2><p>最新训练实验、进度和模型产物。</p></div><a href="/runs">全部任务</a></div>
     {_runs_table(runs)}
   </article>
   <article class="panel">
-    <div class="panel-head"><div><h2>Active Processes</h2><p>Simulation and training commands currently visible to pgrep.</p></div></div>
+    <div class="panel-head"><div><h2>活动进程</h2><p>当前可见的仿真和训练进程。</p></div></div>
     <ul class="processes">{active_rows}</ul>
   </article>
 </section>
 """
-    return _layout("Overview", body, active="/")
+    return _layout("总览", body, active="/")
 
 
 def render_train(project_root: Path, message: str = "") -> str:
@@ -241,59 +262,59 @@ def render_train(project_root: Path, message: str = "") -> str:
 {notice}
 <form method="post" action="/train" class="train-workbench">
   <section class="panel launch-panel">
-    <div class="panel-head"><div><h2>Experiment</h2><p>One submit can launch Python, C++, or both for direct comparison.</p></div></div>
+    <div class="panel-head"><div><h2>实验配置</h2><p>一次提交可以启动 Python、C++ 或两边同时跑，用于直接对比。</p></div></div>
     <div class="form-grid two">
-      <label>Experiment name <input name="experiment_name" value="dashboard_compare"></label>
-      <label>Backend
+      <label>实验名称 <input name="experiment_name" value="dashboard_compare"></label>
+      <label>训练后端
         <select name="backend">
-          <option value="compare">Python + C++ compare</option>
-          <option value="python">Python only</option>
-          <option value="cpp">C++ only</option>
+          <option value="compare">Python + C++ 对比</option>
+          <option value="python">只跑 Python</option>
+          <option value="cpp">只跑 C++</option>
         </select>
       </label>
-      <label>Device <input name="device" value="cuda"></label>
-      <label>Init checkpoint <input name="init_checkpoint" placeholder="optional path"></label>
+      <label>设备 <input name="device" value="cuda"></label>
+      <label>初始检查点 <input name="init_checkpoint" placeholder="可选路径"></label>
     </div>
     <div class="quick-presets">
-      <button type="button" data-preset="smoke">Smoke</button>
-      <button type="button" data-preset="balanced">Balanced</button>
-      <button type="button" data-preset="long">Long run</button>
+      <button type="button" data-preset="smoke">冒烟测试</button>
+      <button type="button" data-preset="balanced">均衡训练</button>
+      <button type="button" data-preset="long">长训练</button>
     </div>
   </section>
   <section class="panel data-panel">
-    <div class="panel-head"><div><h2>Data</h2><p>Cache directories are passed directly to Python and C++ launch scripts.</p></div><a href="/datasets">Inspect datasets</a></div>
-    <label>Training cache dirs<textarea name="cache_dirs" rows="7">{html.escape(default_cache)}</textarea></label>
-    <label>Validation cache dirs<textarea name="validation_cache_dirs" rows="3" placeholder="optional, one path per line"></textarea></label>
+    <div class="panel-head"><div><h2>训练数据</h2><p>缓存目录会直接写入 Python 和 C++ 的启动脚本。</p></div><a href="/datasets">查看数据集</a></div>
+    <label>训练缓存目录<textarea name="cache_dirs" rows="7">{html.escape(default_cache)}</textarea></label>
+    <label>验证缓存目录<textarea name="validation_cache_dirs" rows="3" placeholder="可选，每行一个路径"></textarea></label>
   </section>
   <section class="panel">
-    <div class="panel-head"><div><h2>Training Parameters</h2><p>Core optimizer and crop settings.</p></div></div>
+    <div class="panel-head"><div><h2>训练参数</h2><p>优化器、裁剪和采样相关核心参数。</p></div></div>
     <div class="form-grid three">
-      <label>Epochs <input type="number" name="epochs" value="1" min="1"></label>
-      <label>Batch <input type="number" name="batch_size" value="1" min="1"></label>
-      <label>Crop <input type="number" name="training_crop_size" value="512" min="0"></label>
-      <label>Resize <input type="number" name="resize" value="512" min="0"></label>
-      <label>Samples <input type="number" name="samples_per_pair" value="512" min="1"></label>
-      <label>Learning rate <input name="learning_rate" value="3e-5"></label>
-      <label>Profile <input name="profile" value="python-compare"></label>
-      <label>Max batches <input type="number" name="max_train_batches" value="0" min="0"></label>
+      <label>训练轮数 <input type="number" name="epochs" value="1" min="1"></label>
+      <label>批大小 <input type="number" name="batch_size" value="1" min="1"></label>
+      <label>训练裁剪 <input type="number" name="training_crop_size" value="512" min="0"></label>
+      <label>输入缩放 <input type="number" name="resize" value="512" min="0"></label>
+      <label>每对采样点 <input type="number" name="samples_per_pair" value="512" min="1"></label>
+      <label>学习率 <input name="learning_rate" value="3e-5"></label>
+      <label>训练配置 <input name="profile" value="python-compare"></label>
+      <label>最大批次数 <input type="number" name="max_train_batches" value="0" min="0"></label>
     </div>
   </section>
   <section class="panel">
-    <div class="panel-head"><div><h2>Cache & Loader</h2><p>Keep GPU fed by preloading pair tensors into memory.</p></div></div>
+    <div class="panel-head"><div><h2>缓存与加载器</h2><p>提前把 pair tensor 加载到内存，减少 GPU 等 IO。</p></div></div>
     <div class="form-grid three">
-      <label>Memory cache items <input type="number" name="memory_cache_items" value="64" min="0"></label>
-      <label>Prefetch batches <input type="number" name="prefetch_batches" value="4" min="1"></label>
-      <label>Python workers <input type="number" name="prefetch_workers" value="2" min="0"></label>
-      <label>C++ loader workers <input type="number" name="dataloader_workers" value="2" min="0"></label>
+      <label>内存缓存条数 <input type="number" name="memory_cache_items" value="64" min="0"></label>
+      <label>预取批次数 <input type="number" name="prefetch_batches" value="4" min="1"></label>
+      <label>Python 加载线程 <input type="number" name="prefetch_workers" value="2" min="0"></label>
+      <label>C++ 加载线程 <input type="number" name="dataloader_workers" value="2" min="0"></label>
     </div>
   </section>
   <div class="sticky-submit">
-    <span>Generated scripts and HTML records will be written under <code>runs/</code>.</span>
-    <button class="button primary" type="submit">Launch training</button>
+    <span>启动脚本、日志和 HTML 记录会写入 <code>runs/</code>。</span>
+    <button class="button primary" type="submit">启动训练</button>
   </div>
 </form>
 """
-    return _layout("Train", body, active="/train")
+    return _layout("训练", body, active="/train")
 
 
 def render_runs(project_root: Path, message: str = "") -> str:
@@ -302,11 +323,11 @@ def render_runs(project_root: Path, message: str = "") -> str:
     body = f"""
 {notice}
 <section class="panel">
-  <div class="panel-head"><div><h2>Runs</h2><p>All discovered training folders under <code>runs/</code>.</p></div><a href="/train">New run</a></div>
+  <div class="panel-head"><div><h2>训练任务</h2><p><code>runs/</code> 下已发现的训练目录。</p></div><a href="/train">新建训练</a></div>
   {_runs_table(runs)}
 </section>
 """
-    return _layout("Runs", body, active="/runs")
+    return _layout("任务", body, active="/runs")
 
 
 def render_compare(project_root: Path, query: dict[str, list[str]]) -> str:
@@ -318,17 +339,17 @@ def render_compare(project_root: Path, query: dict[str, list[str]]) -> str:
     body = f"""
 <section class="compare-layout">
   <form method="get" action="/compare" class="panel compare-picker">
-    <div class="panel-head"><div><h2>Compare Runs</h2><p>Select Python and C++ runs to overlay their metric curves.</p></div></div>
+    <div class="panel-head"><div><h2>任务对比</h2><p>选择 Python 和 C++ 任务，叠加查看指标曲线。</p></div></div>
     <select name="runs" multiple size="16">{options}</select>
-    <button class="button primary" type="submit">Load chart</button>
+    <button class="button primary" type="submit">加载曲线</button>
   </form>
   <div class="panel chart-panel">
-    <div class="panel-head"><div><h2>Metric Timeline</h2><p>Loss curves update from metrics.csv.</p></div></div>
+    <div class="panel-head"><div><h2>指标曲线</h2><p>损失曲线来自各任务的 metrics.csv。</p></div></div>
     <canvas id="metricChart" data-runs="{html.escape(','.join(selected))}"></canvas>
   </div>
 </section>
 """
-    return _layout("Compare", body, active="/compare")
+    return _layout("对比", body, active="/compare")
 
 
 def render_datasets() -> str:
@@ -338,7 +359,7 @@ def render_datasets() -> str:
         exists = path.exists()
         rows.append(
             "<tr>"
-            f"<td><code>{html.escape(str(path))}</code><span class=\"run-time\">{'available' if exists else 'missing'}</span></td>"
+            f"<td><code>{html.escape(str(path))}</code><span class=\"run-time\">{'可用' if exists else '缺失'}</span></td>"
             f"<td>{summary.counts['train']}</td>"
             f"<td>{summary.counts['val']}</td>"
             f"<td>{summary.counts['test']}</td>"
@@ -347,13 +368,13 @@ def render_datasets() -> str:
             "</tr>"
         )
     body = (
-        "<section class=\"panel\"><div class=\"panel-head\"><div><h2>Datasets</h2>"
-        "<p>Known pair-cache roots used by the dashboard launch form.</p></div></div>"
-        "<div class=\"table-wrap\"><table><thead><tr><th>Path</th><th>Train</th><th>Val</th>"
-        "<th>Test</th><th>Total</th><th>Size</th></tr></thead>"
+        "<section class=\"panel\"><div class=\"panel-head\"><div><h2>数据集</h2>"
+        "<p>训练面板默认使用的 pair-cache 根目录。</p></div></div>"
+        "<div class=\"table-wrap\"><table><thead><tr><th>路径</th><th>训练</th><th>验证</th>"
+        "<th>测试</th><th>总数</th><th>大小</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div></section>"
     )
-    return _layout("Datasets", body, active="/datasets")
+    return _layout("数据集", body, active="/datasets")
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -416,13 +437,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/report"):
             name = parsed.path.split("/")[2]
             report = root / "runs" / name / "run.html"
-            self._send_html(report.read_text(encoding="utf-8") if report.exists() else "missing report")
+            self._send_html(report.read_text(encoding="utf-8") if report.exists() else "报告缺失")
         elif parsed.path == "/static/dashboard.css":
             self._send_payload(STYLE, "text/css; charset=utf-8")
         elif parsed.path == "/static/dashboard.js":
             self._send_payload(SCRIPT, "application/javascript; charset=utf-8")
         else:
-            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -430,7 +451,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_run_action(parsed.path)
             return
         if parsed.path != "/train":
-            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
             return
         length = int(self.headers.get("Content-Length", "0"))
         fields = parse_qs(self.rfile.read(length).decode("utf-8"))
@@ -460,35 +481,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             generated = create_training_runs(request)
             pids = [start_generated_run(run) for run in generated]
-            message = "Launched: " + ", ".join(f"{run.run_dir.name} pid={pid}" for run, pid in zip(generated, pids))
+            message = "已启动：" + "，".join(f"{run.run_dir.name} pid={pid}" for run, pid in zip(generated, pids))
         except Exception as exc:
-            message = f"Launch failed: {exc}"
+            message = f"启动失败：{exc}"
         self._send_html(render_train(self.project_root, message=message))
 
     def _handle_run_action(self, path: str) -> None:
         parts = path.strip("/").split("/")
         if len(parts) != 3:
-            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
             return
         name = unquote(parts[1])
         action = parts[2]
         run_path = (self.project_root / "runs" / name).resolve()
         runs_root = (self.project_root / "runs").resolve()
         if runs_root not in run_path.parents or not run_path.exists():
-            self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+            self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
             return
         try:
             if action == "start":
                 pid = start_run_script(run_path)
-                message = f"Started {name} pid={pid}"
+                message = f"已启动 {name}，pid={pid}"
             elif action == "stop":
                 pid = stop_run(run_path)
-                message = f"Sent stop signal to {name} pid={pid}"
+                message = f"已向 {name} 发送停止信号，pid={pid}"
             else:
-                self._send_html(_layout("Not Found", "<p>Not found</p>"), HTTPStatus.NOT_FOUND)
+                self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
                 return
         except Exception as exc:
-            message = f"{action} failed for {name}: {exc}"
+            message = f"{name} 执行 {action} 失败：{exc}"
         self._send_html(render_runs(self.project_root, message=message))
 
 
@@ -908,7 +929,7 @@ async function loadCompareChart() {
   context.fillStyle = '#91a1b4';
   context.font = '13px system-ui, sans-serif';
   if (!runs.length) {
-    context.fillText('Select one or more runs to draw metrics.', 24, 36);
+    context.fillText('请选择一个或多个任务绘制指标曲线。', 24, 36);
     return;
   }
   const response = await fetch('/api/metrics?' + runs.map(run => 'runs=' + encodeURIComponent(run)).join('&'));
@@ -921,11 +942,11 @@ async function loadCompareChart() {
       x: numericValue(row, ['step', 'global_step', 'epoch']) || step + 1,
       y: numericValue(row, ['loss', 'total_loss', 'train_loss'])
     })).filter(point => point.y !== null);
-    datasets.push({label: run + ' loss', data: points, color: colors[index % colors.length]});
+    datasets.push({label: run + ' 损失', data: points, color: colors[index % colors.length]});
   });
   const allPoints = datasets.flatMap(dataset => dataset.data);
   if (!allPoints.length) {
-    context.fillText('Selected runs do not expose loss metrics yet.', 24, 36);
+    context.fillText('所选任务暂时没有可绘制的损失指标。', 24, 36);
     return;
   }
   const padding = {left: 58, right: 28, top: 28, bottom: 54};
@@ -946,10 +967,10 @@ async function loadCompareChart() {
   context.stroke();
   context.fillStyle = '#91a1b4';
   context.font = '12px system-ui, sans-serif';
-  context.fillText(`loss ${yMax.toFixed(4)}`, 10, padding.top + 5);
-  context.fillText(`loss ${yMin.toFixed(4)}`, 10, padding.top + plotHeight);
-  context.fillText(`step ${xMin}`, padding.left, rect.height - 18);
-  context.fillText(`step ${xMax}`, padding.left + plotWidth - 64, rect.height - 18);
+  context.fillText(`损失 ${yMax.toFixed(4)}`, 10, padding.top + 5);
+  context.fillText(`损失 ${yMin.toFixed(4)}`, 10, padding.top + plotHeight);
+  context.fillText(`步数 ${xMin}`, padding.left, rect.height - 18);
+  context.fillText(`步数 ${xMax}`, padding.left + plotWidth - 64, rect.height - 18);
   datasets.forEach((dataset, index) => {
     if (!dataset.data.length) return;
     context.strokeStyle = dataset.color;

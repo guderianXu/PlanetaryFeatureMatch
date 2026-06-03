@@ -64,7 +64,7 @@ class DashboardServicesTest(unittest.TestCase):
             runs = discover_runs(root)
 
         self.assertEqual(runs[0].progress_percent, 40.0)
-        self.assertEqual(runs[0].progress_label, "4/10 steps")
+        self.assertEqual(runs[0].progress_label, "4/10 步")
         self.assertTrue(runs[0].can_start)
 
     def test_tail_text_returns_last_lines(self) -> None:

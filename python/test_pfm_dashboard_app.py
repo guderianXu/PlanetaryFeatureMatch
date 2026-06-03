@@ -28,7 +28,7 @@ class DashboardAppTest(unittest.TestCase):
                 with urllib.request.urlopen(base + "/api/runs", timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["runs"][0]["name"], "python_sample")
-                self.assertEqual(payload["runs"][0]["progress_label"], "1/2 steps")
+                self.assertEqual(payload["runs"][0]["progress_label"], "1/2 步")
                 with urllib.request.urlopen(base + "/static/dashboard.css", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/css")
                     self.assertIn(b"--bg: #0b1015", response.read())
@@ -36,9 +36,9 @@ class DashboardAppTest(unittest.TestCase):
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")
                 with urllib.request.urlopen(base + "/runs", timeout=5) as response:
                     runs_html = response.read()
-                self.assertIn(b"Progress", runs_html)
-                self.assertIn(b"Control", runs_html)
-                self.assertIn(b"Start", runs_html)
+                self.assertIn("进度".encode("utf-8"), runs_html)
+                self.assertIn("控制".encode("utf-8"), runs_html)
+                self.assertIn("开始".encode("utf-8"), runs_html)
             finally:
                 server.shutdown()
                 server.server_close()

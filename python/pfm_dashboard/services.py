@@ -64,22 +64,22 @@ def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoin
     target_steps = _script_option(script_path, "--max-train-batches", "--steps")
     if current_step is not None and target_steps and target_steps > 0:
         percent = min(100.0, max(0.0, current_step / target_steps * 100.0))
-        return percent, f"{int(current_step)}/{int(target_steps)} steps"
+        return percent, f"{int(current_step)}/{int(target_steps)} 步"
 
     current_epoch = _number(latest.get("epoch"))
     target_epochs = _script_option(script_path, "--epochs")
     if current_epoch is not None and target_epochs and target_epochs > 0:
         percent = min(100.0, max(0.0, current_epoch / target_epochs * 100.0))
-        return percent, f"{int(current_epoch)}/{int(target_epochs)} epochs"
+        return percent, f"{int(current_epoch)}/{int(target_epochs)} 轮"
 
     if status == "running":
         metric_rows = len(metrics.rows)
-        return min(95.0, max(6.0, float(metric_rows % 20) * 4.5)), f"{metric_rows} metric rows"
+        return min(95.0, max(6.0, float(metric_rows % 20) * 4.5)), f"{metric_rows} 条指标"
     if checkpoint_count > 0:
-        return 100.0, "checkpoint written"
+        return 100.0, "已写入检查点"
     if metrics.rows:
-        return 100.0 if status in {"logged", "stopped"} else 0.0, f"{len(metrics.rows)} metric rows"
-    return 0.0, "not started"
+        return 100.0 if status in {"logged", "stopped"} else 0.0, f"{len(metrics.rows)} 条指标"
+    return 0.0, "未开始"
 
 
 def pid_status(pid_file: Path) -> str:
@@ -177,10 +177,10 @@ def active_training_processes() -> list[str]:
 def start_run_script(run_path: Path) -> int:
     script_path = run_path / "train.sh"
     if not script_path.exists():
-        raise FileNotFoundError(f"missing train script: {script_path}")
+        raise FileNotFoundError(f"训练脚本缺失：{script_path}")
     status = pid_status(run_path / "train.pid")
     if status == "running":
-        raise RuntimeError(f"run is already running: {run_path.name}")
+        raise RuntimeError(f"任务正在运行：{run_path.name}")
     pid = os.fork()
     if pid == 0:
         os.setsid()
@@ -196,7 +196,7 @@ def start_run_script(run_path: Path) -> int:
 def stop_run(run_path: Path) -> int:
     pid_file = run_path / "train.pid"
     if not pid_file.exists():
-        raise FileNotFoundError(f"missing pid file: {pid_file}")
+        raise FileNotFoundError(f"PID 文件缺失：{pid_file}")
     pid = int(pid_file.read_text(encoding="utf-8").strip())
     try:
         os.killpg(pid, signal.SIGTERM)
