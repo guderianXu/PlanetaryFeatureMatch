@@ -299,7 +299,11 @@ def render_train(project_root: Path, message: str = "") -> str:
     </div>
   </div>
   <div class="live-chart-section">
-    <div class="section-caption"><h3>训练指标曲线</h3><span>独立 2x2 区域，默认显示当前任务最近 300 个 batch。</span></div>
+    <div class="section-caption">
+      <h3>训练指标曲线</h3>
+      <span>独立 2x2 区域，默认显示当前任务最近 300 个 batch。</span>
+      <span class="chart-legend"><i class="legend-raw"></i>浅线：每 batch 原始值 <i class="legend-smooth"></i>亮线：平滑趋势 <i class="legend-current"></i>圆点：当前 batch</span>
+    </div>
     <div class="live-chart-grid">
       <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
@@ -1034,16 +1038,21 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .live-chart-card > div {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 10px;
   margin-bottom: 8px;
 }
 .live-chart-card strong {
+  flex: 0 0 auto;
   color: #ffffff;
   font-size: 13px;
 }
 .live-chart-card span {
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
+  line-height: 1.35;
+  text-align: right;
 }
 .live-chart-card svg {
   display: block;
@@ -1092,6 +1101,34 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .live-chart-label {
   fill: #9dadbf;
   font-size: 10px;
+}
+.chart-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chart-legend i {
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.legend-raw {
+  width: 20px;
+  height: 2px;
+  background: rgba(72, 191, 193, 0.34);
+}
+.legend-smooth {
+  width: 20px;
+  height: 3px;
+  background: #48bfc1;
+}
+.legend-current {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #48bfc1;
+  box-shadow: 0 0 0 2px rgba(72, 191, 193, 0.18);
 }
 .train-workbench { display: grid; grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
 .launch-panel, .data-panel { grid-column: auto; }
@@ -1298,6 +1335,12 @@ function runMetricRows(metricsPayload, runName) {
 
 const LIVE_CHART_WINDOW_BATCHES = 300;
 const LIVE_CHART_MAX_DOTS = 80;
+const LIVE_CHART_METRICS = {
+  loss: ['loss', 'loss_total', 'total_loss', 'train_loss'],
+  top1: ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'],
+  graph: ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy'],
+  rank: ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']
+};
 
 function visibleMetricRows(rows) {
   return rows.slice(Math.max(0, rows.length - LIVE_CHART_WINDOW_BATCHES));
@@ -1400,16 +1443,24 @@ function liveChartRun(selectedRuns) {
   return selectedRuns.find((run) => run.status === 'running') || selectedRuns[0] || null;
 }
 
-function updateChartMeta(chartKey, run, metricsPayload) {
+function updateChartMeta(chartKey, run, metricsPayload, names) {
   const element = document.querySelector(`[data-live-chart-meta="${chartKey}"]`);
   if (!element) return;
   if (!run) {
     element.textContent = '等待任务';
     return;
   }
-  const rows = runMetricRows(metricsPayload, run.name);
-  const visibleCount = visibleMetricRows(rows).length;
-  element.textContent = `${run.name.slice(0, 28)} · 最近 ${visibleCount} batch`;
+  const series = chartPoints(metricsPayload, [run], names)[0];
+  if (!series || !series.points.length) {
+    const rows = runMetricRows(metricsPayload, run.name);
+    const visibleCount = visibleMetricRows(rows).length;
+    element.textContent = `${run.name.slice(0, 24)} · 最近 ${visibleCount} batch · 无当前指标`;
+    return;
+  }
+  const current = series.points[series.points.length - 1];
+  const smoothPoints = movingAveragePoints(series.points);
+  const smooth = smoothPoints[smoothPoints.length - 1] || current;
+  element.textContent = `batch ${Math.round(current.x)} · 当前 ${formatMetric(current.y, 4)} · 平滑 ${formatMetric(smooth.y, 4)}`;
 }
 
 function renderLiveRuns(container, runs) {
@@ -1489,11 +1540,11 @@ async function refreshLiveTraining() {
   setText('[data-live-top1]', formatMetric(metricFromLatest(latest, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'])));
   setText('[data-live-rows]', String(newestRows));
   setText('[data-live-updated]', '更新 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}));
-  ['loss', 'top1', 'graph', 'rank'].forEach((chartKey) => updateChartMeta(chartKey, chartRun, metricsPayload));
-  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, ['loss', 'loss_total', 'total_loss', 'train_loss']));
-  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1']));
-  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, chartRuns, ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy']));
-  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank']));
+  Object.entries(LIVE_CHART_METRICS).forEach(([chartKey, names]) => updateChartMeta(chartKey, chartRun, metricsPayload, names));
+  renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.loss));
+  renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.top1));
+  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.graph));
+  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.rank));
 }
 
 function installLiveTraining() {
