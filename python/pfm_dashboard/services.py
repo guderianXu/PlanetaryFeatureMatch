@@ -91,6 +91,14 @@ def pid_status(pid_file: Path) -> str:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except ValueError:
         return "invalid"
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            stat_text = proc_stat.read_text(encoding="utf-8", errors="replace")
+            if ") Z" in stat_text:
+                return "stopped"
+        except OSError:
+            pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

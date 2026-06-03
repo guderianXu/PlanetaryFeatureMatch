@@ -1128,8 +1128,8 @@ function setField(name, value) {
 function installPresets() {
   const presets = {
     smoke: {epochs: 1, batch_size: 1, training_crop_size: 512, resize: 512, samples_per_pair: 256, max_train_batches: 40, memory_cache_items: 32, prefetch_batches: 2},
-    balanced: {epochs: 2, batch_size: 2, training_crop_size: 768, resize: 768, samples_per_pair: 512, max_train_batches: 0, memory_cache_items: 128, prefetch_batches: 4},
-    long: {epochs: 6, batch_size: 2, training_crop_size: 1024, resize: 1024, samples_per_pair: 1024, max_train_batches: 0, memory_cache_items: 256, prefetch_batches: 6}
+    balanced: {epochs: 2, batch_size: 1, training_crop_size: 768, resize: 768, samples_per_pair: 512, max_train_batches: 0, memory_cache_items: 128, prefetch_batches: 4},
+    long: {epochs: 6, batch_size: 1, training_crop_size: 1024, resize: 1024, samples_per_pair: 768, max_train_batches: 0, memory_cache_items: 128, prefetch_batches: 4}
   };
   document.querySelectorAll('[data-preset]').forEach((button) => {
     button.addEventListener('click', () => {

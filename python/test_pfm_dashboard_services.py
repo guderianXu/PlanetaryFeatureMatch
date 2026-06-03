@@ -85,6 +85,27 @@ class DashboardServicesTest(unittest.TestCase):
             current.write_text(str(__import__("os").getpid()), encoding="utf-8")
             self.assertEqual(pid_status(current), "running")
 
+    def test_pid_status_treats_zombie_as_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            pid_file = Path(temp) / "zombie.pid"
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            try:
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    stat_path = Path(f"/proc/{pid}/stat")
+                    if stat_path.exists() and ") Z" in stat_path.read_text(encoding="utf-8", errors="replace"):
+                        break
+                    time.sleep(0.01)
+                pid_file.write_text(str(pid), encoding="utf-8")
+                self.assertEqual(pid_status(pid_file), "stopped")
+            finally:
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+
     def test_dataset_split_counts_counts_pair_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
