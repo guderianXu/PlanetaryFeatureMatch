@@ -48,7 +48,9 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertEqual(metrics["metrics"]["python_sample"]["rows"][0]["loss"], 2.5)
                 with urllib.request.urlopen(base + "/static/dashboard.css", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/css")
-                    self.assertIn(b"--bg: #0b1015", response.read())
+                    dashboard_css = response.read()
+                    self.assertIn(b"--bg: #0b1015", dashboard_css)
+                    self.assertIn(b"grid-template-columns: repeat(2, minmax(0, 1fr))", dashboard_css)
                 with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")
                     dashboard_js = response.read()

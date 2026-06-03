@@ -984,8 +984,8 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-chart-grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 .live-chart-card {
   min-width: 0;
@@ -1011,13 +1011,13 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .live-chart-card svg {
   display: block;
   width: 100%;
-  height: 220px;
+  height: 190px;
   border-radius: 6px;
   background:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     rgba(4, 8, 13, 0.48);
-  background-size: 100% 44px, 86px 100%, auto;
+  background-size: 100% 38px, 72px 100%, auto;
 }
 .live-chart-axis {
   stroke: rgba(168, 181, 194, 0.32);
