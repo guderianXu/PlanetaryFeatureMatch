@@ -53,6 +53,7 @@ class DashboardAppTest(unittest.TestCase):
                     dashboard_css = response.read()
                     self.assertIn(b"--bg: #0b1015", dashboard_css)
                     self.assertIn(b".live-chart-section", dashboard_css)
+                    self.assertIn(b"max-height: 440px", dashboard_css)
                     self.assertIn(b"grid-template-columns: repeat(2, minmax(0, 1fr))", dashboard_css)
                 with urllib.request.urlopen(base + "/static/dashboard.js", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "application/javascript")

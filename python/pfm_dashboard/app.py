@@ -897,8 +897,9 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.86fr) minmax(0, 1.44fr);
+  grid-template-columns: minmax(360px, 0.9fr) minmax(360px, 1.1fr);
   gap: 14px;
+  align-items: start;
 }
 .live-chart-section {
   margin-top: 14px;
@@ -925,6 +926,9 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   display: grid;
   gap: 10px;
   align-content: start;
+  max-height: 440px;
+  overflow: auto;
+  padding-right: 4px;
 }
 .live-run-card {
   padding: 12px;
@@ -983,11 +987,16 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-stat-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 .live-stat-grid article {
-  padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(104px, 0.8fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
@@ -1001,10 +1010,14 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 }
 .live-stat-grid strong {
   display: block;
-  margin-top: 6px;
+  margin-top: 0;
   color: #ffffff;
-  font-size: 21px;
+  font-size: 18px;
   line-height: 1;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .live-chart-grid {
   display: grid;
