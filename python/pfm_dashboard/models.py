@@ -27,6 +27,9 @@ class RunSummary:
     has_log: bool
     can_start: bool
     can_stop: bool
+    can_delete: bool
+    created_at: float
+    completed_at: float | None
     updated_at: float
 
 

@@ -17,6 +17,7 @@ from .services import (
     active_training_processes,
     discover_runs,
     read_metrics_csv,
+    delete_run,
     start_run_script,
     stop_run,
     summarize_dataset,
@@ -70,6 +71,10 @@ def _metric_number(summary: RunSummary, *names: str) -> float | None:
 
 def _format_time(timestamp: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+
+
+def _format_optional_time(timestamp: float | None) -> str:
+    return _format_time(timestamp) if timestamp is not None else "-"
 
 
 def _status_class(status: str) -> str:
@@ -187,15 +192,24 @@ def _runs_table(runs: list[RunSummary]) -> str:
             if run.can_stop
             else ""
         )
+        delete_button = (
+            f'<form class="action-form" method="post" action="/runs/{encoded_name}/delete">'
+            f'<button class="button small danger" type="submit" data-confirm="确认删除任务 {escaped_name}？任务会移动到 runs/.trash/">删除</button></form>'
+            if run.can_delete
+            else ""
+        )
         actions = start_button + stop_button
         if not actions:
             actions = '<span class="muted">空闲</span>'
+        delete_action = delete_button or '<span class="muted">-</span>'
         rows.append(
             "<tr>"
             f"<td><a class=\"run-link\" href=\"/compare?runs={encoded_name}\">{escaped_name}</a>"
-            f"<span class=\"run-time\">{_format_time(run.updated_at)}</span></td>"
+            f"<span class=\"run-time\">更新 {_format_time(run.updated_at)}</span></td>"
             f"<td><span class=\"backend backend-{html.escape(run.backend)}\">{html.escape(_backend_label(run.backend))}</span></td>"
             f"<td><span class=\"status-pill {_status_class(run.status)}\">{html.escape(_status_label(run.status))}</span></td>"
+            f"<td><span class=\"time-cell\">{_format_time(run.created_at)}</span></td>"
+            f"<td><span class=\"time-cell\">{_format_optional_time(run.completed_at)}</span></td>"
             f"<td><div class=\"progress-cell\"><div class=\"progress-track\"><span style=\"width:{run.progress_percent:.1f}%\"></span></div>"
             f"<small>{html.escape(run.progress_label)}</small></div></td>"
             f"<td>{_metric(run, 'loss', 'total_loss')}</td>"
@@ -205,11 +219,12 @@ def _runs_table(runs: list[RunSummary]) -> str:
             f"<td>{run.checkpoint_count}</td>"
             f"<td class=\"row-actions\">{log} {report}</td>"
             f"<td class=\"run-actions\">{actions}</td>"
+            f"<td class=\"run-actions\">{delete_action}</td>"
             "</tr>"
         )
     return (
-        "<div class=\"table-wrap\"><table><thead><tr><th>任务</th><th>后端</th><th>状态</th><th>进度</th><th>损失</th>"
-        "<th>Top1</th><th>排名</th><th>信号</th><th>检查点</th><th>产物</th><th>控制</th></tr></thead>"
+        "<div class=\"table-wrap\"><table><thead><tr><th>任务</th><th>后端</th><th>状态</th><th>创建时间</th><th>完成时间</th><th>进度</th><th>损失</th>"
+        "<th>Top1</th><th>排名</th><th>信号</th><th>检查点</th><th>产物</th><th>控制</th><th>删除</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
@@ -447,7 +462,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path.startswith("/runs/") and (parsed.path.endswith("/start") or parsed.path.endswith("/stop")):
+        if parsed.path.startswith("/runs/") and (
+            parsed.path.endswith("/start") or parsed.path.endswith("/stop") or parsed.path.endswith("/delete")
+        ):
             self._handle_run_action(parsed.path)
             return
         if parsed.path != "/train":
@@ -505,6 +522,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif action == "stop":
                 pid = stop_run(run_path)
                 message = f"已向 {name} 发送停止信号，pid={pid}"
+            elif action == "delete":
+                target = delete_run(run_path)
+                message = f"已删除 {name}，已移动到 {target}"
             else:
                 self._send_html(_layout("未找到", "<p>页面不存在</p>"), HTTPStatus.NOT_FOUND)
                 return
@@ -767,7 +787,7 @@ main { padding: 22px 28px 36px; }
   border-radius: 8px;
   background: var(--surface-soft);
 }
-table { width: 100%; min-width: 1260px; border-collapse: collapse; font-size: 13px; background: transparent; }
+table { width: 100%; min-width: 1500px; border-collapse: collapse; font-size: 13px; background: transparent; }
 th, td { border-bottom: 1px solid rgba(169, 190, 212, 0.11); padding: 10px 11px; text-align: left; vertical-align: middle; white-space: nowrap; }
 th { background: rgba(255, 255, 255, 0.035); color: var(--muted-strong); font-size: 11px; text-transform: uppercase; font-weight: 800; }
 td { color: #dce6f2; }
@@ -776,6 +796,7 @@ tbody tr:last-child td { border-bottom: 0; }
 code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .run-link { display: block; color: #ffffff; font-weight: 750; }
 .run-time { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.time-cell { color: #cbd6e3; font-size: 12px; }
 .backend, .status-pill {
   display: inline-flex;
   align-items: center;
@@ -920,6 +941,16 @@ function installAutoRefresh() {
   }, 10000);
 }
 
+function installConfirmButtons() {
+  document.querySelectorAll('[data-confirm]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      if (!window.confirm(button.dataset.confirm || '确认执行？')) {
+        event.preventDefault();
+      }
+    });
+  });
+}
+
 function numericValue(row, names) {
   for (const name of names) {
     const value = row[name];
@@ -1005,6 +1036,7 @@ async function loadCompareChart() {
 }
 installPresets();
 installAutoRefresh();
+installConfirmButtons();
 loadCompareChart();
 """
 

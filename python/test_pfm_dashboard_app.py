@@ -39,6 +39,9 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("进度".encode("utf-8"), runs_html)
                 self.assertIn("控制".encode("utf-8"), runs_html)
                 self.assertIn("开始".encode("utf-8"), runs_html)
+                self.assertIn("创建时间".encode("utf-8"), runs_html)
+                self.assertIn("完成时间".encode("utf-8"), runs_html)
+                self.assertIn("删除".encode("utf-8"), runs_html)
             finally:
                 server.shutdown()
                 server.server_close()

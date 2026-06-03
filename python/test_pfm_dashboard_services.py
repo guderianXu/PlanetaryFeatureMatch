@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pfm_dashboard.services import (
     dataset_split_counts,
+    delete_run,
     discover_runs,
     pid_status,
     read_metrics_csv,
@@ -52,6 +53,9 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(runs[0].checkpoint_count, 1)
         self.assertTrue(runs[0].has_report)
         self.assertEqual(runs[0].progress_percent, 100.0)
+        self.assertIsNotNone(runs[0].created_at)
+        self.assertIsNotNone(runs[0].completed_at)
+        self.assertTrue(runs[0].can_delete)
 
     def test_discover_runs_infers_step_progress_from_script(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -121,6 +125,21 @@ class DashboardServicesTest(unittest.TestCase):
                     os.kill(pid, 9)
                 except ProcessLookupError:
                     pass
+
+    def test_delete_run_moves_directory_to_trash_and_discovery_skips_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "old_run"
+            run.mkdir()
+            (run / "train.sh").write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+
+            target = delete_run(run)
+            runs = discover_runs(root)
+
+            self.assertFalse(run.exists())
+            self.assertIn(".trash", target.parts)
+            self.assertTrue(target.exists())
+            self.assertEqual(runs, [])
 
 
 if __name__ == "__main__":

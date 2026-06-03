@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import os
 import re
+import shutil
 import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -98,11 +100,55 @@ def pid_status(pid_file: Path) -> str:
     return "running"
 
 
+def _file_mtimes(paths: list[Path]) -> list[float]:
+    mtimes: list[float] = []
+    for path in paths:
+        if path.exists():
+            try:
+                mtimes.append(path.stat().st_mtime)
+            except OSError:
+                continue
+    return mtimes
+
+
+def run_created_at(run_path: Path) -> float:
+    candidates = [
+        run_path / "run.html",
+        run_path / "train.sh",
+        run_path / "metrics.csv",
+        run_path / "train.log",
+    ]
+    mtimes = _file_mtimes(candidates)
+    if mtimes:
+        return min(mtimes)
+    return run_path.stat().st_mtime
+
+
+def run_completed_at(run_path: Path, status: str, checkpoint_count: int) -> float | None:
+    if status == "running":
+        return None
+    candidates = [
+        run_path / "metrics.csv",
+        run_path / "train.log",
+        run_path / "model_final.pt",
+        run_path / "pytorch_pfm_state.pt",
+    ]
+    checkpoints_dir = run_path / "checkpoints"
+    if checkpoints_dir.exists():
+        candidates.extend(path for path in checkpoints_dir.glob("*.pt"))
+    mtimes = _file_mtimes(candidates)
+    if mtimes:
+        return max(mtimes)
+    if checkpoint_count > 0:
+        return run_path.stat().st_mtime
+    return None
+
+
 def discover_runs(root: Path) -> list[RunSummary]:
     if not root.exists():
         return []
     summaries: list[RunSummary] = []
-    for run_path in sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True):
+    for run_path in sorted((path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")), key=lambda path: path.stat().st_mtime, reverse=True):
         metrics = read_metrics_csv(run_path / "metrics.csv")
         checkpoints = list(run_path.glob("*.pt")) + list((run_path / "checkpoints").glob("*.pt"))
         status = pid_status(run_path / "train.pid")
@@ -123,6 +169,9 @@ def discover_runs(root: Path) -> list[RunSummary]:
                 has_log=(run_path / "train.log").exists(),
                 can_start=(run_path / "train.sh").exists() and status != "running",
                 can_stop=status == "running",
+                can_delete=status != "running",
+                created_at=run_created_at(run_path),
+                completed_at=run_completed_at(run_path, status, len(checkpoints)),
                 updated_at=run_path.stat().st_mtime,
             )
         )
@@ -207,3 +256,18 @@ def stop_run(run_path: Path) -> int:
     except OSError:
         os.kill(pid, signal.SIGTERM)
     return pid
+
+
+def delete_run(run_path: Path) -> Path:
+    if pid_status(run_path / "train.pid") == "running":
+        raise RuntimeError(f"任务正在运行，不能删除：{run_path.name}")
+    trash_root = run_path.parent / ".trash"
+    trash_root.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    target = trash_root / f"{stamp}_{run_path.name}"
+    suffix = 1
+    while target.exists():
+        target = trash_root / f"{stamp}_{suffix}_{run_path.name}"
+        suffix += 1
+    shutil.move(str(run_path), str(target))
+    return target
