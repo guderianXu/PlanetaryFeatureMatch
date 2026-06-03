@@ -26,7 +26,7 @@ class TrainingRequest:
     training_crop_size: int = 512
     samples_per_pair: int = 512
     learning_rate: float = 3.0e-5
-    profile: str = "python-compare"
+    profile: str = "full"
     full_v21: bool = True
     memory_cache_items: int = 64
     prefetch_batches: int = 4

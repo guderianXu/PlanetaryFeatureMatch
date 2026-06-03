@@ -130,7 +130,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                     "Use full v2.1 model dimensions: base=64, descriptor=256, graph_hidden=512, graph_layers=8");
     train
         ->add_option("--training-profile", options.training_profile,
-                     "Training loss profile: smoke, detector, descriptor, graph, full, or python-compare")
+                     "Training loss profile: smoke, detector, descriptor, graph, full, or legacy alias python-compare")
         ->check(CLI::IsMember({"smoke", "detector", "descriptor", "graph", "full", "python-compare"}));
     train->add_option("--samples-per-pair", options.samples_per_pair,
                       "Python-compatible sampled correspondence count per pair")

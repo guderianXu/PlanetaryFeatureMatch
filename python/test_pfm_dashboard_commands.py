@@ -40,7 +40,6 @@ class DashboardCommandsTest(unittest.TestCase):
                 cache_dirs=["/cache/train"],
                 output_root=Path(temp),
                 device="cuda",
-                profile="python-compare",
                 full_v21=True,
                 memory_cache_items=16,
             )
@@ -50,7 +49,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         script = runs[0].script_text
         self.assertIn("./build/pfm_cli train", script)
-        self.assertIn("--training-profile python-compare", script)
+        self.assertIn("--training-profile full", script)
         self.assertIn("--pair-cache-dir /cache/train", script)
         self.assertIn("--full-v21", script)
         self.assertIn("--memory-cache-items 16", script)

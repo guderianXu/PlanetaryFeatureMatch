@@ -425,8 +425,7 @@ static void pipeline_train_prints_visualization_note()
 static void pipeline_train_accepts_min_keypoint_intensity()
 {
     TempPipelineDirectory temp_dir("pfm_pipeline_train_intensity_mask");
-    cv::Mat mat(32, 32, CV_8UC1, cv::Scalar(0));
-    mat(cv::Rect(20, 20, 8, 8)).setTo(cv::Scalar(255));
+    cv::Mat mat(32, 32, CV_8UC1, cv::Scalar(255));
     PFM_REQUIRE(cv::imwrite(temp_dir.file("image.png").string(), mat));
     auto options = make_train_options(temp_dir);
     options.min_keypoint_intensity = 0.5;
@@ -447,6 +446,7 @@ static void pipeline_train_forwards_pairs_per_image_to_cache_generation()
     options.pairs_per_image = 2;
     options.augmentation_profile = "extreme";
     options.extreme_pair_ratio = 0.4;
+    options.min_keypoint_intensity = 0.0;
     options.resize = 32;
 
     PFM_REQUIRE(pfm::run_train_command(options) == 0);

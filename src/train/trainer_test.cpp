@@ -341,6 +341,7 @@ pfm::TrainConfig tiny_config(const TempTrainingDirectory& temp_dir)
     config.graph_attention_layers = 1;
     config.graph_keypoint_meta_dim = 16;
     config.learning_rate = 1.0e-3;
+    config.min_keypoint_intensity = 0.0;
     config.train_ratio = 1.0;
     config.val_ratio = 0.0;
     return config;

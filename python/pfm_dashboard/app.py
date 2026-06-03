@@ -312,11 +312,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>学习率 <input name="learning_rate" value="3e-5"></label>
       <label>最大批次数 <input type="number" name="max_train_batches" value="0" min="0"></label>
     </div>
-    <label class="check-row">
-      <input type="checkbox" name="align_python_compare" value="1" checked>
-      <span>C++ 对齐 Python 训练定义</span>
-      <small>默认开启，便于比较 Python/C++ 的 loss 和指标；关闭后 C++ 使用完整训练配置。</small>
-    </label>
+    <p class="hint">C++ 的完整训练定义已经默认与 Python 对齐，不再需要手动选择 profile。</p>
   </section>
   <section class="panel">
     <div class="panel-head"><div><h2>缓存与加载器</h2><p>提前把 pair tensor 加载到内存，减少 GPU 等 IO。</p></div></div>
@@ -478,7 +474,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         fields = parse_qs(self.rfile.read(length).decode("utf-8"))
         value = lambda name, default="": fields.get(name, [default])[0]
         lines = lambda name: [line.strip() for line in value(name).splitlines() if line.strip()]
-        align_python_compare = value("align_python_compare", "") == "1"
         request = TrainingRequest(
             experiment_name=value("experiment_name", "dashboard_run"),
             backend=value("backend", "compare"),
@@ -493,7 +488,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             training_crop_size=int(value("training_crop_size", "512")),
             samples_per_pair=int(value("samples_per_pair", "512")),
             learning_rate=float(value("learning_rate", "3e-5")),
-            profile="python-compare" if align_python_compare else "full",
+            profile="full",
             memory_cache_items=int(value("memory_cache_items", "64")),
             prefetch_batches=int(value("prefetch_batches", "4")),
             prefetch_workers=int(value("prefetch_workers", "2")),

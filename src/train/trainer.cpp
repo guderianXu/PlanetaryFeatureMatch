@@ -257,7 +257,7 @@ TrainingProfile parse_training_profile(const std::string& value)
         return TrainingProfile::PythonCompare;
     }
     throw std::invalid_argument(
-        "training_profile must be one of smoke, detector, descriptor, graph, full, or python-compare");
+        "training_profile must be one of smoke, detector, descriptor, graph, full, or legacy alias python-compare");
 }
 
 int64_t training_profile_id(TrainingProfile profile)
@@ -298,9 +298,14 @@ bool training_profile_uses_graph_losses(TrainingProfile profile)
            profile == TrainingProfile::PythonCompare;
 }
 
-bool training_profile_uses_dense_pair_loss(TrainingProfile profile)
+bool training_profile_uses_dense_pair_loss(TrainingProfile)
 {
-    return profile == TrainingProfile::Full;
+    return false;
+}
+
+bool training_profile_uses_python_aligned_pair_loss(TrainingProfile profile)
+{
+    return profile == TrainingProfile::Full || profile == TrainingProfile::PythonCompare;
 }
 
 void validate_config(const TrainConfig& config)
@@ -4051,6 +4056,8 @@ PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& v
 {
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
+    const auto target_height = view_b.size(2);
+    const auto target_width = view_b.size(3);
     auto warp_item = warp.index({batch});
     auto valid = valid_mask.index({batch}).to(torch::kBool)
                      .logical_and(torch::isfinite(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(),
@@ -4059,10 +4066,10 @@ PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& v
                                                                     1})))
                      .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}).ge(0.0))
                      .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 0}).le(
-                         static_cast<double>(image_width - 1)))
+                         static_cast<double>(target_width - 1)))
                      .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}).ge(0.0))
                      .logical_and(warp_item.index({torch::indexing::Slice(), torch::indexing::Slice(), 1}).le(
-                         static_cast<double>(image_height - 1)));
+                         static_cast<double>(target_height - 1)));
     auto valid_indices = torch::nonzero(valid.reshape({image_height * image_width})).flatten();
     if (valid_indices.numel() == 0)
     {
@@ -4200,7 +4207,26 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                                                          SparseHeadOutput sparse_b, const DenseHeadOutput& dense,
                                                          const TrainConfig& config)
 {
-    const auto zero = torch::zeros({}, sparse_a.descriptors.options());
+    auto zero = sparse_a.descriptors.sum() * 0.0;
+    auto attach_trainable_zero = [&zero](auto& module)
+    {
+        for (auto& parameter : module->parameters())
+        {
+            if (parameter.requires_grad())
+            {
+                zero = zero + parameter.sum() * 0.0;
+            }
+        }
+    };
+    attach_trainable_zero(modules.backbone);
+    attach_trainable_zero(modules.dual_fpn);
+    attach_trainable_zero(modules.sparse_head);
+    attach_trainable_zero(modules.texture_adapter);
+    attach_trainable_zero(modules.descriptor_fusion);
+    attach_trainable_zero(modules.dense_head);
+    attach_trainable_zero(modules.quality_head);
+    attach_trainable_zero(modules.semi_dense_branch);
+    attach_trainable_zero(modules.graph_matcher);
     std::vector<torch::Tensor> descriptor_losses;
     std::vector<torch::Tensor> graph_losses;
     std::vector<torch::Tensor> accuracies;
@@ -4234,6 +4260,10 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
         graph_losses.push_back(make_python_compare_graph_loss(*modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
                                                               normalize_python_descriptor_rows(desc_b), sample.points_a,
                                                               sample.points_b, config.graph_keypoint_meta_dim));
+    }
+    if (descriptor_losses.empty() && graph_losses.empty())
+    {
+        throw std::runtime_error("no valid correspondences sampled");
     }
     auto descriptor_loss = descriptor_losses.empty() ? zero : torch::stack(descriptor_losses).mean();
     auto graph_loss = graph_losses.empty() ? zero : torch::stack(graph_losses).mean();
@@ -4693,7 +4723,7 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     SparseHeadOutput sparse_b;
     DenseHeadOutput dense;
     {
-        const auto use_amp = view_a.is_cuda() && training_profile != TrainingProfile::PythonCompare;
+        const auto use_amp = view_a.is_cuda() && !training_profile_uses_python_aligned_pair_loss(training_profile);
         AmpAutocastGuard autocast_guard(use_amp, c10::DeviceType::CUDA, at::kBFloat16);
         feature_pyramid_a = modules.backbone->forward(view_a);
         feature_pyramid_b = modules.backbone->forward(view_b);
@@ -4718,7 +4748,8 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
             const auto dense_a_self = modules.dense_head->forward(dense_features_a, dense_features_a);
             const auto dense_b_self = modules.dense_head->forward(dense_features_b, dense_features_b);
             const auto texture_blend_weight =
-                training_profile == TrainingProfile::PythonCompare ? 1.0 : ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
+                training_profile_uses_python_aligned_pair_loss(training_profile) ? 1.0
+                                                                                 : ROTATION_INVARIANT_TEXTURE_BLEND_WEIGHT;
             sparse_a =
                 finalize_v21_sparse_output(modules, std::move(raw_sparse_a), view_a, dense_a_self.confidence,
                                            texture_blend_weight);
@@ -4743,12 +4774,13 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     sparse_a = float_sparse_output(std::move(sparse_a));
     sparse_b = float_sparse_output(std::move(sparse_b));
     dense = float_dense_output(std::move(dense));
-    if (config.descriptor_orientation_canonicalization && training_profile != TrainingProfile::PythonCompare)
+    if (config.descriptor_orientation_canonicalization &&
+        !training_profile_uses_python_aligned_pair_loss(training_profile))
     {
         sparse_a.descriptors = canonicalize_descriptor_map_by_orientation(sparse_a.descriptors, sparse_a.orientation);
         sparse_b.descriptors = canonicalize_descriptor_map_by_orientation(sparse_b.descriptors, sparse_b.orientation);
     }
-    if (training_profile == TrainingProfile::PythonCompare)
+    if (training_profile_uses_python_aligned_pair_loss(training_profile))
     {
         return make_python_compare_training_loss(modules, view_a, view_b, warp, valid_mask, std::move(sparse_a),
                                                  std::move(sparse_b), dense, config);
