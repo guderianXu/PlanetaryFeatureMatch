@@ -150,6 +150,8 @@ static void parse_train_command()
         "0.05",
         "--weight-decay",
         "0.08",
+        "--max-grad-norm",
+        "0.75",
         "--graph-keypoint-meta-dim",
         "12",
         "--training-profile",
@@ -228,6 +230,7 @@ static void parse_train_command()
     PFM_REQUIRE(parsed.lr_warmup_steps == 12);
     PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 0.05, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.weight_decay, 0.08, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.gradient_clip_norm, 0.75, 1.0e-12);
     PFM_REQUIRE(parsed.graph_keypoint_meta_dim == 12);
     PFM_REQUIRE(parsed.training_profile == "smoke");
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);

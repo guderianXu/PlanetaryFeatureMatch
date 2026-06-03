@@ -190,6 +190,7 @@ std::vector<std::size_t> make_training_image_indices_for_test(std::size_t total_
 std::vector<std::size_t> make_validation_image_indices_for_test(std::size_t total_images,
                                                                 const pfm::TrainConfig& config);
 double training_learning_rate_for_step_for_test(const pfm::TrainConfig& config, int64_t step, int64_t total_steps);
+bool training_profile_uses_dense_quality_forward_for_test(const std::string& training_profile);
 
 } // namespace pfm::testing
 
@@ -1615,6 +1616,14 @@ static void trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_
     PFM_REQUIRE(!descriptor_mask.index({0, 4, 4}).item<bool>());
 }
 
+static void trainer_python_compare_profile_skips_dense_quality_forward()
+{
+    PFM_REQUIRE(!pfm::testing::training_profile_uses_dense_quality_forward_for_test("python-compare"));
+    PFM_REQUIRE(!pfm::testing::training_profile_uses_dense_quality_forward_for_test("full"));
+    PFM_REQUIRE(pfm::testing::training_profile_uses_dense_quality_forward_for_test("descriptor"));
+    PFM_REQUIRE(pfm::testing::training_profile_uses_dense_quality_forward_for_test("graph"));
+}
+
 static void trainer_descriptor_candidates_do_not_repeat_positive_target()
 {
     auto target_indices = torch::tensor({{0, 4}}, torch::kLong);
@@ -3018,6 +3027,8 @@ void register_trainer_tests()
                   trainer_training_valid_mask_requires_bright_source_and_target_pixels);
     register_test("trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples",
                   trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples);
+    register_test("trainer_python_compare_profile_skips_dense_quality_forward",
+                  trainer_python_compare_profile_skips_dense_quality_forward);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",

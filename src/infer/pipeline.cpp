@@ -754,6 +754,7 @@ int run_train_command(const CliOptions& options)
         config.lr_warmup_steps = options.lr_warmup_steps;
         config.min_learning_rate_ratio = options.min_learning_rate_ratio;
         config.weight_decay = options.weight_decay;
+        config.gradient_clip_norm = options.gradient_clip_norm;
         config.augmentation_profile = options.augmentation_profile;
         config.augmentation_curriculum = options.augmentation_curriculum;
         config.extreme_pair_ratio = options.extreme_pair_ratio;

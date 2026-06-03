@@ -77,6 +77,7 @@ struct CliOptions
     int lr_warmup_steps = 0;
     double min_learning_rate_ratio = 0.01;
     double weight_decay = 5.0e-4;
+    double gradient_clip_norm = 1.0;
     std::string augmentation_profile = "mixed";
     bool augmentation_curriculum = false;
     double extreme_pair_ratio = 0.2;

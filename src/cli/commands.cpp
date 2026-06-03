@@ -59,7 +59,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         "[--augmentation-profile mixed] "
         "[--augmentation-curriculum] [--rotation-step-degrees 15] "
         "[--extreme-pair-ratio 0.2] [--learning-rate 0.0003] [--lr-warmup-steps 0] "
-        "[--min-learning-rate-ratio 0.01] [--training-profile full] [--full-v21] "
+        "[--min-learning-rate-ratio 0.01] [--max-grad-norm 1.0] [--training-profile full] [--full-v21] "
         "[--pair-cache-dir cache/train] [--pair-cache-limit 0] [--memory-cache-items 0] "
         "[--synthetic-pair-cache-dir build/pair_cache] [--cache-only] "
         "[--extra-synthetic-pair-cache-dir img/Rotate] [--graph-keypoint-meta-dim 16] [--log-csv metrics.csv] "
@@ -120,6 +120,8 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Cosine decay floor as a ratio of --learning-rate")
         ->check(CLI::Range(0.0, 1.0));
     train->add_option("--weight-decay", options.weight_decay, "AdamW weight decay");
+    train->add_option("--max-grad-norm,--gradient-clip-norm", options.gradient_clip_norm,
+                      "Maximum gradient norm for clipping; 0 disables clipping");
     train->add_option("--graph-attention-layers", options.graph_attention_layers, "Graph matcher attention layer count")
         ->check(CLI::PositiveNumber);
     train

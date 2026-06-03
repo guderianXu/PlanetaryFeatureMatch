@@ -308,6 +308,11 @@ bool training_profile_uses_python_aligned_pair_loss(TrainingProfile profile)
     return profile == TrainingProfile::Full || profile == TrainingProfile::PythonCompare;
 }
 
+bool training_profile_uses_dense_quality_forward(TrainingProfile profile)
+{
+    return profile != TrainingProfile::Smoke && !training_profile_uses_python_aligned_pair_loss(profile);
+}
+
 void validate_config(const TrainConfig& config)
 {
     // 训练入口的参数校验集中在这里，后续构建模型、DataLoader 和优化器时不再重复检查。
@@ -3317,6 +3322,27 @@ SparseHeadOutput finalize_v21_sparse_output(TrainModules& modules, v21::PfmV21Sp
     return sparse;
 }
 
+SparseHeadOutput finalize_v21_python_aligned_sparse_output(TrainModules& modules, v21::PfmV21SparseHeadOutput output,
+                                                           const torch::Tensor& image,
+                                                           double texture_blend_weight)
+{
+    auto sparse = adapt_v21_sparse_output(std::move(output));
+    auto texture = v21::makeRotationInvariantTextureDescriptor(image, sparse.descriptors.size(2),
+                                                               sparse.descriptors.size(3), sparse.descriptors.size(1));
+    texture = modules.texture_adapter->forward(texture);
+    sparse.descriptors = modules.descriptor_fusion->forward(sparse.descriptors, texture, texture_blend_weight);
+    return sparse;
+}
+
+DenseHeadOutput make_zero_dense_output_like_sparse(const SparseHeadOutput& sparse)
+{
+    return DenseHeadOutput{
+        torch::zeros({sparse.heatmap.size(0), 1, sparse.heatmap.size(2), sparse.heatmap.size(3)},
+                     sparse.heatmap.options()),
+        torch::zeros({sparse.heatmap.size(0), 2, sparse.heatmap.size(2), sparse.heatmap.size(3)},
+                     sparse.heatmap.options())};
+}
+
 FeatureDecodeConfig make_training_decode_config(const TrainConfig& config)
 {
     FeatureDecodeConfig decode_config;
@@ -4765,11 +4791,16 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
         {
             sparse_a = adapt_v21_sparse_output(std::move(raw_sparse_a));
             sparse_b = adapt_v21_sparse_output(std::move(raw_sparse_b));
-            dense = DenseHeadOutput{
-                torch::zeros({sparse_a.heatmap.size(0), 1, sparse_a.heatmap.size(2), sparse_a.heatmap.size(3)},
-                             sparse_a.heatmap.options()),
-                torch::zeros({sparse_a.heatmap.size(0), 2, sparse_a.heatmap.size(2), sparse_a.heatmap.size(3)},
-                             sparse_a.heatmap.options())};
+            dense = make_zero_dense_output_like_sparse(sparse_a);
+        }
+        else if (!training_profile_uses_dense_quality_forward(training_profile))
+        {
+            constexpr double PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT = 1.0;
+            sparse_a = finalize_v21_python_aligned_sparse_output(
+                modules, std::move(raw_sparse_a), view_a, PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT);
+            sparse_b = finalize_v21_python_aligned_sparse_output(
+                modules, std::move(raw_sparse_b), view_b, PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT);
+            dense = make_zero_dense_output_like_sparse(sparse_a);
         }
         else
         {
@@ -6197,6 +6228,11 @@ std::vector<std::size_t> make_validation_image_indices_for_test(std::size_t tota
 double training_learning_rate_for_step_for_test(const TrainConfig& config, int64_t step, int64_t total_steps)
 {
     return training_learning_rate_for_step(config, step, total_steps);
+}
+
+bool training_profile_uses_dense_quality_forward_for_test(const std::string& training_profile)
+{
+    return training_profile_uses_dense_quality_forward(parse_training_profile(training_profile));
 }
 
 } // namespace testing
