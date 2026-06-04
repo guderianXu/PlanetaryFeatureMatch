@@ -723,6 +723,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
                 flush=True,
             )
+        if args.save_every_steps > 0 and step % args.save_every_steps == 0:
+            _save_training_state(args.output_dir / "checkpoints" / "latest_pytorch_pfm_state.pt", model, args, step)
 
     elapsed = time.perf_counter() - start
     data_wait_values = [float(row["data_wait_ms"]) for row in rows]
@@ -765,7 +767,44 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         summary=summary,
         rows=rows,
     )
+    checkpoint_path = args.output_dir / "pytorch_pfm_state.pt"
+    _save_training_state(checkpoint_path, model, args, args.steps)
+    summary["checkpoint"] = str(checkpoint_path)
     return summary
+
+
+def _save_training_state(
+    path: Path,
+    model: pfm_model.PlanetaryFeatureMatcher,
+    args: argparse.Namespace,
+    step: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "config": {
+                "input_channels": model.config.input_channels,
+                "base_channels": model.config.base_channels,
+                "descriptor_dim": model.config.descriptor_dim,
+                "graph_hidden_dim": model.config.graph_hidden_dim,
+                "graph_attention_layers": model.config.graph_attention_layers,
+                "graph_keypoint_meta_dim": model.config.graph_keypoint_meta_dim,
+            },
+            "model": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+            "training": {
+                "script": "scripts/benchmark_lazy_pose_pairs.py",
+                "step": int(step),
+                "steps": int(args.steps),
+                "crop_size": int(args.crop_size),
+                "batch_pairs": int(args.batch_pairs),
+                "samples_per_pair": int(args.samples_per_pair),
+                "render_manifest": str(args.render_manifest),
+                "uint8_manifest": str(args.uint8_manifest) if args.uint8_manifest is not None else "",
+                "init_pytorch_state": str(args.init_pytorch_state),
+            },
+        },
+        path,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -792,6 +831,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--progress-every", type=int, default=5)
+    parser.add_argument("--save-every-steps", type=int, default=0)
 
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
