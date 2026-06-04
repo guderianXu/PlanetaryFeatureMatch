@@ -77,6 +77,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         "[--disable-descriptor-orientation-canonicalization]\n"
         "  match --image-a a.tif --image-b b.tif --checkpoint model.pt --output matches.pt [--device cpu] "
         "[--feature-a a_features.pt] [--feature-b b_features.pt] [--match-mode sparse] "
+        "[--sparse-match-strategy learned] [--max-matches 512] "
         "[--sparse-geometry-filter adaptive] "
         "[--warp-a-to-b pair_000000.pt] [--match-correct-threshold-pixels 5] "
         "[--max-keypoints 1024] [--min-keypoints 0] [--semi-dense-threshold 0.5] [--visualization-dir vis] "
@@ -326,6 +327,14 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     match->add_option("--device", options.device, "Compute device");
     match->add_option("--match-mode", options.match_mode, "Match output mode: sparse, dense, or both")
         ->check(CLI::IsMember({"sparse", "dense", "both"}));
+    match
+        ->add_option("--sparse-match-strategy", options.sparse_match_strategy,
+                     "Sparse matching strategy: learned or python-raw-mutual")
+        ->check(CLI::IsMember({"learned", "python-raw-mutual"}));
+    match
+        ->add_option("--max-matches", options.max_matches,
+                     "Maximum sparse matches emitted by python-raw-mutual matching")
+        ->check(CLI::PositiveNumber);
     match
         ->add_option("--sparse-geometry-filter", options.sparse_geometry_filter,
                      "Sparse geometric post-filter: adaptive, projective, local, or rotation-only")

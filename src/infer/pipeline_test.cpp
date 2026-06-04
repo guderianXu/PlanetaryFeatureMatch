@@ -293,6 +293,40 @@ pfm::FeatureSet makeScaledFeatureSet()
     return features;
 }
 
+pfm::FeatureSet makePythonRawMutualFeatureSetA()
+{
+    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
+    return pfm::FeatureSet{torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, float_options),
+                           torch::ones({4}, float_options),
+                           torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F},
+                                          {0.0F, 1.0F, 0.0F, 0.0F},
+                                          {0.0F, 0.0F, 1.0F, 0.0F},
+                                          {0.0F, 0.0F, 0.0F, 1.0F}},
+                                         float_options),
+                           torch::ones({4}, float_options),
+                           torch::zeros({4, 2}, float_options),
+                           torch::zeros({4, 2, 2}, float_options),
+                           torch::empty({0, 2}, float_options),
+                           torch::empty({0}, float_options)};
+}
+
+pfm::FeatureSet makePythonRawMutualFeatureSetB()
+{
+    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
+    return pfm::FeatureSet{torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, float_options),
+                           torch::ones({4}, float_options),
+                           torch::tensor({{0.0F, 0.0F, 0.9F, 0.1F},
+                                          {0.8F, 0.2F, 0.0F, 0.0F},
+                                          {0.0F, 0.7F, 0.3F, 0.0F},
+                                          {0.1F, 0.0F, 0.0F, 0.6F}},
+                                         float_options),
+                           torch::ones({4}, float_options),
+                           torch::zeros({4, 2}, float_options),
+                           torch::zeros({4, 2, 2}, float_options),
+                           torch::empty({0, 2}, float_options),
+                           torch::empty({0}, float_options)};
+}
+
 } // namespace
 
 static void pipeline_train_writes_loadable_checkpoint()
@@ -658,6 +692,35 @@ static void pipelineMatchUsesPrecomputedFeatureFilesWithCheckpointMatcher()
     PFM_REQUIRE(pfm::run_match_command(options) == 0);
     const auto matches = pfm::load_match_set(options.output);
     PFM_REQUIRE(matches.sparse_matches.size(0) == 2);
+    PFM_REQUIRE(matches.points_a.size(0) == 0);
+    PFM_REQUIRE(matches.points_b.size(0) == 0);
+    PFM_REQUIRE(matches.confidence.size(0) == 0);
+}
+
+static void pipelineMatchCanUsePythonRawMutualSparseStrategy()
+{
+    TempPipelineDirectory temp_dir("pfm_pipeline_match_python_raw_mutual");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto feature_a = temp_dir.file("feature_a.pt");
+    const auto feature_b = temp_dir.file("feature_b.pt");
+    const auto output = temp_dir.file("matches.pt");
+    pfm::save_feature_set(makePythonRawMutualFeatureSetA(), feature_a.string());
+    pfm::save_feature_set(makePythonRawMutualFeatureSetB(), feature_b.string());
+
+    pfm::CliOptions options;
+    options.feature_a = feature_a.string();
+    options.feature_b = feature_b.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.match_mode = "sparse";
+    options.sparse_match_strategy = "python-raw-mutual";
+    options.max_matches = 2;
+
+    PFM_REQUIRE(pfm::run_match_command(options) == 0);
+    const auto matches = pfm::load_match_set(options.output);
+    const auto expected = torch::tensor({{2, 0}, {3, 3}}, torch::kInt64);
+    PFM_REQUIRE(torch::equal(matches.sparse_matches, expected));
+    PFM_REQUIRE(matches.sparse_scores.size(0) == 2);
     PFM_REQUIRE(matches.points_a.size(0) == 0);
     PFM_REQUIRE(matches.points_b.size(0) == 0);
     PFM_REQUIRE(matches.confidence.size(0) == 0);
@@ -1107,6 +1170,8 @@ void register_pipeline_tests()
     register_test("pipeline_match_writes_match_file", pipeline_match_writes_match_file);
     register_test("pipeline_match_uses_precomputed_feature_files_with_checkpoint_matcher",
                   pipelineMatchUsesPrecomputedFeatureFilesWithCheckpointMatcher);
+    register_test("pipeline_match_can_use_python_raw_mutual_sparse_strategy",
+                  pipelineMatchCanUsePythonRawMutualSparseStrategy);
     register_test("pipeline_match_sparse_mode_writes_sparse_visualization",
                   pipelineMatchSparseModeWritesSparseVisualization);
     register_test("pipeline_match_feature_files_scale_sparse_visualization",

@@ -56,6 +56,8 @@ struct CliOptions
     bool disable_descriptor_orientation_canonicalization = false;
     std::string match_mode = "sparse";
     std::string sparse_geometry_filter;
+    std::string sparse_match_strategy = "learned";
+    int max_matches = 512;
     int epochs = 1;
     int batch_size = 1;
     int resize = 512;

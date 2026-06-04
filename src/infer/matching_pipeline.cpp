@@ -1709,6 +1709,81 @@ MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& featur
     return matchFeatureSetsWithMatcher(features_a, features_b, matcher);
 }
 
+MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const FeatureSet& features_b, int64_t max_matches)
+{
+    if (max_matches <= 0)
+    {
+        throw std::invalid_argument("max_matches must be positive");
+    }
+    if (!features_a.descriptors.defined() || !features_b.descriptors.defined() || features_a.descriptors.dim() != 2 ||
+        features_b.descriptors.dim() != 2)
+    {
+        throw std::invalid_argument("descriptors must be 2D");
+    }
+    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+    if (features_a.descriptors.size(0) == 0 || features_b.descriptors.size(0) == 0)
+    {
+        return MatchSet{torch::empty({0, 2}, long_options), torch::empty({0}, float_options),
+                        torch::empty({0, 2}, float_options), torch::empty({0, 2}, float_options),
+                        torch::empty({0}, float_options)};
+    }
+
+    const auto scores = descriptorSimilarityScores(features_a.descriptors, features_b.descriptors);
+    const auto best_ab = scores.max(1);
+    const auto best_scores = std::get<0>(best_ab).to(torch::kCPU, torch::kFloat32).contiguous();
+    const auto target_indices = std::get<1>(best_ab).to(torch::kCPU, torch::kInt64).contiguous();
+    const auto best_sources = std::get<1>(scores.max(0)).to(torch::kCPU, torch::kInt64).contiguous();
+    const auto* score_data = best_scores.data_ptr<float>();
+    const auto* target_data = target_indices.data_ptr<int64_t>();
+    const auto* best_source_data = best_sources.data_ptr<int64_t>();
+
+    std::vector<int64_t> order;
+    order.reserve(static_cast<std::size_t>(scores.size(0)));
+    for (int64_t source = 0; source < scores.size(0); ++source)
+    {
+        const auto target = target_data[source];
+        if (best_source_data[target] == source)
+        {
+            order.push_back(source);
+        }
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&](int64_t lhs, int64_t rhs)
+                     {
+                         return score_data[lhs] > score_data[rhs];
+                     });
+    if (static_cast<int64_t>(order.size()) > max_matches)
+    {
+        order.resize(static_cast<std::size_t>(max_matches));
+    }
+    if (order.empty())
+    {
+        return MatchSet{torch::empty({0, 2}, long_options), torch::empty({0}, float_options),
+                        torch::empty({0, 2}, float_options), torch::empty({0, 2}, float_options),
+                        torch::empty({0}, float_options)};
+    }
+
+    std::vector<int64_t> match_values;
+    std::vector<float> score_values;
+    match_values.reserve(order.size() * 2);
+    score_values.reserve(order.size());
+    for (const auto source : order)
+    {
+        match_values.push_back(source);
+        match_values.push_back(target_data[source]);
+        score_values.push_back(score_data[source]);
+    }
+    return MatchSet{torch::from_blob(match_values.data(), {static_cast<int64_t>(score_values.size()), 2}, long_options)
+                        .clone()
+                        .contiguous(),
+                    torch::from_blob(score_values.data(), {static_cast<int64_t>(score_values.size())}, float_options)
+                        .clone()
+                        .contiguous(),
+                    torch::empty({0, 2}, float_options), torch::empty({0, 2}, float_options),
+                    torch::empty({0}, float_options)};
+}
+
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b)
 {
     if (!features_a.descriptors.defined() || !features_b.descriptors.defined() || features_a.descriptors.dim() != 2 ||

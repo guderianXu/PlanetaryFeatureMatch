@@ -928,9 +928,17 @@ int run_match_command(const CliOptions& options)
         Timer match_timer;
         auto metric_features_a = extracted_a.features;
         auto metric_features_b = extracted_b.features;
-        auto match_set = filterMatchMode(
-            matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher), options.match_mode);
-        if (!use_feature_files && options.match_mode != "dense" &&
+        const bool use_python_raw_mutual = options.sparse_match_strategy == "python-raw-mutual";
+        if (!use_python_raw_mutual && options.sparse_match_strategy != "learned")
+        {
+            throw std::invalid_argument("sparse match strategy must be learned or python-raw-mutual");
+        }
+        auto raw_match_set =
+            use_python_raw_mutual
+                ? matchFeatureSetsPythonRawMutual(extracted_a.features, extracted_b.features, options.max_matches)
+                : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher);
+        auto match_set = filterMatchMode(raw_match_set, options.match_mode);
+        if (!use_python_raw_mutual && !use_feature_files && options.match_mode != "dense" &&
             match_set.sparse_matches.size(0) < DESCRIPTOR_GRID_FALLBACK_MIN_SPARSE_MATCHES &&
             extracted_a.maps.descriptors.defined() && extracted_b.maps.descriptors.defined() &&
             extracted_a.intensity_mask.defined() && extracted_b.intensity_mask.defined())
@@ -953,7 +961,8 @@ int run_match_command(const CliOptions& options)
         }
         const auto skip_expensive_sparse_alternates =
             shouldSkipExpensiveSparseAlternates(match_set.sparse_matches.size(0));
-        if (!use_feature_files && options.match_mode != "dense" && !skip_expensive_sparse_alternates &&
+        if (!use_python_raw_mutual && !use_feature_files && options.match_mode != "dense" &&
+            !skip_expensive_sparse_alternates &&
             options.min_keypoints < ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS &&
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS && extracted_a.maps.descriptors.defined() &&
             extracted_b.maps.descriptors.defined())
@@ -973,7 +982,8 @@ int run_match_command(const CliOptions& options)
                 metric_features_b = std::move(high_density_features_b);
             }
         }
-        if (!use_feature_files && options.match_mode != "dense" && !skip_expensive_sparse_alternates &&
+        if (!use_python_raw_mutual && !use_feature_files && options.match_mode != "dense" &&
+            !skip_expensive_sparse_alternates &&
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS &&
             rotationInvariantTextureBlendWeight() != ALTERNATE_TEXTURE_BLEND_WEIGHT)
         {
@@ -1010,7 +1020,8 @@ int run_match_command(const CliOptions& options)
                 metric_features_b = std::move(alternate_b.features);
             }
         }
-        if (!use_feature_files && options.match_mode != "dense" && !skip_expensive_sparse_alternates &&
+        if (!use_python_raw_mutual && !use_feature_files && options.match_mode != "dense" &&
+            !skip_expensive_sparse_alternates &&
             options.max_keypoints >= ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS &&
             rotationInvariantTextureBlendWeight() != BALANCED_TEXTURE_BLEND_WEIGHT)
         {

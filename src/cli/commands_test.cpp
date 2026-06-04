@@ -412,6 +412,10 @@ static void parse_match_command()
         "b_features.pt",
         "--match-mode",
         "sparse",
+        "--sparse-match-strategy",
+        "python-raw-mutual",
+        "--max-matches",
+        "256",
         "--checkpoint",
         "model.pt",
         "--output",
@@ -440,6 +444,8 @@ static void parse_match_command()
     PFM_REQUIRE(parsed.feature_a == "a_features.pt");
     PFM_REQUIRE(parsed.feature_b == "b_features.pt");
     PFM_REQUIRE(parsed.match_mode == "sparse");
+    PFM_REQUIRE(parsed.sparse_match_strategy == "python-raw-mutual");
+    PFM_REQUIRE(parsed.max_matches == 256);
     PFM_REQUIRE(parsed.warp_a_to_b == "pair_000000.pt");
     PFM_REQUIRE_CLOSE(parsed.match_correct_threshold_pixels, 3.5, 1.0e-6);
     PFM_REQUIRE(parsed.max_keypoints == 2048);
@@ -456,6 +462,8 @@ static void parse_match_defaults_to_sparse_mode()
                                         "model.pt", "--output", "matches.pt"});
 
     PFM_REQUIRE(parsed.match_mode == "sparse");
+    PFM_REQUIRE(parsed.sparse_match_strategy == "learned");
+    PFM_REQUIRE(parsed.max_matches == 512);
 }
 
 static void parse_match_accepts_adaptive_and_local_sparse_geometry_filters()
@@ -553,6 +561,13 @@ static void parse_match_invalid_sparse_geometry_filter_throws()
                           CLI::ParseError);
 }
 
+static void parse_match_invalid_sparse_strategy_throws()
+{
+    PFM_REQUIRE_THROWS_AS(pfm::parse_cli({"pfm", "match", "--image-a", "a.png", "--image-b", "b.png", "--checkpoint",
+                                          "model.pt", "--output", "matches.pt", "--sparse-match-strategy", "invalid"}),
+                          CLI::ParseError);
+}
+
 static void top_level_help_lists_subcommand_options()
 {
     pfm::CliOptions options;
@@ -576,6 +591,8 @@ static void top_level_help_lists_subcommand_options()
     PFM_REQUIRE(help.find("--feature-a") != std::string::npos);
     PFM_REQUIRE(help.find("--feature-b") != std::string::npos);
     PFM_REQUIRE(help.find("--match-mode") != std::string::npos);
+    PFM_REQUIRE(help.find("--sparse-match-strategy") != std::string::npos);
+    PFM_REQUIRE(help.find("--max-matches") != std::string::npos);
     PFM_REQUIRE(help.find("--sparse-geometry-filter") != std::string::npos);
     PFM_REQUIRE(help.find("extract --image") != std::string::npos);
     PFM_REQUIRE(help.find("match --image-a") != std::string::npos);
@@ -670,6 +687,7 @@ void register_cli_tests()
     register_test("parse_match_invalid_mode_throws", parseMatchInvalidModeThrows);
     register_test("parse_match_invalid_sparse_geometry_filter_throws",
                   parse_match_invalid_sparse_geometry_filter_throws);
+    register_test("parse_match_invalid_sparse_strategy_throws", parse_match_invalid_sparse_strategy_throws);
     register_test("top_level_help_lists_subcommand_options", top_level_help_lists_subcommand_options);
     register_test("run_cli_help_returns_zero", run_cli_help_returns_zero);
     register_test("run_extract_without_checkpoint_path_fails_cleanly",
