@@ -970,6 +970,36 @@ static void pipeline_eval_writes_report_archive()
     PFM_REQUIRE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>() >= 0.0F);
 }
 
+static void pipelineEvalCanUsePythonRawMutualSparseStrategy()
+{
+    TempPipelineDirectory temp_dir("pfm_pipeline_eval_python_raw_mutual");
+    const auto checkpoint = write_checkpoint(temp_dir);
+    const auto image_a = temp_dir.file("eval_raw_a.png");
+    const auto image_b = temp_dir.file("eval_raw_b.png");
+    const auto pairs = temp_dir.file("pairs.txt");
+    const auto output = temp_dir.file("report.pt");
+    write_test_image(image_a, 71);
+    write_test_image(image_b, 91);
+    write_text_file(pairs, image_a.string() + " " + image_b.string() + "\n");
+
+    pfm::CliOptions options;
+    options.pairs = pairs.string();
+    options.checkpoint = checkpoint;
+    options.output = output.string();
+    options.max_keypoints = 8;
+    options.max_matches = 1;
+    options.sparse_match_strategy = "python-raw-mutual";
+    options.semi_dense_threshold = 0.0;
+    options.device = "cpu";
+
+    PFM_REQUIRE(pfm::run_eval_command(options) == 0);
+    torch::serialize::InputArchive archive;
+    archive.load_from(options.output);
+    torch::Tensor average_matches;
+    archive.read("average_matches", average_matches);
+    PFM_REQUIRE_CLOSE(average_matches.to(torch::kCPU, torch::kFloat32).reshape({1}).item<float>(), 1.0F, 1.0e-6);
+}
+
 static void pipeline_match_eval_and_export_print_timing()
 {
     TempPipelineDirectory temp_dir("pfm_pipeline_command_timing");
@@ -1198,6 +1228,8 @@ void register_pipeline_tests()
     register_test("pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base",
                   pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);
+    register_test("pipeline_eval_can_use_python_raw_mutual_sparse_strategy",
+                  pipelineEvalCanUsePythonRawMutualSparseStrategy);
     register_test("pipeline_match_eval_and_export_print_timing", pipeline_match_eval_and_export_print_timing);
     register_test("pipeline_extract_rejects_invalid_device", pipeline_extract_rejects_invalid_device);
     register_test("pipeline_match_rejects_invalid_device", pipeline_match_rejects_invalid_device);

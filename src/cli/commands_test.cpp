@@ -496,6 +496,10 @@ static void parse_eval_command()
         "1024",
         "--min-keypoints",
         "256",
+        "--sparse-match-strategy",
+        "python-raw-mutual",
+        "--max-matches",
+        "128",
         "--min-keypoint-intensity",
         "0.08",
     });
@@ -507,6 +511,8 @@ static void parse_eval_command()
     PFM_REQUIRE(parsed.device == "cuda:1");
     PFM_REQUIRE(parsed.max_keypoints == 1024);
     PFM_REQUIRE(parsed.min_keypoints == 256);
+    PFM_REQUIRE(parsed.sparse_match_strategy == "python-raw-mutual");
+    PFM_REQUIRE(parsed.max_matches == 128);
     PFM_REQUIRE_CLOSE(parsed.semi_dense_threshold, 0.25, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
 }

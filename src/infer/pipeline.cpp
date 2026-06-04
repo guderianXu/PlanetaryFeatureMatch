@@ -1158,6 +1158,11 @@ int run_eval_command(const CliOptions& options)
         const auto checkpoint_config = load_checkpoint_config(options.checkpoint);
         const auto decode_config = makeFeatureDecodeConfig(options);
         auto modules = load_inference_modules(options.checkpoint, checkpoint_config, device);
+        const bool use_python_raw_mutual = options.sparse_match_strategy == "python-raw-mutual";
+        if (!use_python_raw_mutual && options.sparse_match_strategy != "learned")
+        {
+            throw std::invalid_argument("sparse match strategy must be learned or python-raw-mutual");
+        }
 
         std::vector<std::pair<FeatureSet, FeatureSet>> feature_sets;
         std::vector<MatchSet> match_sets;
@@ -1169,7 +1174,10 @@ int run_eval_command(const CliOptions& options)
                                                    options.min_keypoint_intensity);
             auto extracted_b = extract_feature_set(pair.second, modules, checkpoint_config, device, decode_config,
                                                    options.min_keypoint_intensity);
-            match_sets.push_back(matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher));
+            match_sets.push_back(
+                use_python_raw_mutual
+                    ? matchFeatureSetsPythonRawMutual(extracted_a.features, extracted_b.features, options.max_matches)
+                    : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher));
             feature_sets.push_back(std::make_pair(std::move(extracted_a.features), std::move(extracted_b.features)));
         }
 

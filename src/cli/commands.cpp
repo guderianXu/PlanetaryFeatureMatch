@@ -85,6 +85,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         "[--keypoints-per-cell 0] [--nms-radius 4] [--descriptor-pool-radius 0] "
         "[--disable-descriptor-orientation-canonicalization]\n"
         "  eval --pairs pairs.txt --checkpoint model.pt --output report.pt [--device cpu] "
+        "[--sparse-match-strategy learned] [--max-matches 512] "
         "[--max-keypoints 1024] [--min-keypoints 0] [--semi-dense-threshold 0.5] [--min-keypoint-intensity 0.08] "
         "[--keypoint-grid-rows 8] [--keypoint-grid-cols 8] [--keypoints-per-cell 0] [--nms-radius 4] "
         "[--descriptor-pool-radius 0] [--disable-descriptor-orientation-canonicalization]\n"
@@ -382,6 +383,14 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     eval->add_option("--checkpoint", options.checkpoint, "Model checkpoint path")->required();
     eval->add_option("--output", options.output, "Output report path")->required();
     eval->add_option("--device", options.device, "Compute device");
+    eval
+        ->add_option("--sparse-match-strategy", options.sparse_match_strategy,
+                     "Sparse matching strategy: learned or python-raw-mutual")
+        ->check(CLI::IsMember({"learned", "python-raw-mutual"}));
+    eval
+        ->add_option("--max-matches", options.max_matches,
+                     "Maximum sparse matches emitted by python-raw-mutual evaluation")
+        ->check(CLI::PositiveNumber);
     eval->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     eval->add_option("--min-keypoints", options.min_keypoints, "Soft minimum sparse keypoints")
         ->check(CLI::NonNegativeNumber);
