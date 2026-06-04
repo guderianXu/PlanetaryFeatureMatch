@@ -1158,7 +1158,7 @@ def graph_matcher_correspondence_loss(
     ).to(desc_b.device)
     meta_a = apply_graph_metadata_mode(meta_a, metadata_mode)
     meta_b = apply_graph_metadata_mode(meta_b, metadata_mode)
-    output = model.graph_matcher(desc_a, meta_a, desc_b, meta_b)
+    output = model.graph_matcher(desc_a, meta_a, desc_b, meta_b, apply_candidate_mask=False)
     targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
     col_loss = F.cross_entropy(output.logits[:, :count].T, targets)

@@ -1232,6 +1232,29 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.descriptor_projection.weight.grad)
 
+    def test_graph_matcher_correspondence_loss_disables_candidate_mask_for_supervision(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=1,
+        )
+        model.eval()
+        model.graph_matcher.candidate_topk = 1
+        descriptors_a = torch.zeros(1, 8, 1, 3)
+        descriptors_b = torch.zeros(1, 8, 1, 3)
+        descriptors_a[0, 0, 0, 0] = 1.0
+        descriptors_a[0, 0, 0, 1] = -1.0
+        descriptors_a[0, 0, 0, 2] = -1.0
+        descriptors_b[0, 0, 0, 0] = -1.0
+        descriptors_b[0, 0, 0, 1] = 1.0
+        descriptors_b[0, 0, 0, 2] = 1.0
+        points = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+
+        loss = train.graph_matcher_correspondence_loss(model, descriptors_a, descriptors_b, points, points)
+
+        self.assertLess(float(loss.detach()), 100.0)
+
     def test_graph_matcher_correspondence_loss_can_train_dustbin_negatives(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))

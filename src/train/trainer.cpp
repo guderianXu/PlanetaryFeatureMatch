@@ -1032,7 +1032,8 @@ int64_t clamped_crop_origin(const torch::Tensor& center, int64_t crop_size, int6
         return 0;
     }
     const auto center_value = center.detach().to(torch::kCPU, torch::kFloat32).item<float>();
-    const auto origin = static_cast<int64_t>(std::round(center_value - static_cast<double>(crop_size - 1) * 0.5));
+    const auto origin =
+        static_cast<int64_t>(std::nearbyint(center_value - static_cast<double>(crop_size - 1) * 0.5));
     return std::max<int64_t>(0, std::min<int64_t>(origin, full_size - crop_size));
 }
 
@@ -3799,9 +3800,20 @@ void set_all_modules_eval(TrainModules& modules)
     modules.graph_matcher->eval();
 }
 
+void apply_training_profile_module_mode(TrainModules& modules, const TrainConfig& config)
+{
+    if (training_profile_uses_python_aligned_pair_loss(parse_training_profile(config.training_profile)))
+    {
+        // Python load_pytorch_state() leaves the model in eval mode and the training loop updates parameters in that
+        // mode. Keep BatchNorm statistics frozen and GraphMatcher dropout disabled for apples-to-apples C++ training.
+        set_all_modules_eval(modules);
+    }
+}
+
 void apply_python_compare_trainable_selection(TrainModules& modules, const TrainConfig& config)
 {
-    const bool use_python_compare_profile = parse_training_profile(config.training_profile) == TrainingProfile::PythonCompare;
+    const bool use_python_compare_profile =
+        parse_training_profile(config.training_profile) == TrainingProfile::PythonCompare;
     if (!use_python_compare_profile || has_explicit_finetune_mode(config))
     {
         return;
@@ -4413,7 +4425,7 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     auto limited_points_b = points_b.narrow(0, 0, count);
     auto meta_a = make_python_compare_graph_metadata(limited_points_a, meta_dim).to(desc_a.device());
     auto meta_b = make_python_compare_graph_metadata(limited_points_b, meta_dim).to(desc_b.device());
-    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b);
+    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b, false);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -6451,6 +6463,7 @@ TrainResult train_model(const TrainConfig& config)
     apply_trainable_parameter_selection(modules, config);
     keep_descriptor_only_frozen_modules_eval(modules, config);
     keep_graph_only_frozen_modules_eval(modules, config);
+    apply_training_profile_module_mode(modules, config);
     std::unique_ptr<TrainModules> descriptor_anchor_modules;
     if (should_use_descriptor_finetune_anchor(config))
     {
@@ -6646,17 +6659,20 @@ TrainResult train_model(const TrainConfig& config)
         Timer epoch_timer;
         // augmentation curriculum 在每个 epoch 开始时更新，cache 数据不受在线增强档位影响。
         pair_config.augmentation_profile = effective_augmentation_profile_for_epoch(config, epoch);
-        if (online_loader)
+        if (epoch > 0)
         {
-            online_loader->reset();
-        }
-        if (cache_loader)
-        {
-            cache_loader->reset();
-        }
-        if (pair_archive_loader)
-        {
-            pair_archive_loader->reset();
+            if (online_loader)
+            {
+                online_loader->reset();
+            }
+            if (cache_loader)
+            {
+                cache_loader->reset();
+            }
+            if (pair_archive_loader)
+            {
+                pair_archive_loader->reset();
+            }
         }
         for (std::size_t offset = 0; offset < epoch_size; offset += static_cast<std::size_t>(config.batch_size))
         {
@@ -6985,6 +7001,7 @@ TrainResult train_model(const TrainConfig& config)
             set_all_modules_train(modules);
             keep_descriptor_only_frozen_modules_eval(modules, config);
             keep_graph_only_frozen_modules_eval(modules, config);
+            apply_training_profile_module_mode(modules, config);
         }
         ++result.epochs_completed;
         // 每个 epoch 后写检查点，保存为 CPU 可加载 archive，便于中断后继续训练或推理。

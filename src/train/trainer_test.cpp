@@ -1719,7 +1719,7 @@ static void trainer_python_compare_trainable_parameters_follow_python_full_flags
     PFM_REQUIRE(has_trainable_parameter_prefix(names, "graph_matcher."));
 }
 
-static void trainer_python_compare_graph_loss_uses_candidate_mask_like_python()
+static void trainer_python_compare_graph_loss_disables_candidate_mask_for_supervision()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
     matcher->eval();
@@ -1737,7 +1737,7 @@ static void trainer_python_compare_graph_loss_uses_candidate_mask_like_python()
     const auto loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a, descriptors_b,
                                                                             points, points, 16);
 
-    PFM_REQUIRE(loss.item<float>() > 1000.0F);
+    PFM_REQUIRE(loss.item<float>() < 100.0F);
 }
 
 static void trainer_descriptor_candidates_do_not_repeat_positive_target()
@@ -2351,6 +2351,24 @@ static void trainer_crop_uses_dedicated_training_generator()
     PFM_REQUIRE(torch::equal(first.view_b, second.view_b));
     PFM_REQUIRE(torch::equal(first.warp_a_to_b, second.warp_a_to_b));
     PFM_REQUIRE(torch::equal(first.valid_mask, second.valid_mask));
+}
+
+static void trainer_crop_origin_uses_python_half_even_rounding()
+{
+    auto view_a = torch::arange(64, torch::kFloat32).reshape({1, 8, 8});
+    auto view_b = view_a.clone();
+    auto xy = torch::meshgrid({torch::arange(8, torch::kFloat32), torch::arange(8, torch::kFloat32)}, "ij");
+    auto warp = torch::stack({xy[1], xy[0]}, 2);
+    auto valid_mask = torch::zeros({8, 8}, torch::kBool);
+    valid_mask.index_put_({4, 4}, true);
+    auto pair = pfm::SyntheticPair{view_a, view_b, warp, valid_mask};
+
+    const auto cropped = pfm::testing::crop_training_pair_with_seed_for_test(pair, 4, 20260603);
+
+    PFM_REQUIRE(cropped.view_a.index({0, 0, 0}).item<float>() == 18.0F);
+    PFM_REQUIRE(cropped.warp_a_to_b.index({2, 2, 0}).item<float>() == 2.0F);
+    PFM_REQUIRE(cropped.warp_a_to_b.index({2, 2, 1}).item<float>() == 2.0F);
+    PFM_REQUIRE(cropped.valid_mask.index({2, 2}).item<bool>());
 }
 
 static void trainer_training_and_validation_indices_use_dataloader_split()
@@ -3191,8 +3209,8 @@ void register_trainer_tests()
                   trainer_python_compare_trainable_parameters_train_graph_when_requested);
     register_test("trainer_python_compare_trainable_parameters_follow_python_full_flags",
                   trainer_python_compare_trainable_parameters_follow_python_full_flags);
-    register_test("trainer_python_compare_graph_loss_uses_candidate_mask_like_python",
-                  trainer_python_compare_graph_loss_uses_candidate_mask_like_python);
+    register_test("trainer_python_compare_graph_loss_disables_candidate_mask_for_supervision",
+                  trainer_python_compare_graph_loss_disables_candidate_mask_for_supervision);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",
@@ -3278,6 +3296,8 @@ void register_trainer_tests()
                   trainer_resizes_pair_warp_coordinates_in_view_b_space);
     register_test("trainer_crop_uses_dedicated_training_generator",
                   trainer_crop_uses_dedicated_training_generator);
+    register_test("trainer_crop_origin_uses_python_half_even_rounding",
+                  trainer_crop_origin_uses_python_half_even_rounding);
     register_test("trainer_training_and_validation_indices_use_dataloader_split",
                   trainer_training_and_validation_indices_use_dataloader_split);
     register_test("trainer_variant_indices_advance_across_epochs", trainer_variant_indices_advance_across_epochs);

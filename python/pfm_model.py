@@ -833,6 +833,7 @@ class PlanetaryGraphMatcher(nn.Module):
         keypoints_a: torch.Tensor,
         descriptors_b: torch.Tensor,
         keypoints_b: torch.Tensor,
+        apply_candidate_mask: bool = True,
     ) -> GraphMatcherOutput:
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
@@ -856,9 +857,10 @@ class PlanetaryGraphMatcher(nn.Module):
         delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
         accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
         pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
-        candidate_mask = self._candidate_mask(desc_a, desc_b)
-        pair_logits = pair_logits.masked_fill(~candidate_mask, -1.0e4)
-        accept_logits = accept_logits.masked_fill(~candidate_mask, -1.0e4)
+        if apply_candidate_mask:
+            candidate_mask = self._candidate_mask(desc_a, desc_b)
+            pair_logits = pair_logits.masked_fill(~candidate_mask, -1.0e4)
+            accept_logits = accept_logits.masked_fill(~candidate_mask, -1.0e4)
         logits = torch.zeros(
             descriptors_a.size(0) + 1,
             descriptors_b.size(0) + 1,
