@@ -291,6 +291,30 @@ torch::Tensor descriptorSimilarityScores(const torch::Tensor& descriptors_a, con
     return cyclicDescriptorSimilarityScores(desc_a, desc_b).squeeze(0);
 }
 
+torch::Tensor pythonRawMutualDescriptorSimilarityScores(const torch::Tensor& descriptors_a,
+                                                        const torch::Tensor& descriptors_b)
+{
+    auto desc_a = descriptors_a.to(torch::kCPU, torch::kFloat32).contiguous();
+    auto desc_b = descriptors_b.to(torch::kCPU, torch::kFloat32).contiguous();
+    desc_a = desc_a / desc_a.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    desc_b = desc_b / desc_b.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
+    const auto channels = desc_a.size(1);
+    if (channels < 4 || channels % 4 != 0)
+    {
+        return torch::matmul(desc_a, desc_b.transpose(0, 1));
+    }
+
+    const auto group_channels = channels / 4;
+    std::vector<torch::Tensor> scores;
+    scores.reserve(4);
+    for (int64_t turns = 0; turns < 4; ++turns)
+    {
+        const auto shifted_b = turns == 0 ? desc_b : torch::roll(desc_b, {turns * group_channels}, {1});
+        scores.push_back(torch::matmul(desc_a, shifted_b.transpose(0, 1)));
+    }
+    return std::get<0>(torch::stack(scores, 0).max(0));
+}
+
 double normalizeAngle(double angle)
 {
     while (angle <= -PI)
@@ -1729,7 +1753,7 @@ MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const Fea
                         torch::empty({0}, float_options)};
     }
 
-    const auto scores = descriptorSimilarityScores(features_a.descriptors, features_b.descriptors);
+    const auto scores = pythonRawMutualDescriptorSimilarityScores(features_a.descriptors, features_b.descriptors);
     const auto best_ab = scores.max(1);
     const auto best_scores = std::get<0>(best_ab).to(torch::kCPU, torch::kFloat32).contiguous();
     const auto target_indices = std::get<1>(best_ab).to(torch::kCPU, torch::kInt64).contiguous();

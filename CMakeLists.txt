@@ -205,6 +205,7 @@ add_library(pfm STATIC
     src/data/synthetic_pair.cpp
     src/data/synthetic_pair_cache.cpp
     src/data/synthetic_pair_dataset.cpp
+    src/infer/cache_match_eval.cpp
     src/infer/eval_pipeline.cpp
     src/infer/feature_extractor.cpp
     src/infer/match_metrics.cpp
@@ -245,6 +246,9 @@ target_link_libraries(pfm_match_residual_diagnostics PRIVATE pfm)
 add_executable(pfm_cache_eval_report tools/cache_eval_report.cpp)
 target_link_libraries(pfm_cache_eval_report PRIVATE pfm pfm_cache_eval)
 
+add_executable(pfm_cache_match_eval tools/cache_match_eval.cpp)
+target_link_libraries(pfm_cache_match_eval PRIVATE pfm)
+
 add_executable(pfm_checkpoint_gate tools/checkpoint_gate.cpp)
 target_link_libraries(pfm_checkpoint_gate PRIVATE pfm)
 
@@ -280,6 +284,7 @@ add_executable(pfm_tests
     modules/checkpoint_gate/checkpoint_gate_test.cpp
     modules/feature_io/feature_codec_test.cpp
     modules/feature_io/match_codec_test.cpp
+    src/infer/cache_match_eval_test.cpp
     src/infer/eval_pipeline_test.cpp
     src/infer/feature_extractor_test.cpp
     src/infer/match_metrics_test.cpp
