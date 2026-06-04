@@ -153,8 +153,8 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
 
 
 def _selected_image_path(record: RenderRecord, image_source: str) -> Path:
-    if image_source == "uint8" and record.uint8_path is not None:
-        return record.uint8_path
+    if image_source == "uint8":
+        return record.uint8_path if record.uint8_path is not None else Path()
     return record.image_path
 
 
@@ -201,6 +201,8 @@ def build_pair_specs(
     by_base: dict[str, dict[str, RenderRecord]] = defaultdict(dict)
     for record in records:
         if split != "all" and record.split != split:
+            continue
+        if image_source == "uint8" and record.uint8_path is None:
             continue
         image_path = _selected_image_path(record, image_source)
         if image_path.exists() and record.depth_path.exists() and record.tsai_path.exists():
@@ -411,11 +413,15 @@ def iter_lazy_pairs(
     absolute_depth_tolerance_m: float,
     relative_depth_tolerance: float,
     seed: int,
+    skip_bad_pairs: bool,
+    max_bad_pairs: int,
 ) -> Iterator[LazyPairResult]:
     if not specs:
         raise RuntimeError("no lazy pair specs available")
     total = count if count > 0 else len(specs)
     cursor = 0
+    skipped = 0
+    max_skips = max_bad_pairs if max_bad_pairs > 0 else max(total, len(specs))
 
     def submit(executor: ProcessPoolExecutor, future_map: dict[Future[LazyPairResult], float]) -> None:
         nonlocal cursor
@@ -437,16 +443,27 @@ def iter_lazy_pairs(
     with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(cache_max_items,)) as executor:
         pending: dict[Future[LazyPairResult], float] = {}
         target_prefetch = max(1, int(prefetch))
-        while cursor < min(total, target_prefetch):
+        while cursor < min(total + max_skips, target_prefetch):
             submit(executor, pending)
         yielded = 0
         while yielded < total:
             done, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
                 pending.pop(future)
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    if not skip_bad_pairs:
+                        raise
+                    skipped += 1
+                    print(f"skip_bad_pair count={skipped} error={exc}", flush=True)
+                    if skipped > max_skips:
+                        raise RuntimeError(f"too many lazy pair failures: {skipped}") from exc
+                    while cursor < total + max_skips and len(pending) < target_prefetch:
+                        submit(executor, pending)
+                    continue
                 yielded += 1
-                while cursor < total and len(pending) < target_prefetch:
+                while cursor < total + max_skips and len(pending) < target_prefetch:
                     submit(executor, pending)
                 yield result
                 if yielded >= total:
@@ -567,6 +584,8 @@ def run_preprocess(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[
             absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
             relative_depth_tolerance=args.relative_depth_tolerance,
             seed=args.seed,
+            skip_bad_pairs=args.skip_bad_pairs,
+            max_bad_pairs=args.max_bad_pairs,
         ),
         1,
     ):
@@ -664,6 +683,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
         relative_depth_tolerance=args.relative_depth_tolerance,
         seed=args.seed,
+        skip_bad_pairs=args.skip_bad_pairs,
+        max_bad_pairs=args.max_bad_pairs,
     )
 
     start = time.perf_counter()
@@ -832,6 +853,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--progress-every", type=int, default=5)
     parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument("--skip-bad-pairs", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-bad-pairs", type=int, default=0)
 
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
