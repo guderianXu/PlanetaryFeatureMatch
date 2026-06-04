@@ -92,6 +92,17 @@ class LazyPairResult:
     elapsed_ms: float
 
 
+@dataclass(frozen=True)
+class PhotometricAugmentConfig:
+    enabled: bool = False
+    probability: float = 1.0
+    brightness: float = 0.0
+    contrast: float = 0.0
+    gamma: float = 0.0
+    shadow: float = 0.0
+    noise: float = 0.0
+
+
 def _worker_init(cache_max_items: int) -> None:
     global _CACHE_MAX_ITEMS
     _CACHE_MAX_ITEMS = max(0, int(cache_max_items))
@@ -244,6 +255,98 @@ def _random_crop_origin(rng: random.Random, *, crop_size: int, full_size: int) -
     if crop_size >= full_size:
         return 0
     return rng.randint(0, full_size - crop_size)
+
+
+def _rand_uniform(generator: torch.Generator, low: float, high: float) -> float:
+    if high <= low:
+        return float(low)
+    value = torch.rand((), generator=generator, dtype=torch.float32).item()
+    return float(low + (high - low) * value)
+
+
+def _make_shadow_map(image: torch.Tensor, config: PhotometricAugmentConfig, generator: torch.Generator) -> torch.Tensor:
+    _, height, width = image.shape
+    device = image.device
+    dtype = image.dtype
+    strength = _rand_uniform(generator, 0.0, max(0.0, float(config.shadow)))
+    if strength <= 0.0:
+        return image.new_ones((1, height, width))
+
+    if _rand_uniform(generator, 0.0, 1.0) < 0.5:
+        axis = torch.linspace(0.0, 1.0, width, dtype=dtype, device=device).view(1, 1, width)
+    else:
+        axis = torch.linspace(0.0, 1.0, height, dtype=dtype, device=device).view(1, height, 1)
+
+    if _rand_uniform(generator, 0.0, 1.0) < 0.5:
+        axis = 1.0 - axis
+    side_profile = axis.expand(1, height, width)
+
+    center = _rand_uniform(generator, 0.2, 0.8)
+    band_width = _rand_uniform(generator, 0.18, 0.45)
+    band_profile = (1.0 - (axis - center).abs() / max(band_width, 1.0e-3)).clamp(0.0, 1.0).expand(1, height, width)
+    mix = _rand_uniform(generator, 0.0, 1.0)
+    profile = (mix * side_profile + (1.0 - mix) * band_profile).clamp(0.0, 1.0)
+    return (1.0 - strength * profile).clamp(1.0 - strength, 1.0)
+
+
+def _augment_single_view(
+    image: torch.Tensor,
+    config: PhotometricAugmentConfig,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    augmented = image.to(torch.float32).clamp(0.0, 1.0)
+    if _rand_uniform(generator, 0.0, 1.0) > max(0.0, min(1.0, float(config.probability))):
+        return augmented
+
+    contrast = max(0.0, float(config.contrast))
+    if contrast > 0.0:
+        contrast_scale = _rand_uniform(generator, max(0.05, 1.0 - contrast), 1.0 + contrast)
+        mean = augmented.mean(dim=(-2, -1), keepdim=True)
+        augmented = (augmented - mean) * contrast_scale + mean
+
+    gamma = max(0.0, float(config.gamma))
+    if gamma > 0.0:
+        # gamma 用指数采样，暗化和亮化的比例更对称。
+        gamma_value = math.exp(_rand_uniform(generator, -gamma, gamma))
+        augmented = augmented.clamp(0.0, 1.0).pow(gamma_value)
+
+    brightness = max(0.0, float(config.brightness))
+    if brightness > 0.0:
+        augmented = augmented + _rand_uniform(generator, -brightness, brightness)
+
+    if config.shadow > 0.0:
+        augmented = augmented * _make_shadow_map(augmented, config, generator)
+
+    noise = max(0.0, float(config.noise))
+    if noise > 0.0:
+        augmented = augmented + torch.randn(
+            augmented.shape,
+            generator=generator,
+            dtype=augmented.dtype,
+            device=augmented.device,
+        ) * _rand_uniform(generator, 0.0, noise)
+
+    return augmented.nan_to_num(0.0, 0.0, 0.0).clamp(0.0, 1.0).contiguous()
+
+
+def apply_photometric_augmentation(
+    pair: SyntheticPair,
+    config: PhotometricAugmentConfig,
+    *,
+    seed: int,
+) -> SyntheticPair:
+    if not config.enabled:
+        return pair
+    generator_a = torch.Generator(device=pair.view_a.device)
+    generator_b = torch.Generator(device=pair.view_b.device)
+    generator_a.manual_seed(int(seed) & 0x7FFFFFFFFFFFFFFF)
+    generator_b.manual_seed((int(seed) + 0x9E3779B97F4A7C15) & 0x7FFFFFFFFFFFFFFF)
+    return SyntheticPair(
+        view_a=_augment_single_view(pair.view_a, config, generator_a),
+        view_b=_augment_single_view(pair.view_b, config, generator_b),
+        warp_a_to_b=pair.warp_a_to_b,
+        valid_mask=pair.valid_mask,
+    )
 
 
 def _project_crop_pair(
@@ -478,6 +581,40 @@ def _write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]
         writer.writerows(rows)
 
 
+class StreamingCsvRows:
+    def __init__(self, path: Path, fieldnames: list[str]) -> None:
+        self.path = path
+        self.fieldnames = fieldnames
+        self._handle = None
+        self._writer: csv.DictWriter | None = None
+
+    def open(self) -> "StreamingCsvRows":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("w", encoding="utf-8", newline="")
+        self._writer = csv.DictWriter(self._handle, fieldnames=self.fieldnames, extrasaction="ignore")
+        self._writer.writeheader()
+        self._handle.flush()
+        return self
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+            self._writer = None
+
+    def __enter__(self) -> "StreamingCsvRows":
+        return self.open()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def write(self, row: dict[str, object]) -> None:
+        if self._writer is None or self._handle is None:
+            raise RuntimeError("streaming csv writer is not open")
+        self._writer.writerow(row)
+        self._handle.flush()
+
+
 def _summarize_float(values: list[float]) -> dict[str, float]:
     if not values:
         return {"mean": 0.0, "median": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
@@ -513,6 +650,18 @@ def _gpu_snapshot() -> dict[str, str]:
         "gpu_mem_used_mib": first[1].strip(),
         "gpu_mem_total_mib": first[2].strip(),
     }
+
+
+def _photometric_config_from_args(args: argparse.Namespace) -> PhotometricAugmentConfig:
+    return PhotometricAugmentConfig(
+        enabled=bool(args.photometric_augment),
+        probability=float(args.photometric_probability),
+        brightness=float(args.photometric_brightness),
+        contrast=float(args.photometric_contrast),
+        gamma=float(args.photometric_gamma),
+        shadow=float(args.photometric_shadow),
+        noise=float(args.photometric_noise),
+    )
 
 
 def _write_html_report(
@@ -660,6 +809,99 @@ def _load_model(args: argparse.Namespace, device: torch.device):
     return model, optimizer
 
 
+def _write_visual_report_error(path: Path, *, command: list[str], error: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>训练后匹配可视化失败</title>
+<style>
+body {{ margin: 24px; background: #081017; color: #dcebf7; font-family: Arial, "Noto Sans CJK SC", sans-serif; }}
+pre {{ white-space: pre-wrap; background: #101b24; border: 1px solid #26394a; border-radius: 8px; padding: 14px; }}
+.error {{ color: #fb7185; }}
+</style>
+</head>
+<body>
+<h1>训练后匹配可视化失败</h1>
+<p class="error">训练 checkpoint 已写入，但自动生成匹配连线图失败。</p>
+<h2>命令</h2>
+<pre>{html.escape(" ".join(command))}</pre>
+<h2>错误</h2>
+<pre>{html.escape(error)}</pre>
+</body>
+</html>
+"""
+    (path / "index.html").write_text(body, encoding="utf-8")
+
+
+def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path | None:
+    if not args.auto_visual_report:
+        return None
+    if args.uint8_manifest is None:
+        return None
+    report_dir = args.output_dir / "visual_report"
+    script_path = PROJECT_ROOT / "scripts" / "visualize_lazy_pose_matches.py"
+    command = [
+        sys.executable,
+        str(script_path),
+        "--render-manifest",
+        str(args.render_manifest),
+        "--uint8-manifest",
+        str(args.uint8_manifest),
+        "--pytorch-state",
+        str(checkpoint_path),
+        "--output-dir",
+        str(report_dir),
+        "--run-dir",
+        str(args.output_dir),
+        "--metrics-csv",
+        str(args.output_dir / "train_metrics.csv"),
+        "--split",
+        args.visual_split or args.split,
+        "--reference-variant",
+        args.reference_variant,
+        "--candidate-pairs",
+        str(args.visual_candidate_pairs),
+        "--select-count",
+        str(args.visual_select_count),
+        "--seed",
+        str(args.seed + 2026),
+        "--crop-size",
+        str(args.crop_size),
+        "--max-image-size",
+        str(args.visual_max_image_size),
+        "--max-attempts",
+        str(args.max_attempts),
+        "--min-valid-fraction",
+        str(args.min_valid_fraction),
+        "--absolute-depth-tolerance-m",
+        str(args.absolute_depth_tolerance_m),
+        "--relative-depth-tolerance",
+        str(args.relative_depth_tolerance),
+        "--device",
+        args.visual_device or args.device,
+        "--descriptor-mode",
+        args.visual_descriptor_mode,
+        "--keypoint-score-mode",
+        args.visual_keypoint_score_mode,
+        "--max-keypoints",
+        str(args.visual_max_keypoints),
+        "--max-matches",
+        str(args.visual_max_matches),
+        "--draw-matches",
+        str(args.visual_draw_matches),
+        "--threshold-px",
+        str(args.visual_threshold_px),
+    ]
+    try:
+        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    except Exception as exc:
+        _write_visual_report_error(report_dir, command=command, error=str(exc))
+        return report_dir
+    return report_dir
+
+
 def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, object]:
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
@@ -670,6 +912,24 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     ref_dir = args.output_dir / "lazy_pair_refs"
     ref_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
+    photometric_config = _photometric_config_from_args(args)
+    train_metric_fields = [
+        "step",
+        "loss",
+        "top1_accuracy",
+        "mean_positive_rank",
+        "points",
+        "data_wait_ms",
+        "train_ms",
+        "valid_fraction_mean",
+        "worker_elapsed_ms_mean",
+        "photometric_augment",
+        "photometric_probability",
+        "gpu_util_percent",
+        "gpu_mem_used_mib",
+        "gpu_mem_total_mib",
+    ]
+    metrics_writer = StreamingCsvRows(args.output_dir / "train_metrics.csv", train_metric_fields).open()
     iterator = iter_lazy_pairs(
         specs,
         count=args.steps * args.batch_pairs,
@@ -693,7 +953,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         results = [next(iterator) for _ in range(args.batch_pairs)]
         data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
         fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
-        prefetched = {path.resolve(strict=False): result.pair for path, result in zip(fake_paths, results)}
+        augmented_pairs = [
+            apply_photometric_augmentation(
+                result.pair,
+                photometric_config,
+                seed=args.seed + step * 1000003 + pair_index * 9176,
+            )
+            for pair_index, result in enumerate(results)
+        ]
+        prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
         train_start = time.perf_counter()
         metrics = train_step(
             model,
@@ -733,9 +1001,12 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             "train_ms": f"{train_ms:.2f}",
             "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
             "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
+            "photometric_augment": int(photometric_config.enabled),
+            "photometric_probability": f"{photometric_config.probability:.3f}",
             **gpu,
         }
         rows.append(row)
+        metrics_writer.write(row)
         if step == 1 or step % max(1, args.progress_every) == 0:
             elapsed = time.perf_counter() - start
             print(
@@ -747,6 +1018,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         if args.save_every_steps > 0 and step % args.save_every_steps == 0:
             _save_training_state(args.output_dir / "checkpoints" / "latest_pytorch_pfm_state.pt", model, args, step)
 
+    metrics_writer.close()
     elapsed = time.perf_counter() - start
     data_wait_values = [float(row["data_wait_ms"]) for row in rows]
     train_values = [float(row["train_ms"]) for row in rows]
@@ -760,25 +1032,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "data_wait_to_train_ratio_mean": statistics.fmean(data_wait_values) / max(statistics.fmean(train_values), 1.0e-6),
         "last_loss": rows[-1]["loss"] if rows else "-",
         "last_top1_accuracy": rows[-1]["top1_accuracy"] if rows else "-",
+        "photometric_augmentation": photometric_config,
         "last_gpu": _gpu_snapshot(),
     }
     _write_rows(
         args.output_dir / "train_metrics.csv",
         rows,
-        [
-            "step",
-            "loss",
-            "top1_accuracy",
-            "mean_positive_rank",
-            "points",
-            "data_wait_ms",
-            "train_ms",
-            "valid_fraction_mean",
-            "worker_elapsed_ms_mean",
-            "gpu_util_percent",
-            "gpu_mem_used_mib",
-            "gpu_mem_total_mib",
-        ],
+        train_metric_fields,
     )
     _write_html_report(
         args.output_dir / "run.html",
@@ -791,6 +1051,12 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     checkpoint_path = args.output_dir / "pytorch_pfm_state.pt"
     _save_training_state(checkpoint_path, model, args, args.steps)
     summary["checkpoint"] = str(checkpoint_path)
+    if device.type == "cuda":
+        model.to("cpu")
+        torch.cuda.empty_cache()
+    report_dir = _run_visual_report(args, checkpoint_path)
+    if report_dir is not None:
+        summary["visual_report"] = str(report_dir / "index.html")
     return summary
 
 
@@ -822,6 +1088,13 @@ def _save_training_state(
                 "render_manifest": str(args.render_manifest),
                 "uint8_manifest": str(args.uint8_manifest) if args.uint8_manifest is not None else "",
                 "init_pytorch_state": str(args.init_pytorch_state),
+                "photometric_augment": bool(args.photometric_augment),
+                "photometric_probability": float(args.photometric_probability),
+                "photometric_brightness": float(args.photometric_brightness),
+                "photometric_contrast": float(args.photometric_contrast),
+                "photometric_gamma": float(args.photometric_gamma),
+                "photometric_shadow": float(args.photometric_shadow),
+                "photometric_noise": float(args.photometric_noise),
             },
         },
         path,
@@ -873,6 +1146,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--graph-matcher-loss-weight", type=float, default=0.0)
     parser.add_argument("--training-spatial-bins", type=int, default=0)
+    parser.add_argument("--photometric-augment", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--photometric-probability", type=float, default=0.85)
+    parser.add_argument("--photometric-brightness", type=float, default=0.16)
+    parser.add_argument("--photometric-contrast", type=float, default=0.35)
+    parser.add_argument("--photometric-gamma", type=float, default=0.45)
+    parser.add_argument("--photometric-shadow", type=float, default=0.45)
+    parser.add_argument("--photometric-noise", type=float, default=0.015)
     parser.add_argument("--train-backbone", action="store_true")
     parser.add_argument("--train-dual-fpn", action="store_true")
     parser.add_argument("--train-descriptor-head", action=argparse.BooleanOptionalAction, default=True)
@@ -883,6 +1163,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-descriptor-fusion", action="store_true")
     parser.add_argument("--train-quality-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
+    parser.add_argument("--auto-visual-report", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visual-split", default="")
+    parser.add_argument("--visual-device", default="")
+    parser.add_argument("--visual-candidate-pairs", type=int, default=24)
+    parser.add_argument("--visual-select-count", type=int, default=6)
+    parser.add_argument("--visual-max-image-size", type=int, default=768)
+    parser.add_argument("--visual-descriptor-mode", choices=["learned", "texture", "blend"], default="learned")
+    parser.add_argument("--visual-keypoint-score-mode", choices=["texture", "learned"], default="texture")
+    parser.add_argument("--visual-max-keypoints", type=int, default=384)
+    parser.add_argument("--visual-max-matches", type=int, default=128)
+    parser.add_argument("--visual-draw-matches", type=int, default=80)
+    parser.add_argument("--visual-threshold-px", type=float, default=5.0)
     return parser.parse_args()
 
 
@@ -898,6 +1190,17 @@ def main() -> int:
         raise ValueError("--pairs must be positive in preprocess mode")
     if args.mode == "train" and args.steps <= 0:
         raise ValueError("--steps must be positive in train mode")
+    if not 0.0 <= args.photometric_probability <= 1.0:
+        raise ValueError("--photometric-probability must be in [0, 1]")
+    for name in (
+        "photometric_brightness",
+        "photometric_contrast",
+        "photometric_gamma",
+        "photometric_shadow",
+        "photometric_noise",
+    ):
+        if getattr(args, name) < 0.0:
+            raise ValueError(f"--{name.replace('_', '-')} must be non-negative")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cv2.setNumThreads(1)
     torch.manual_seed(args.seed)
@@ -925,6 +1228,7 @@ def main() -> int:
         "records": len(records),
         "specs": len(specs),
         "target_variants": list(target_variants),
+        "photometric_augmentation": vars(_photometric_config_from_args(args)),
     }
     (args.output_dir / "input_summary.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
