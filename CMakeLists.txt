@@ -201,6 +201,7 @@ target_compile_options(pfm_feature_io PRIVATE -Wall -Wextra -Wpedantic)
 add_library(pfm STATIC
     src/cli/commands.cpp
     src/data/image_dataset.cpp
+    src/data/lazy_pose_pair_dataset.cpp
     src/data/pair_archive_dataset.cpp
     src/data/synthetic_pair.cpp
     src/data/synthetic_pair_cache.cpp
@@ -292,6 +293,7 @@ add_executable(pfm_tests
     src/infer/pipeline_test.cpp
     src/infer/visualization_test.cpp
     src/data/image_dataset_test.cpp
+    src/data/lazy_pose_pair_dataset_test.cpp
     modules/image/image_io_test.cpp
     modules/image/intensity_mask_test.cpp
     modules/image/normalization_test.cpp

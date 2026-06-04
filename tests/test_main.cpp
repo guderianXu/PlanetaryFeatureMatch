@@ -36,6 +36,7 @@ void register_image_io_tests();
 void register_intensity_mask_tests();
 void register_normalization_tests();
 void register_pair_archive_dataset_tests();
+void register_lazy_pose_pair_dataset_tests();
 void register_warp_tests();
 void register_synthetic_pair_tests();
 void register_synthetic_pair_cache_tests();
@@ -78,6 +79,7 @@ int main() {
     register_intensity_mask_tests();
     register_normalization_tests();
     register_pair_archive_dataset_tests();
+    register_lazy_pose_pair_dataset_tests();
     register_warp_tests();
     register_synthetic_pair_tests();
     register_synthetic_pair_cache_tests();

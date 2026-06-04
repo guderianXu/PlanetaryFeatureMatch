@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+"""Benchmark lazy pose-manifest pair generation without materializing pair cache."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import html
+import json
+import math
+import os
+import random
+import statistics
+import subprocess
+import sys
+import time
+from collections import OrderedDict, defaultdict
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+import cv2
+import numpy as np
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_DIR = PROJECT_ROOT / "python"
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+for candidate in (PYTHON_DIR, SCRIPTS_DIR):
+    if str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+import pfm_model  # noqa: E402
+from generate_cross_position_pose_pairs import parse_tsai, read_float_tif  # noqa: E402
+from patch_descriptor_training import SyntheticPair  # noqa: E402
+from pfm_pytorch_training import descriptor_parameters, train_step  # noqa: E402
+
+
+DEFAULT_TARGET_VARIANTS = (
+    "small_01",
+    "small_02",
+    "small_03",
+    "mid_01",
+    "mid_02",
+    "mid_03",
+    "extreme_01",
+    "extreme_02",
+    "extreme_03",
+)
+
+DEFAULT_INIT_STATE = PROJECT_ROOT / "runs" / "python_diag_balanced_512_3epoch_20260603_2143" / "pytorch_pfm_state.pt"
+
+_IMAGE_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+_DEPTH_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_CAMERA_CACHE: "OrderedDict[str, object]" = OrderedDict()
+_CACHE_MAX_ITEMS = 32
+
+
+@dataclass(frozen=True)
+class RenderRecord:
+    pose_id: str
+    base_id: str
+    variant: str
+    split: str
+    tsai_path: Path
+    image_path: Path
+    uint8_path: Path | None
+    depth_path: Path
+
+
+@dataclass(frozen=True)
+class LazyPairSpec:
+    pair_index: int
+    split: str
+    reference: RenderRecord
+    target: RenderRecord
+
+
+@dataclass(frozen=True)
+class LazyPairResult:
+    spec: LazyPairSpec
+    pair: SyntheticPair
+    valid_fraction: float
+    valid_pixels: int
+    attempt_count: int
+    elapsed_ms: float
+
+
+def _worker_init(cache_max_items: int) -> None:
+    global _CACHE_MAX_ITEMS
+    _CACHE_MAX_ITEMS = max(0, int(cache_max_items))
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
+
+def _cache_get(cache: "OrderedDict[str, object]", key: Path, loader):
+    cache_key = str(key)
+    if _CACHE_MAX_ITEMS > 0 and cache_key in cache:
+        value = cache.pop(cache_key)
+        cache[cache_key] = value
+        return value
+    value = loader(key)
+    if _CACHE_MAX_ITEMS > 0:
+        cache[cache_key] = value
+        while len(cache) > _CACHE_MAX_ITEMS:
+            cache.popitem(last=False)
+    return value
+
+
+def _read_uint8_manifest(path: Path | None) -> dict[str, Path]:
+    if path is None or not path.exists():
+        return {}
+    mapping: dict[str, Path] = {}
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            source = row.get("source_path", "")
+            target = row.get("uint8_path", "")
+            if not source or not target or source == "source_path":
+                continue
+            mapping[str(Path(source))] = Path(target)
+    return mapping
+
+
+def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[RenderRecord]:
+    records: list[RenderRecord] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            pose_id = row.get("pose_id", "")
+            if not pose_id or pose_id == "pose_id":
+                continue
+            image_path = Path(row["image_path"])
+            records.append(
+                RenderRecord(
+                    pose_id=pose_id,
+                    base_id=row["base_id"],
+                    variant=row["variant"],
+                    split=row["split"],
+                    tsai_path=Path(row["tsai_path"]),
+                    image_path=image_path,
+                    uint8_path=uint8_paths.get(str(image_path)),
+                    depth_path=Path(row["depth_path"]),
+                )
+            )
+    return records
+
+
+def _selected_image_path(record: RenderRecord, image_source: str) -> Path:
+    if image_source == "uint8" and record.uint8_path is not None:
+        return record.uint8_path
+    return record.image_path
+
+
+def _load_view(path: Path) -> torch.Tensor:
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError(f"failed to read image: {path}")
+    if image.ndim == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    tensor = torch.from_numpy(np.ascontiguousarray(image)).to(torch.float32)
+    dtype_name = image.dtype.name
+    if dtype_name == "uint8":
+        tensor = tensor / 255.0
+    elif dtype_name == "uint16":
+        tensor = tensor / 65535.0
+    elif bool(torch.isfinite(tensor).any()) and float(tensor.max().item()) > 1.5:
+        tensor = tensor / float(tensor.max().clamp_min(1.0).item())
+    return tensor.nan_to_num(0.0, 0.0, 0.0).clamp(0.0, 1.0).unsqueeze(0).contiguous()
+
+
+def _cached_view(path: Path) -> torch.Tensor:
+    return _cache_get(_IMAGE_CACHE, path, _load_view)
+
+
+def _cached_depth(path: Path) -> np.ndarray:
+    return _cache_get(_DEPTH_CACHE, path, read_float_tif)
+
+
+def _cached_camera(path: Path):
+    return _cache_get(_CAMERA_CACHE, path, parse_tsai)
+
+
+def build_pair_specs(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    reference_variant: str,
+    target_variants: tuple[str, ...],
+    image_source: str,
+    limit_pairs: int,
+    seed: int,
+    shuffle: bool,
+) -> list[LazyPairSpec]:
+    by_base: dict[str, dict[str, RenderRecord]] = defaultdict(dict)
+    for record in records:
+        if split != "all" and record.split != split:
+            continue
+        image_path = _selected_image_path(record, image_source)
+        if image_path.exists() and record.depth_path.exists() and record.tsai_path.exists():
+            by_base[record.base_id][record.variant] = record
+
+    specs: list[LazyPairSpec] = []
+    for base_id in sorted(by_base):
+        variants = by_base[base_id]
+        reference = variants.get(reference_variant)
+        if reference is None:
+            continue
+        for variant in target_variants:
+            target = variants.get(variant)
+            if target is None:
+                continue
+            specs.append(
+                LazyPairSpec(
+                    pair_index=len(specs),
+                    split=reference.split,
+                    reference=reference,
+                    target=target,
+                )
+            )
+    if shuffle:
+        rng = random.Random(seed)
+        rng.shuffle(specs)
+    if limit_pairs > 0:
+        return specs[:limit_pairs]
+    return specs
+
+
+def _clamp_origin(center: float, *, crop_size: int, full_size: int) -> int:
+    if crop_size >= full_size:
+        return 0
+    return max(0, min(int(round(center - float(crop_size - 1) * 0.5)), full_size - crop_size))
+
+
+def _random_crop_origin(rng: random.Random, *, crop_size: int, full_size: int) -> int:
+    if crop_size >= full_size:
+        return 0
+    return rng.randint(0, full_size - crop_size)
+
+
+def _project_crop_pair(
+    view_a: torch.Tensor,
+    view_b: torch.Tensor,
+    depth_a: np.ndarray,
+    depth_b: np.ndarray,
+    camera_a,
+    camera_b,
+    *,
+    crop_size: int,
+    absolute_depth_tolerance_m: float,
+    relative_depth_tolerance: float,
+    rng: random.Random,
+) -> tuple[SyntheticPair, float, int]:
+    if depth_a.shape != depth_b.shape:
+        raise ValueError(f"depth shape mismatch: {depth_a.shape} vs {depth_b.shape}")
+    _, height_a, width_a = view_a.shape
+    _, height_b, width_b = view_b.shape
+    if depth_a.shape != (height_a, width_a) or depth_b.shape != (height_b, width_b):
+        raise ValueError(
+            f"image/depth shape mismatch: view_a={tuple(view_a.shape)} depth_a={depth_a.shape} "
+            f"view_b={tuple(view_b.shape)} depth_b={depth_b.shape}"
+        )
+
+    crop_h_a = min(int(crop_size), height_a)
+    crop_w_a = min(int(crop_size), width_a)
+    crop_h_b = min(int(crop_size), height_b)
+    crop_w_b = min(int(crop_size), width_b)
+    ax0 = _random_crop_origin(rng, crop_size=crop_w_a, full_size=width_a)
+    ay0 = _random_crop_origin(rng, crop_size=crop_h_a, full_size=height_a)
+    ax1 = ax0 + crop_w_a
+    ay1 = ay0 + crop_h_a
+
+    yy, xx = np.indices((crop_h_a, crop_w_a), dtype=np.float64)
+    gx = xx + float(ax0)
+    gy = yy + float(ay0)
+    z = depth_a[ay0:ay1, ax0:ax1].astype(np.float64, copy=False)
+    valid_a = np.isfinite(z) & (z > 0.0)
+
+    x_cam = (gx + 0.5 - camera_a.cu) / camera_a.fu * z
+    y_cam = (gy + 0.5 - camera_a.cv) / camera_a.fv * z
+    pts_cam = np.stack((x_cam, y_cam, z), axis=0).reshape(3, -1)
+    world = camera_a.center[:, None] + camera_a.rotation_world_to_camera.T @ pts_cam
+    projected_b = camera_b.rotation_world_to_camera @ (world - camera_b.center[:, None])
+    pb_x = projected_b[0].reshape(crop_h_a, crop_w_a)
+    pb_y = projected_b[1].reshape(crop_h_a, crop_w_a)
+    pb_z = projected_b[2].reshape(crop_h_a, crop_w_a)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u_b = camera_b.fu * (pb_x / pb_z) + camera_b.cu - 0.5
+        v_b = camera_b.fv * (pb_y / pb_z) + camera_b.cv - 0.5
+    inside_b = (pb_z > 0.0) & (u_b >= 0.0) & (u_b <= width_b - 1.0) & (v_b >= 0.0) & (v_b <= height_b - 1.0)
+
+    sampled_depth_b = cv2.remap(
+        depth_b.astype(np.float32, copy=False),
+        u_b.astype(np.float32, copy=False),
+        v_b.astype(np.float32, copy=False),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=-1.0,
+    ).astype(np.float64, copy=False)
+    tolerance = np.maximum(float(absolute_depth_tolerance_m), float(relative_depth_tolerance) * np.abs(pb_z))
+    valid_global = (
+        valid_a
+        & inside_b
+        & np.isfinite(sampled_depth_b)
+        & (sampled_depth_b > 0.0)
+        & (np.abs(sampled_depth_b - pb_z) <= tolerance)
+    )
+
+    if bool(valid_global.any()):
+        bx0 = _clamp_origin(float(np.median(u_b[valid_global])), crop_size=crop_w_b, full_size=width_b)
+        by0 = _clamp_origin(float(np.median(v_b[valid_global])), crop_size=crop_h_b, full_size=height_b)
+    else:
+        bx0 = max(0, min(ax0, width_b - crop_w_b))
+        by0 = max(0, min(ay0, height_b - crop_h_b))
+    bx1 = bx0 + crop_w_b
+    by1 = by0 + crop_h_b
+
+    warp_np = np.stack((u_b - float(bx0), v_b - float(by0)), axis=-1).astype(np.float32, copy=False)
+    finite_warp = np.isfinite(warp_np).all(axis=-1)
+    valid_mask_np = (
+        valid_global
+        & finite_warp
+        & (warp_np[..., 0] >= 0.0)
+        & (warp_np[..., 0] <= float(crop_w_b - 1))
+        & (warp_np[..., 1] >= 0.0)
+        & (warp_np[..., 1] <= float(crop_h_b - 1))
+    )
+    warp_np[~finite_warp] = 0.0
+
+    pair = SyntheticPair(
+        view_a=view_a[:, ay0:ay1, ax0:ax1].contiguous(),
+        view_b=view_b[:, by0:by1, bx0:bx1].contiguous(),
+        warp_a_to_b=torch.from_numpy(warp_np.copy()).to(torch.float32).contiguous(),
+        valid_mask=torch.from_numpy(valid_mask_np.copy()).to(torch.bool).contiguous(),
+    )
+    valid_pixels = int(valid_mask_np.sum())
+    valid_fraction = float(valid_pixels) / float(max(1, crop_h_a * crop_w_a))
+    return pair, valid_fraction, valid_pixels
+
+
+def generate_lazy_pair(
+    spec: LazyPairSpec,
+    *,
+    crop_size: int,
+    image_source: str,
+    max_attempts: int,
+    min_valid_fraction: float,
+    absolute_depth_tolerance_m: float,
+    relative_depth_tolerance: float,
+    seed: int,
+) -> LazyPairResult:
+    start = time.perf_counter()
+    view_a = _cached_view(_selected_image_path(spec.reference, image_source))
+    view_b = _cached_view(_selected_image_path(spec.target, image_source))
+    depth_a = _cached_depth(spec.reference.depth_path)
+    depth_b = _cached_depth(spec.target.depth_path)
+    camera_a = _cached_camera(spec.reference.tsai_path)
+    camera_b = _cached_camera(spec.target.tsai_path)
+
+    best: tuple[SyntheticPair, float, int] | None = None
+    attempts = max(1, int(max_attempts))
+    for attempt in range(attempts):
+        rng = random.Random(seed + spec.pair_index * 1009 + attempt * 9176)
+        pair, valid_fraction, valid_pixels = _project_crop_pair(
+            view_a,
+            view_b,
+            depth_a,
+            depth_b,
+            camera_a,
+            camera_b,
+            crop_size=crop_size,
+            absolute_depth_tolerance_m=absolute_depth_tolerance_m,
+            relative_depth_tolerance=relative_depth_tolerance,
+            rng=rng,
+        )
+        if best is None or valid_fraction > best[1]:
+            best = (pair, valid_fraction, valid_pixels)
+        if valid_fraction >= min_valid_fraction:
+            break
+    if best is None:
+        raise RuntimeError("failed to generate lazy pair")
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return LazyPairResult(
+        spec=spec,
+        pair=best[0],
+        valid_fraction=best[1],
+        valid_pixels=best[2],
+        attempt_count=attempt + 1,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def iter_lazy_pairs(
+    specs: list[LazyPairSpec],
+    *,
+    count: int,
+    workers: int,
+    prefetch: int,
+    cache_max_items: int,
+    crop_size: int,
+    image_source: str,
+    max_attempts: int,
+    min_valid_fraction: float,
+    absolute_depth_tolerance_m: float,
+    relative_depth_tolerance: float,
+    seed: int,
+) -> Iterator[LazyPairResult]:
+    if not specs:
+        raise RuntimeError("no lazy pair specs available")
+    total = count if count > 0 else len(specs)
+    cursor = 0
+
+    def submit(executor: ProcessPoolExecutor, future_map: dict[Future[LazyPairResult], float]) -> None:
+        nonlocal cursor
+        spec = specs[cursor % len(specs)]
+        future = executor.submit(
+            generate_lazy_pair,
+            spec,
+            crop_size=crop_size,
+            image_source=image_source,
+            max_attempts=max_attempts,
+            min_valid_fraction=min_valid_fraction,
+            absolute_depth_tolerance_m=absolute_depth_tolerance_m,
+            relative_depth_tolerance=relative_depth_tolerance,
+            seed=seed + cursor * 31,
+        )
+        future_map[future] = time.perf_counter()
+        cursor += 1
+
+    with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(cache_max_items,)) as executor:
+        pending: dict[Future[LazyPairResult], float] = {}
+        target_prefetch = max(1, int(prefetch))
+        while cursor < min(total, target_prefetch):
+            submit(executor, pending)
+        yielded = 0
+        while yielded < total:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.pop(future)
+                result = future.result()
+                yielded += 1
+                while cursor < total and len(pending) < target_prefetch:
+                    submit(executor, pending)
+                yield result
+                if yielded >= total:
+                    break
+
+
+def _write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _summarize_float(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
+    sorted_values = sorted(values)
+    p95_index = min(len(sorted_values) - 1, int(math.ceil(len(sorted_values) * 0.95)) - 1)
+    return {
+        "mean": float(statistics.fmean(values)),
+        "median": float(statistics.median(values)),
+        "p95": float(sorted_values[p95_index]),
+        "min": float(sorted_values[0]),
+        "max": float(sorted_values[-1]),
+    }
+
+
+def _gpu_snapshot() -> dict[str, str]:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return {}
+    first = output.splitlines()[0].split(",")
+    if len(first) < 3:
+        return {}
+    return {
+        "gpu_util_percent": first[0].strip(),
+        "gpu_mem_used_mib": first[1].strip(),
+        "gpu_mem_total_mib": first[2].strip(),
+    }
+
+
+def _write_html_report(
+    path: Path,
+    *,
+    title: str,
+    args: argparse.Namespace,
+    spec_count: int,
+    summary: dict[str, object],
+    rows: list[dict[str, object]],
+) -> None:
+    sample_rows = rows[-20:]
+    table = "".join(
+        "<tr>"
+        + "".join(f"<td>{html.escape(str(value))}</td>" for value in row.values())
+        + "</tr>"
+        for row in sample_rows
+    )
+    headers = "".join(f"<th>{html.escape(str(key))}</th>" for key in sample_rows[0].keys()) if sample_rows else ""
+    content = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(title)}</title>
+<style>
+body {{ font-family: sans-serif; margin: 24px; background: #0b1117; color: #d9e6f2; }}
+section {{ border: 1px solid #233646; border-radius: 8px; padding: 16px; margin: 16px 0; background: #111b24; }}
+pre {{ white-space: pre-wrap; background: #071018; padding: 12px; border-radius: 6px; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+th, td {{ border-bottom: 1px solid #243746; padding: 6px 8px; text-align: left; }}
+th {{ color: #7edce2; }}
+</style>
+</head>
+<body>
+<h1>{html.escape(title)}</h1>
+<section>
+<h2>配置</h2>
+<pre>{html.escape(json.dumps(vars(args), indent=2, ensure_ascii=False, default=str))}</pre>
+<p>可用 pair specs: {spec_count}</p>
+</section>
+<section>
+<h2>结果摘要</h2>
+<pre>{html.escape(json.dumps(summary, indent=2, ensure_ascii=False, default=str))}</pre>
+</section>
+<section>
+<h2>最近记录</h2>
+<table><thead><tr>{headers}</tr></thead><tbody>{table}</tbody></table>
+</section>
+</body>
+</html>
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def run_preprocess(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    start = time.perf_counter()
+    for index, result in enumerate(
+        iter_lazy_pairs(
+            specs,
+            count=args.pairs,
+            workers=args.workers,
+            prefetch=args.prefetch_batches,
+            cache_max_items=args.worker_cache_items,
+            crop_size=args.crop_size,
+            image_source=args.image_source,
+            max_attempts=args.max_attempts,
+            min_valid_fraction=args.min_valid_fraction,
+            absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
+            relative_depth_tolerance=args.relative_depth_tolerance,
+            seed=args.seed,
+        ),
+        1,
+    ):
+        rows.append(
+            {
+                "index": index,
+                "pair_index": result.spec.pair_index,
+                "split": result.spec.split,
+                "base_id": result.spec.reference.base_id,
+                "variant": result.spec.target.variant,
+                "valid_fraction": f"{result.valid_fraction:.6f}",
+                "valid_pixels": result.valid_pixels,
+                "attempts": result.attempt_count,
+                "worker_elapsed_ms": f"{result.elapsed_ms:.2f}",
+            }
+        )
+        if index == 1 or index % max(1, args.progress_every) == 0:
+            elapsed = time.perf_counter() - start
+            print(
+                f"preprocess {index}/{args.pairs} pairs "
+                f"rate={index / max(elapsed, 1.0e-6):.2f} pairs/s "
+                f"valid={result.valid_fraction:.4f}",
+                flush=True,
+            )
+    elapsed = time.perf_counter() - start
+    summary = {
+        "mode": "preprocess",
+        "pairs": len(rows),
+        "elapsed_s": elapsed,
+        "pairs_per_second": len(rows) / max(elapsed, 1.0e-6),
+        "worker_elapsed_ms": _summarize_float([float(row["worker_elapsed_ms"]) for row in rows]),
+        "valid_fraction": _summarize_float([float(row["valid_fraction"]) for row in rows]),
+    }
+    _write_rows(
+        args.output_dir / "preprocess_metrics.csv",
+        rows,
+        ["index", "pair_index", "split", "base_id", "variant", "valid_fraction", "valid_pixels", "attempts", "worker_elapsed_ms"],
+    )
+    _write_html_report(
+        args.output_dir / "run.html",
+        title="Lazy Pose Pair Preprocess Benchmark",
+        args=args,
+        spec_count=len(specs),
+        summary=summary,
+        rows=rows,
+    )
+    return summary
+
+
+def _load_model(args: argparse.Namespace, device: torch.device):
+    checkpoint = Path(args.init_pytorch_state)
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"--init-pytorch-state does not exist: {checkpoint}")
+    model, _ = pfm_model.load_pytorch_state(checkpoint, device=device, strict=False)
+    trainable = descriptor_parameters(
+        model,
+        train_backbone=args.train_backbone,
+        train_dual_fpn=args.train_dual_fpn,
+        train_descriptor_head=args.train_descriptor_head,
+        train_sparse_context=args.train_sparse_context,
+        train_keypoint_head=args.train_keypoint_head,
+        train_geometry_head=args.train_geometry_head,
+        train_texture_adapter=args.train_texture_adapter,
+        train_descriptor_fusion=args.train_descriptor_fusion,
+        train_quality_head=args.train_quality_head,
+        train_graph_matcher=args.train_graph_matcher,
+    )
+    if not trainable:
+        raise RuntimeError("no trainable parameters selected")
+    model.train()
+    optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=args.weight_decay)
+    return model, optimizer
+
+
+def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, object]:
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
+    device = torch.device(args.device)
+    model, optimizer = _load_model(args, device)
+    generator = torch.Generator(device=device)
+    generator.manual_seed(args.seed)
+    ref_dir = args.output_dir / "lazy_pair_refs"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    iterator = iter_lazy_pairs(
+        specs,
+        count=args.steps * args.batch_pairs,
+        workers=args.workers,
+        prefetch=args.prefetch_batches,
+        cache_max_items=args.worker_cache_items,
+        crop_size=args.crop_size,
+        image_source=args.image_source,
+        max_attempts=args.max_attempts,
+        min_valid_fraction=args.min_valid_fraction,
+        absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
+        relative_depth_tolerance=args.relative_depth_tolerance,
+        seed=args.seed,
+    )
+
+    start = time.perf_counter()
+    for step in range(1, args.steps + 1):
+        fetch_start = time.perf_counter()
+        results = [next(iterator) for _ in range(args.batch_pairs)]
+        data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
+        fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
+        prefetched = {path.resolve(strict=False): result.pair for path, result in zip(fake_paths, results)}
+        train_start = time.perf_counter()
+        metrics = train_step(
+            model,
+            optimizer,
+            [],
+            device=device,
+            batch_pairs=args.batch_pairs,
+            samples_per_pair=args.samples_per_pair,
+            min_intensity=args.min_intensity,
+            generator=generator,
+            temperature=args.temperature,
+            teacher_weight=args.teacher_weight,
+            synthetic_loss_weight=args.synthetic_loss_weight,
+            diversity_weight=args.diversity_weight,
+            max_grad_norm=args.max_grad_norm,
+            skip_nonfinite_steps=args.skip_nonfinite_steps,
+            train_blended_descriptors=args.train_blended_descriptors,
+            texture_blend_weight=args.texture_blend_weight,
+            graph_matcher_loss_weight=args.graph_matcher_loss_weight,
+            training_spatial_bins=args.training_spatial_bins,
+            training_crop_size=0,
+            training_max_image_size=0,
+            forced_pair_paths=fake_paths,
+            prefetched_pairs=prefetched,
+        )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        train_ms = (time.perf_counter() - train_start) * 1000.0
+        gpu = _gpu_snapshot()
+        row = {
+            "step": step,
+            "loss": f"{metrics.get('loss', float('nan')):.6f}",
+            "top1_accuracy": f"{metrics.get('top1_accuracy', float('nan')):.6f}",
+            "mean_positive_rank": f"{metrics.get('mean_positive_rank', float('nan')):.3f}",
+            "points": f"{metrics.get('points', 0.0):.0f}",
+            "data_wait_ms": f"{data_wait_ms:.2f}",
+            "train_ms": f"{train_ms:.2f}",
+            "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
+            "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
+            **gpu,
+        }
+        rows.append(row)
+        if step == 1 or step % max(1, args.progress_every) == 0:
+            elapsed = time.perf_counter() - start
+            print(
+                f"train step={step}/{args.steps} loss={row['loss']} "
+                f"top1={row['top1_accuracy']} data_wait={data_wait_ms:.1f}ms "
+                f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
+                flush=True,
+            )
+
+    elapsed = time.perf_counter() - start
+    data_wait_values = [float(row["data_wait_ms"]) for row in rows]
+    train_values = [float(row["train_ms"]) for row in rows]
+    summary = {
+        "mode": "train",
+        "steps": len(rows),
+        "elapsed_s": elapsed,
+        "steps_per_second": len(rows) / max(elapsed, 1.0e-6),
+        "data_wait_ms": _summarize_float(data_wait_values),
+        "train_ms": _summarize_float(train_values),
+        "data_wait_to_train_ratio_mean": statistics.fmean(data_wait_values) / max(statistics.fmean(train_values), 1.0e-6),
+        "last_loss": rows[-1]["loss"] if rows else "-",
+        "last_top1_accuracy": rows[-1]["top1_accuracy"] if rows else "-",
+        "last_gpu": _gpu_snapshot(),
+    }
+    _write_rows(
+        args.output_dir / "train_metrics.csv",
+        rows,
+        [
+            "step",
+            "loss",
+            "top1_accuracy",
+            "mean_positive_rank",
+            "points",
+            "data_wait_ms",
+            "train_ms",
+            "valid_fraction_mean",
+            "worker_elapsed_ms_mean",
+            "gpu_util_percent",
+            "gpu_mem_used_mib",
+            "gpu_mem_total_mib",
+        ],
+    )
+    _write_html_report(
+        args.output_dir / "run.html",
+        title="Lazy Pose Pair GPU Feeding Benchmark",
+        args=args,
+        spec_count=len(specs),
+        summary=summary,
+        rows=rows,
+    )
+    return summary
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--render-manifest", type=Path, required=True)
+    parser.add_argument("--uint8-manifest", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--mode", choices=["preprocess", "train"], default="preprocess")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--reference-variant", default="nadir")
+    parser.add_argument("--target-variant", action="append", default=[])
+    parser.add_argument("--image-source", choices=["uint8", "render"], default="uint8")
+    parser.add_argument("--limit-pairs", type=int, default=0)
+    parser.add_argument("--pairs", type=int, default=64)
+    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--prefetch-batches", type=int, default=8)
+    parser.add_argument("--worker-cache-items", type=int, default=32)
+    parser.add_argument("--crop-size", type=int, default=1024)
+    parser.add_argument("--max-attempts", type=int, default=4)
+    parser.add_argument("--min-valid-fraction", type=float, default=0.02)
+    parser.add_argument("--absolute-depth-tolerance-m", type=float, default=100.0)
+    parser.add_argument("--relative-depth-tolerance", type=float, default=0.005)
+    parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--progress-every", type=int, default=5)
+
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
+    parser.add_argument("--batch-pairs", type=int, default=1)
+    parser.add_argument("--samples-per-pair", type=int, default=512)
+    parser.add_argument("--learning-rate", type=float, default=1.0e-4)
+    parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--min-intensity", type=float, default=0.01)
+    parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--teacher-weight", type=float, default=1.0)
+    parser.add_argument("--synthetic-loss-weight", type=float, default=1.0)
+    parser.add_argument("--diversity-weight", type=float, default=0.10)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--skip-nonfinite-steps", action="store_true")
+    parser.add_argument("--train-blended-descriptors", action="store_true")
+    parser.add_argument("--texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
+    parser.add_argument("--graph-matcher-loss-weight", type=float, default=0.0)
+    parser.add_argument("--training-spatial-bins", type=int, default=0)
+    parser.add_argument("--train-backbone", action="store_true")
+    parser.add_argument("--train-dual-fpn", action="store_true")
+    parser.add_argument("--train-descriptor-head", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--train-sparse-context", action="store_true")
+    parser.add_argument("--train-keypoint-head", action="store_true")
+    parser.add_argument("--train-geometry-head", action="store_true")
+    parser.add_argument("--train-texture-adapter", action="store_true")
+    parser.add_argument("--train-descriptor-fusion", action="store_true")
+    parser.add_argument("--train-quality-head", action="store_true")
+    parser.add_argument("--train-graph-matcher", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.workers <= 0:
+        raise ValueError("--workers must be positive")
+    if args.prefetch_batches <= 0:
+        raise ValueError("--prefetch-batches must be positive")
+    if args.crop_size <= 0:
+        raise ValueError("--crop-size must be positive")
+    if args.mode == "preprocess" and args.pairs <= 0:
+        raise ValueError("--pairs must be positive in preprocess mode")
+    if args.mode == "train" and args.steps <= 0:
+        raise ValueError("--steps must be positive in train mode")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    cv2.setNumThreads(1)
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+
+    uint8_paths = _read_uint8_manifest(args.uint8_manifest)
+    records = _read_render_manifest(args.render_manifest, uint8_paths)
+    target_variants = tuple(args.target_variant) if args.target_variant else DEFAULT_TARGET_VARIANTS
+    specs = build_pair_specs(
+        records,
+        split=args.split,
+        reference_variant=args.reference_variant,
+        target_variants=target_variants,
+        image_source=args.image_source,
+        limit_pairs=args.limit_pairs,
+        seed=args.seed,
+        shuffle=args.shuffle,
+    )
+    if not specs:
+        raise RuntimeError("no lazy pair specs found")
+
+    metadata = {
+        "render_manifest": str(args.render_manifest),
+        "uint8_manifest": str(args.uint8_manifest) if args.uint8_manifest is not None else "",
+        "records": len(records),
+        "specs": len(specs),
+        "target_variants": list(target_variants),
+    }
+    (args.output_dir / "input_summary.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(metadata, ensure_ascii=False), flush=True)
+
+    if args.mode == "preprocess":
+        summary = run_preprocess(args, specs)
+    else:
+        summary = run_train(args, specs)
+    print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
