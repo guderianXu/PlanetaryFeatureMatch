@@ -222,6 +222,8 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         "--log-csv",
         _quote(run_dir / "metrics.csv"),
     ]
+    if request.profile == "python-compare":
+        parts.extend(["--min-learning-rate-ratio", "1.0"])
     if request.full_v21:
         parts.append("--full-v21")
     if request.init_checkpoint:

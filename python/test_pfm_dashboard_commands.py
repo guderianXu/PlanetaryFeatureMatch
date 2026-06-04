@@ -59,6 +59,22 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--train-blended-descriptors", script)
         self.assertIn("--train-graph-matcher", script)
 
+    def test_create_cpp_python_compare_run_uses_constant_learning_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="cpp",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+                profile="python-compare",
+            )
+
+            runs = create_training_runs(request)
+
+        script = runs[0].script_text
+        self.assertIn("--training-profile python-compare", script)
+        self.assertIn("--min-learning-rate-ratio 1.0", script)
+
     def test_compare_backend_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             request = TrainingRequest(

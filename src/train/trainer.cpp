@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include <ATen/CPUGeneratorImpl.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <torch/nn/functional/upsampling.h>
 #include <torch/nn/utils/clip_grad.h>
 #include <torch/torch.h>
@@ -1019,17 +1021,51 @@ int64_t clamped_crop_origin(const torch::Tensor& center, int64_t crop_size, int6
     return std::max<int64_t>(0, std::min<int64_t>(origin, full_size - crop_size));
 }
 
-int64_t uniform_crop_origin(int64_t crop_size, int64_t full_size, const torch::Device& device)
+std::optional<at::Generator> make_training_random_generator(const torch::Device& device, uint64_t seed)
+{
+    if (device.is_cuda())
+    {
+        auto generator = at::cuda::detail::createCUDAGenerator(device.index());
+        generator.set_current_seed(seed);
+        return generator;
+    }
+    return at::detail::createCPUGenerator(seed);
+}
+
+torch::Tensor randint_with_training_generator(int64_t high, at::IntArrayRef size, const torch::TensorOptions& options,
+                                              std::optional<at::Generator>& generator)
+{
+    if (!generator.has_value())
+    {
+        return torch::randint(high, size, options);
+    }
+    return at::randint(high, size, *generator, options);
+}
+
+torch::Tensor randperm_with_training_generator(int64_t count, const torch::TensorOptions& options,
+                                               std::optional<at::Generator>& generator)
+{
+    if (!generator.has_value())
+    {
+        return torch::randperm(count, options);
+    }
+    return at::randperm(count, *generator, options);
+}
+
+int64_t uniform_crop_origin(int64_t crop_size, int64_t full_size, const torch::Device& device,
+                            std::optional<at::Generator>& generator)
 {
     if (crop_size >= full_size)
     {
         return 0;
     }
     const auto limit = full_size - crop_size + 1;
-    return torch::randint(limit, {1}, torch::TensorOptions().dtype(torch::kLong).device(device)).item<int64_t>();
+    return randint_with_training_generator(limit, {1}, torch::TensorOptions().dtype(torch::kLong).device(device),
+                                           generator)
+        .item<int64_t>();
 }
 
-SyntheticPair crop_training_pair(const SyntheticPair& pair, int64_t crop_size)
+SyntheticPair crop_training_pair(const SyntheticPair& pair, int64_t crop_size, std::optional<at::Generator>& generator)
 {
     using torch::indexing::Slice;
 
@@ -1057,17 +1093,18 @@ SyntheticPair crop_training_pair(const SyntheticPair& pair, int64_t crop_size)
     if (valid_full.any().item<bool>())
     {
         auto valid_yx = torch::nonzero(valid_full);
-        auto selected_index =
-            torch::randint(valid_yx.size(0), {1}, torch::TensorOptions().dtype(torch::kLong).device(valid_yx.device()))
-                .item<int64_t>();
+        auto selected_index = randint_with_training_generator(
+                                  valid_yx.size(0), {1},
+                                  torch::TensorOptions().dtype(torch::kLong).device(valid_yx.device()), generator)
+                                  .item<int64_t>();
         auto selected_yx = valid_yx.index({selected_index});
         ax0 = clamped_crop_origin(selected_yx.index({1}).to(torch::kFloat32), crop_w_a, width_a);
         ay0 = clamped_crop_origin(selected_yx.index({0}).to(torch::kFloat32), crop_h_a, height_a);
     }
     else
     {
-        ax0 = uniform_crop_origin(crop_w_a, width_a, pair.view_a.device());
-        ay0 = uniform_crop_origin(crop_h_a, height_a, pair.view_a.device());
+        ax0 = uniform_crop_origin(crop_w_a, width_a, pair.view_a.device(), generator);
+        ay0 = uniform_crop_origin(crop_h_a, height_a, pair.view_a.device(), generator);
     }
     const auto ax1 = ax0 + crop_w_a;
     const auto ay1 = ay0 + crop_h_a;
@@ -1130,9 +1167,10 @@ SyntheticPair limit_training_pair_size(const SyntheticPair& pair, int64_t resize
                          resize_training_valid_mask(pair.valid_mask, target_height, target_width)};
 }
 
-SyntheticPair prepare_training_pair_size(const SyntheticPair& pair, int64_t training_crop_size, int64_t resize)
+SyntheticPair prepare_training_pair_size(const SyntheticPair& pair, int64_t training_crop_size, int64_t resize,
+                                         std::optional<at::Generator>& generator)
 {
-    return limit_training_pair_size(crop_training_pair(pair, training_crop_size), resize);
+    return limit_training_pair_size(crop_training_pair(pair, training_crop_size, generator), resize);
 }
 
 
@@ -4069,14 +4107,15 @@ class IndexedSyntheticPairCacheTensorDataset : public TensorDataset
 
 std::vector<SyntheticPair> load_cached_pairs(const CompositeSyntheticPairCacheDataset& cache_dataset,
                                              std::size_t offset, std::size_t end, torch::Device device,
-                                             int64_t training_crop_size, int64_t resize)
+                                             int64_t training_crop_size, int64_t resize,
+                                             std::optional<at::Generator>& generator)
 {
     std::vector<SyntheticPair> pairs;
     pairs.reserve(end - offset);
     for (std::size_t index = offset; index < end; ++index)
     {
         pairs.push_back(prepare_training_pair_size(move_pair_to_device(cache_dataset.load(index), device),
-                                                   training_crop_size, resize));
+                                                   training_crop_size, resize, generator));
     }
     return pairs;
 }
@@ -4217,7 +4256,8 @@ torch::Tensor center_intensity_for_points(const torch::Tensor& image, const torc
 PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& view_a, const torch::Tensor& view_b,
                                                           const torch::Tensor& warp, const torch::Tensor& valid_mask,
                                                           int64_t batch, int64_t feature_height,
-                                                          int64_t feature_width, int64_t count, double min_intensity)
+                                                          int64_t feature_width, int64_t count, double min_intensity,
+                                                          std::optional<at::Generator>& generator)
 {
     const auto image_height = warp.size(1);
     const auto image_width = warp.size(2);
@@ -4257,7 +4297,8 @@ PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& v
         return PythonCompareSample{warp.new_empty({0, 2}), warp.new_empty({0, 2})};
     }
     const auto take = std::min<int64_t>(count, points_a_image.size(0));
-    auto order = torch::randperm(points_a_image.size(0), valid_indices.options()).narrow(0, 0, take);
+    auto order = randperm_with_training_generator(points_a_image.size(0), valid_indices.options(), generator)
+                     .narrow(0, 0, take);
     points_a_image = points_a_image.index_select(0, order);
     points_b_image = points_b_image.index_select(0, order);
     return PythonCompareSample{
@@ -4370,7 +4411,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                                                          const torch::Tensor& view_b, const torch::Tensor& warp,
                                                          const torch::Tensor& valid_mask, SparseHeadOutput sparse_a,
                                                          SparseHeadOutput sparse_b, const DenseHeadOutput& dense,
-                                                         const TrainConfig& config)
+                                                         const TrainConfig& config,
+                                                         std::optional<at::Generator>& generator)
 {
     auto zero = sparse_a.descriptors.sum() * 0.0;
     std::vector<torch::Tensor> descriptor_losses;
@@ -4390,7 +4432,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
     {
         auto sample = sample_python_compare_correspondences(view_a, view_b, warp, valid_mask, batch,
                                                             sparse_a.descriptors.size(2), sparse_a.descriptors.size(3),
-                                                            config.samples_per_pair, config.min_keypoint_intensity);
+                                                            config.samples_per_pair, config.min_keypoint_intensity,
+                                                            generator);
         if (sample.points_a.size(0) == 0)
         {
             continue;
@@ -4838,7 +4881,8 @@ DenseHeadOutput float_dense_output(DenseHeadOutput output);
 TrainingLossComponents
 training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>& pairs, const TrainConfig& config,
                          TrainModules* descriptor_anchor_modules = nullptr,
-                         int64_t descriptor_broad_far_negative_count = DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT)
+                         int64_t descriptor_broad_far_negative_count = DESCRIPTOR_BROAD_FAR_NEGATIVE_COUNT,
+                         std::optional<at::Generator>* training_generator = nullptr)
 {
     const auto training_profile = parse_training_profile(config.training_profile);
     const bool use_detector_targets = training_profile_uses_detector_targets(training_profile);
@@ -4947,8 +4991,10 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
     }
     if (training_profile_uses_python_aligned_pair_loss(training_profile))
     {
+        std::optional<at::Generator> fallback_generator;
+        auto& generator = training_generator != nullptr ? *training_generator : fallback_generator;
         return make_python_compare_training_loss(modules, view_a, view_b, warp, valid_mask, std::move(sparse_a),
-                                                 std::move(sparse_b), dense, config);
+                                                 std::move(sparse_b), dense, config, generator);
     }
     const auto sparse_mask = resize_mask_for_heatmap(valid_mask, sparse_a.heatmap);
     const auto dense_mask = resize_mask_for_heatmap(valid_mask, dense.confidence);
@@ -5665,7 +5711,7 @@ DenseHeadOutput float_dense_output(DenseHeadOutput output)
 }
 
 std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Device device, int64_t training_crop_size,
-                                                   int64_t resize)
+                                                   int64_t resize, std::optional<at::Generator>& generator)
 {
     auto view_a = batch.at("view_a").to(device);
     auto view_b = batch.at("view_b").to(device);
@@ -5678,7 +5724,7 @@ std::vector<SyntheticPair> pairs_from_tensor_batch(TensorBatch batch, torch::Dev
         pairs.push_back(prepare_training_pair_size(
             SyntheticPair{view_a.index({index}).contiguous(), view_b.index({index}).contiguous(),
                           warp_a_to_b.index({index}).contiguous(), valid_mask.index({index}).contiguous()},
-            training_crop_size, resize));
+            training_crop_size, resize, generator));
     }
     return pairs;
 }
@@ -6183,6 +6229,12 @@ SyntheticPair limit_training_pair_size_for_test(const SyntheticPair& pair, int64
     return limit_training_pair_size(pair, max_edge);
 }
 
+SyntheticPair crop_training_pair_with_seed_for_test(const SyntheticPair& pair, int64_t crop_size, uint64_t seed)
+{
+    auto generator = make_training_random_generator(pair.view_a.device(), seed);
+    return crop_training_pair(pair, crop_size, generator);
+}
+
 torch::Tensor stack_chw_batch_for_test(const std::vector<torch::Tensor>& tensors)
 {
     return stack_batch(tensors, BatchTensorLayout::Chw);
@@ -6404,6 +6456,7 @@ TrainResult train_model(const TrainConfig& config)
               << " values=" << count_trainable_parameter_values(parameters) << "\n";
     auto optimizer_options = torch::optim::AdamWOptions(config.learning_rate).weight_decay(config.weight_decay);
     auto optimizer = torch::optim::AdamW(parameters, optimizer_options);
+    auto training_generator = make_training_random_generator(device, static_cast<uint64_t>(config.seed));
     std::unique_ptr<CsvMetricLogger> csv_logger;
     std::unique_ptr<GpuMetricProvider> gpu_metric_provider;
     if (!config.log_csv.empty())
@@ -6606,7 +6659,7 @@ TrainResult train_model(const TrainConfig& config)
                     throw std::runtime_error("online dataloader exhausted before epoch end");
                 }
                 pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
-                                                config.resize);
+                                                config.resize, training_generator);
             }
             else if (pair_archive_loader)
             {
@@ -6616,7 +6669,7 @@ TrainResult train_model(const TrainConfig& config)
                     throw std::runtime_error("pair archive dataloader exhausted before epoch end");
                 }
                 pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
-                                                config.resize);
+                                                config.resize, training_generator);
             }
             else if (cache_loader)
             {
@@ -6626,12 +6679,12 @@ TrainResult train_model(const TrainConfig& config)
                     throw std::runtime_error("cache dataloader exhausted before epoch end");
                 }
                 pairs = pairs_from_tensor_batch(std::move(batch.value()), device, config.training_crop_size,
-                                                config.resize);
+                                                config.resize, training_generator);
             }
             else if (cache_dataset)
             {
                 pairs = load_cached_pairs(*cache_dataset, offset, end, device, config.training_crop_size,
-                                          config.resize);
+                                          config.resize, training_generator);
             }
             else
             {
@@ -6665,7 +6718,7 @@ TrainResult train_model(const TrainConfig& config)
             try
             {
                 loss = training_loss_from_pairs(modules, pairs, config, descriptor_anchor_modules.get(),
-                                                descriptor_broad_far_negative_count);
+                                                descriptor_broad_far_negative_count, &training_generator);
             }
             catch (const std::runtime_error& exc)
             {

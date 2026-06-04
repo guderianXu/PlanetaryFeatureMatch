@@ -144,6 +144,7 @@ int64_t training_variant_index_for_pair_for_test(std::size_t pair_index, std::si
                                                  int pairs_per_image);
 torch::Tensor limit_training_image_size_for_test(const torch::Tensor& image, int64_t max_edge);
 SyntheticPair limit_training_pair_size_for_test(const SyntheticPair& pair, int64_t max_edge);
+SyntheticPair crop_training_pair_with_seed_for_test(const SyntheticPair& pair, int64_t crop_size, uint64_t seed);
 torch::Tensor stack_chw_batch_for_test(const std::vector<torch::Tensor>& tensors);
 torch::Tensor stack_hw_batch_for_test(const std::vector<torch::Tensor>& tensors);
 torch::Tensor stack_hwc_batch_for_test(const std::vector<torch::Tensor>& tensors);
@@ -2333,6 +2334,25 @@ static void trainer_resizes_pair_warp_coordinates_in_view_b_space()
     PFM_REQUIRE_CLOSE(bottom_right_y, 1.0F, 1.0e-5F);
 }
 
+static void trainer_crop_uses_dedicated_training_generator()
+{
+    auto view_a = torch::arange(64, torch::kFloat32).reshape({1, 8, 8});
+    auto view_b = view_a.clone();
+    auto xy = torch::meshgrid({torch::arange(8, torch::kFloat32), torch::arange(8, torch::kFloat32)}, "ij");
+    auto warp = torch::stack({xy[1], xy[0]}, 2);
+    auto valid_mask = torch::ones({8, 8}, torch::kBool);
+    auto pair = pfm::SyntheticPair{view_a, view_b, warp, valid_mask};
+
+    const auto first = pfm::testing::crop_training_pair_with_seed_for_test(pair, 4, 20260603);
+    (void)torch::randn({1024}, torch::kFloat32);
+    const auto second = pfm::testing::crop_training_pair_with_seed_for_test(pair, 4, 20260603);
+
+    PFM_REQUIRE(torch::equal(first.view_a, second.view_a));
+    PFM_REQUIRE(torch::equal(first.view_b, second.view_b));
+    PFM_REQUIRE(torch::equal(first.warp_a_to_b, second.warp_a_to_b));
+    PFM_REQUIRE(torch::equal(first.valid_mask, second.valid_mask));
+}
+
 static void trainer_training_and_validation_indices_use_dataloader_split()
 {
     pfm::TrainConfig config;
@@ -3256,6 +3276,8 @@ void register_trainer_tests()
     register_test("trainer_uses_configured_resize", trainer_uses_configured_resize);
     register_test("trainer_resizes_pair_warp_coordinates_in_view_b_space",
                   trainer_resizes_pair_warp_coordinates_in_view_b_space);
+    register_test("trainer_crop_uses_dedicated_training_generator",
+                  trainer_crop_uses_dedicated_training_generator);
     register_test("trainer_training_and_validation_indices_use_dataloader_split",
                   trainer_training_and_validation_indices_use_dataloader_split);
     register_test("trainer_variant_indices_advance_across_epochs", trainer_variant_indices_advance_across_epochs);

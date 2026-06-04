@@ -116,7 +116,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         ->add_option("--lr-warmup-steps", options.lr_warmup_steps,
                      "Linear learning-rate warmup steps before cosine decay")
         ->check(CLI::NonNegativeNumber);
-    train
+    auto* min_learning_rate_ratio_option = train
         ->add_option("--min-learning-rate-ratio", options.min_learning_rate_ratio,
                      "Cosine decay floor as a ratio of --learning-rate")
         ->check(CLI::Range(0.0, 1.0));
@@ -260,7 +260,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_flag("--synthetic-pair-cache-rebuild", options.synthetic_pair_cache_rebuild,
                     "Rebuild cached synthetic training pairs");
     train->callback(
-        [&options]()
+        [&options, min_learning_rate_ratio_option]()
         {
             parseVisualizationSamples(options);
             if (options.full_v21)
@@ -270,6 +270,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                 options.graph_hidden_dim = 512;
                 options.graph_attention_layers = 8;
                 options.graph_keypoint_meta_dim = 16;
+            }
+            if (options.training_profile == "python-compare" && min_learning_rate_ratio_option->count() == 0)
+            {
+                options.min_learning_rate_ratio = 1.0;
             }
             options.command = Command::Train;
         });

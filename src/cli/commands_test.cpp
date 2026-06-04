@@ -340,7 +340,27 @@ static void parse_train_python_compare_profile_options()
     PFM_REQUIRE_CLOSE(parsed.synthetic_loss_weight, 0.1, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_loss_weight, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.temperature, 0.07, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE(parsed.seed == 20260603);
+}
+
+static void parse_train_python_compare_allows_explicit_min_learning_rate_ratio()
+{
+    const auto parsed = pfm::parse_cli({
+        "pfm",
+        "train",
+        "--pair-cache-dir",
+        "cache/train",
+        "--checkpoint",
+        "model.pt",
+        "--training-profile",
+        "python-compare",
+        "--min-learning-rate-ratio",
+        "0.25",
+    });
+
+    PFM_REQUIRE(parsed.training_profile == "python-compare");
+    PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 0.25, 1.0e-12);
 }
 
 static void parse_train_visualization_defaults_to_four_samples()
@@ -631,6 +651,8 @@ void register_cli_tests()
     register_test("parse_train_command", parse_train_command);
     register_test("parse_train_full_v21_sets_large_model_dimensions", parse_train_full_v21_sets_large_model_dimensions);
     register_test("parse_train_python_compare_profile_options", parse_train_python_compare_profile_options);
+    register_test("parse_train_python_compare_allows_explicit_min_learning_rate_ratio",
+                  parse_train_python_compare_allows_explicit_min_learning_rate_ratio);
     register_test("parse_train_visualization_defaults_to_four_samples",
                   parse_train_visualization_defaults_to_four_samples);
     register_test("parse_train_visualization_samples_all", parse_train_visualization_samples_all);
