@@ -100,6 +100,9 @@ static void nullGpuMetricProviderReturnsEmptyValues()
 
     PFM_REQUIRE(!metrics.utilization_percent.has_value());
     PFM_REQUIRE(!metrics.power_watts.has_value());
+    PFM_REQUIRE(!metrics.memory_used_mb.has_value());
+    PFM_REQUIRE(!metrics.memory_total_mb.has_value());
+    PFM_REQUIRE(!metrics.memory_free_mb.has_value());
 }
 
 static void defaultGpuMetricProviderIsConstructible()
@@ -110,6 +113,9 @@ static void defaultGpuMetricProviderIsConstructible()
     auto metrics = provider->sample();
     PFM_REQUIRE(!metrics.utilization_percent.has_value() || metrics.utilization_percent.value() >= 0.0);
     PFM_REQUIRE(!metrics.power_watts.has_value() || metrics.power_watts.value() >= 0.0);
+    PFM_REQUIRE(!metrics.memory_used_mb.has_value() || metrics.memory_used_mb.value() >= 0.0);
+    PFM_REQUIRE(!metrics.memory_total_mb.has_value() || metrics.memory_total_mb.value() >= 0.0);
+    PFM_REQUIRE(!metrics.memory_free_mb.has_value() || metrics.memory_free_mb.value() >= 0.0);
 }
 
 static void metricLoggerGroupForwardsToOwnedLoggers()

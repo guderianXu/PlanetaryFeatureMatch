@@ -11,6 +11,9 @@ struct GpuMetrics
 {
     std::optional<double> utilization_percent;
     std::optional<double> power_watts;
+    std::optional<double> memory_used_mb;
+    std::optional<double> memory_total_mb;
+    std::optional<double> memory_free_mb;
 };
 
 struct TrainingMetric

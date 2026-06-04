@@ -183,6 +183,9 @@ const std::vector<std::string> TRAINING_CSV_COLUMNS = {
     "offset_error_px",
     "gpu_utilization_percent",
     "gpu_power_watts",
+    "gpu_memory_used_mb",
+    "gpu_memory_total_mb",
+    "gpu_memory_free_mb",
 };
 
 int64_t descriptor_broad_far_negative_count_for_progress(double progress)
@@ -578,6 +581,18 @@ TrainingMetric make_iteration_metric(const TrainConfig& config, int epoch, int i
     if (gpu_metrics.power_watts.has_value())
     {
         metric.values["gpu_power_watts"] = gpu_metrics.power_watts.value();
+    }
+    if (gpu_metrics.memory_used_mb.has_value())
+    {
+        metric.values["gpu_memory_used_mb"] = gpu_metrics.memory_used_mb.value();
+    }
+    if (gpu_metrics.memory_total_mb.has_value())
+    {
+        metric.values["gpu_memory_total_mb"] = gpu_metrics.memory_total_mb.value();
+    }
+    if (gpu_metrics.memory_free_mb.has_value())
+    {
+        metric.values["gpu_memory_free_mb"] = gpu_metrics.memory_free_mb.value();
     }
     return metric;
 }

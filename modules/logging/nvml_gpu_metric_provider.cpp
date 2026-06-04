@@ -10,6 +10,16 @@ namespace pfm
 {
 
 #ifdef PFM_HAS_NVML
+namespace
+{
+
+double bytesToMiB(unsigned long long bytes)
+{
+    return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+} // namespace
+
 class NvmlGpuMetricProvider : public GpuMetricProvider
 {
   public:
@@ -48,6 +58,14 @@ class NvmlGpuMetricProvider : public GpuMetricProvider
         if (nvmlDeviceGetPowerUsage(_device, &milliwatts) == NVML_SUCCESS)
         {
             result.power_watts = static_cast<double>(milliwatts) / 1000.0;
+        }
+
+        nvmlMemory_t memory{};
+        if (nvmlDeviceGetMemoryInfo(_device, &memory) == NVML_SUCCESS)
+        {
+            result.memory_used_mb = bytesToMiB(memory.used);
+            result.memory_total_mb = bytesToMiB(memory.total);
+            result.memory_free_mb = bytesToMiB(memory.free);
         }
         return result;
     }
