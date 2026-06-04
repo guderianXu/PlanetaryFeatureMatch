@@ -426,6 +426,10 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("gradient_clip_norm must be non-negative and finite");
     }
+    if (config.seed < 0)
+    {
+        throw std::invalid_argument("seed must be non-negative");
+    }
     if (config.dataloader_workers < 0)
     {
         throw std::invalid_argument("dataloader_workers must be non-negative");
@@ -4245,7 +4249,7 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     auto limited_points_b = points_b.narrow(0, 0, count);
     auto meta_a = make_python_compare_graph_metadata(limited_points_a, meta_dim).to(desc_a.device());
     auto meta_b = make_python_compare_graph_metadata(limited_points_b, meta_dim).to(desc_b.device());
-    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b, false);
+    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -5458,7 +5462,7 @@ DataLoaderOptions make_dataloader_options(const TrainConfig& config)
 
 std::unique_ptr<Sampler> make_cache_training_sampler(std::size_t count, const TrainConfig& config)
 {
-    return std::make_unique<ShuffleSampler>(count, static_cast<uint64_t>(config.split_seed) ^ 0x9E3779B97F4A7C15ULL);
+    return std::make_unique<ShuffleSampler>(count, static_cast<uint64_t>(config.seed + 1701));
 }
 
 std::vector<std::string> make_training_cache_dirs(const TrainConfig& config)
@@ -5694,6 +5698,7 @@ void save_checkpoint(const TrainConfig& config, TrainModules& modules)
     config_archive.write("graph_hidden_dim", torch::tensor({config.graph_hidden_dim}, torch::kInt64));
     config_archive.write("graph_attention_layers", torch::tensor({config.graph_attention_layers}, torch::kInt64));
     config_archive.write("graph_keypoint_meta_dim", torch::tensor({config.graph_keypoint_meta_dim}, torch::kInt64));
+    config_archive.write("seed", torch::tensor({config.seed}, torch::kInt64));
     config_archive.write(
         "training_profile_id",
         torch::tensor({training_profile_id(parse_training_profile(config.training_profile))}, torch::kInt64));
@@ -6235,6 +6240,14 @@ bool training_profile_uses_dense_quality_forward_for_test(const std::string& tra
     return training_profile_uses_dense_quality_forward(parse_training_profile(training_profile));
 }
 
+torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImpl& graph_matcher,
+                                                      const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+                                                      const torch::Tensor& points_a, const torch::Tensor& points_b,
+                                                      int64_t meta_dim)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim);
+}
+
 } // namespace testing
 
 TrainResult train_model(const TrainConfig& config)
@@ -6244,6 +6257,7 @@ TrainResult train_model(const TrainConfig& config)
     int64_t completed_batches = 0;
     double accumulated_batch_seconds = 0.0;
     const auto device = resolve_compute_device(config.device);
+    torch::manual_seed(static_cast<uint64_t>(config.seed));
     std::unique_ptr<ImageDataset> dataset;
     if (!config.image_dir.empty())
     {
@@ -6368,7 +6382,7 @@ TrainResult train_model(const TrainConfig& config)
               << " validation_images=" << val_images << " cache_entries=" << cache_specs.size()
               << " pair_archive_dirs=" << config.pair_cache_dirs.size() << " pairs_per_epoch=" << epoch_size
               << " pairs_per_image=" << config.pairs_per_image << " training_profile=" << config.training_profile
-              << " training_crop_size=" << config.training_crop_size
+              << " training_crop_size=" << config.training_crop_size << " seed=" << config.seed
               << " memory_cache_items=" << config.pair_memory_cache_size
               << " dataloader_workers=" << config.dataloader_workers
               << " prefetch_batches=" << config.prefetch_batches

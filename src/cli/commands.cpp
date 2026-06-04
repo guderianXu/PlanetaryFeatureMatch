@@ -159,6 +159,8 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                       "Extreme pair ratio used by mixed augmentation profile");
     train->add_option("--train-ratio", options.train_ratio, "Training split ratio")->check(CLI::Range(0.1, 1.0));
     train->add_option("--val-ratio", options.val_ratio, "Validation split ratio")->check(CLI::Range(0.0, 0.5));
+    train->add_option("--seed", options.seed, "Training random seed for model initialization and sampling")
+        ->check(CLI::NonNegativeNumber);
     train->add_option("--split-seed", options.split_seed, "Random seed for train/val split");
     train->add_option("--synthetic-pair-cache-dir", options.synthetic_pair_cache_dir,
                       "Directory for cached synthetic training pairs");

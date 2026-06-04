@@ -84,6 +84,7 @@ struct CliOptions
     double rotation_step_degrees = 15.0;
     double train_ratio = 1.0;
     double val_ratio = 0.0;
+    int seed = 1234;
     int split_seed = 42;
     std::string synthetic_pair_cache_dir;
     std::vector<std::string> extra_synthetic_pair_cache_dirs;

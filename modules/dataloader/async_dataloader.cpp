@@ -7,9 +7,16 @@
 namespace pfm
 {
 
+struct AsyncDataLoader::BatchRequest
+{
+    size_t sequence = 0;
+    std::vector<size_t> indices;
+};
+
 struct AsyncDataLoader::QueueItem
 {
     std::optional<TensorBatch> batch;
+    size_t sequence = 0;
     bool worker_finished = false;
 };
 
@@ -46,6 +53,9 @@ void AsyncDataLoader::reset()
     stopAsyncEpoch();
     _indices.clear();
     _cursor = 0;
+    _next_batch_sequence = 0;
+    _next_emit_sequence = 0;
+    _pending_batches.clear();
     _finished_workers = 0;
     _exhausted = true;
     {
@@ -75,7 +85,7 @@ std::optional<TensorBatch> AsyncDataLoader::next()
             _exhausted = true;
             return std::nullopt;
         }
-        return makeBatch(*batch_indices);
+        return makeBatch(batch_indices->indices);
     }
 
     if (_exhausted)
@@ -83,22 +93,60 @@ std::optional<TensorBatch> AsyncDataLoader::next()
         throwIfWorkerFailed();
         return std::nullopt;
     }
+    if (_finished_workers == _options.worker_count)
+    {
+        auto pending = _pending_batches.find(_next_emit_sequence);
+        if (pending != _pending_batches.end())
+        {
+            TensorBatch batch = std::move(pending->second);
+            _pending_batches.erase(pending);
+            ++_next_emit_sequence;
+            return batch;
+        }
+        _exhausted = true;
+        throwIfWorkerFailed();
+        return std::nullopt;
+    }
 
     while (auto item = _queue->pop())
     {
+        if (item->batch && item->sequence == _next_emit_sequence)
+        {
+            ++_next_emit_sequence;
+            return std::move(*item->batch);
+        }
+        if (item->batch)
+        {
+            _pending_batches.emplace(item->sequence, std::move(*item->batch));
+            auto pending = _pending_batches.find(_next_emit_sequence);
+            if (pending != _pending_batches.end())
+            {
+                TensorBatch batch = std::move(pending->second);
+                _pending_batches.erase(pending);
+                ++_next_emit_sequence;
+                return batch;
+            }
+            continue;
+        }
         if (item->worker_finished)
         {
             ++_finished_workers;
             if (_finished_workers == _options.worker_count)
             {
+                auto pending = _pending_batches.find(_next_emit_sequence);
+                if (pending != _pending_batches.end())
+                {
+                    TensorBatch batch = std::move(pending->second);
+                    _pending_batches.erase(pending);
+                    ++_next_emit_sequence;
+                    return batch;
+                }
                 _exhausted = true;
                 throwIfWorkerFailed();
                 return std::nullopt;
             }
             continue;
         }
-        throwIfWorkerFailed();
-        return std::move(item->batch);
     }
 
     _exhausted = true;
@@ -122,7 +170,7 @@ TensorBatch AsyncDataLoader::makeBatch(const std::vector<size_t>& batch_indices)
     return batch;
 }
 
-std::optional<std::vector<size_t>> AsyncDataLoader::nextBatchIndices()
+std::optional<AsyncDataLoader::BatchRequest> AsyncDataLoader::nextBatchIndices()
 {
     std::lock_guard<std::mutex> lock(_cursor_mutex);
     if (_cursor >= _indices.size())
@@ -138,10 +186,13 @@ std::optional<std::vector<size_t>> AsyncDataLoader::nextBatchIndices()
     }
 
     const auto current_size = std::min(_options.batch_size, remaining);
-    std::vector<size_t> batch_indices(_indices.begin() + static_cast<std::ptrdiff_t>(_cursor),
-                                      _indices.begin() + static_cast<std::ptrdiff_t>(_cursor + current_size));
+    BatchRequest request;
+    request.sequence = _next_batch_sequence;
+    ++_next_batch_sequence;
+    request.indices.assign(_indices.begin() + static_cast<std::ptrdiff_t>(_cursor),
+                           _indices.begin() + static_cast<std::ptrdiff_t>(_cursor + current_size));
     _cursor += current_size;
-    return batch_indices;
+    return request;
 }
 
 void AsyncDataLoader::startAsyncEpoch()
@@ -187,10 +238,11 @@ void AsyncDataLoader::workerLoop()
 {
     try
     {
-        while (auto batch_indices = nextBatchIndices())
+        while (auto batch_request = nextBatchIndices())
         {
             QueueItem item;
-            item.batch = makeBatch(*batch_indices);
+            item.sequence = batch_request->sequence;
+            item.batch = makeBatch(batch_request->indices);
             _queue->push(std::move(item));
         }
     }

@@ -98,6 +98,26 @@ class BlockingDataset : public pfm::TensorDataset
     std::atomic<size_t> _started_loads{0};
 };
 
+class SlowFirstDataset : public pfm::TensorDataset
+{
+  public:
+    size_t size() const override
+    {
+        return 4;
+    }
+
+    pfm::TensorBatch get(size_t index) override
+    {
+        if (index == 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
+        pfm::TensorBatch sample;
+        sample["value"] = torch::full({1, 1}, static_cast<int64_t>(index), torch::kInt64);
+        return sample;
+    }
+};
+
 class ResetThrowingSampler : public pfm::Sampler
 {
   public:
@@ -162,6 +182,30 @@ static void shuffleSamplerIsDeterministicForSeed()
 
     PFM_REQUIRE(first_indices == second_indices);
     PFM_REQUIRE(first_indices != std::vector<size_t>({0, 1, 2, 3, 4, 5, 6, 7}));
+}
+
+static void shuffleSamplerAdvancesOrderAcrossEpochs()
+{
+    pfm::ShuffleSampler sampler(16, 42);
+
+    auto first_epoch = sampler.indices();
+    auto second_epoch = sampler.indices();
+    auto first_sorted = first_epoch;
+    auto second_sorted = second_epoch;
+    std::sort(first_sorted.begin(), first_sorted.end());
+    std::sort(second_sorted.begin(), second_sorted.end());
+
+    PFM_REQUIRE(first_sorted == second_sorted);
+    PFM_REQUIRE(first_epoch != second_epoch);
+}
+
+static void shuffleSamplerMatchesPythonRandomShuffle()
+{
+    pfm::ShuffleSampler sampler(8, 42);
+
+    PFM_REQUIRE(sampler.indices() == std::vector<size_t>({3, 4, 6, 7, 2, 5, 0, 1}));
+    PFM_REQUIRE(sampler.indices() == std::vector<size_t>({3, 7, 2, 0, 4, 6, 5, 1}));
+    PFM_REQUIRE(sampler.indices() == std::vector<size_t>({3, 5, 2, 4, 1, 6, 7, 0}));
 }
 
 static void splitIndicesCoverDatasetOnce()
@@ -379,6 +423,19 @@ static void asyncDataLoaderAsyncReturnsAllSamples()
     PFM_REQUIRE(std::set<int64_t>(values.begin(), values.end()) == std::set<int64_t>({0, 1, 2, 3, 4, 5}));
 }
 
+static void asyncDataLoaderAsyncPreservesSamplerOrder()
+{
+    pfm::DataLoaderOptions options;
+    options.batch_size = 1;
+    options.worker_count = 2;
+    options.prefetch_batches = 2;
+
+    pfm::AsyncDataLoader loader(std::make_shared<SlowFirstDataset>(), std::make_unique<pfm::SequentialSampler>(4),
+                                valueCollator(), options);
+
+    PFM_REQUIRE(collectValues(loader) == std::vector<int64_t>({0, 1, 2, 3}));
+}
+
 static void asyncDataLoaderDatasetExceptionsSurfaceFromNext()
 {
     pfm::DataLoaderOptions options;
@@ -517,6 +574,8 @@ void register_dataloader_tests()
 {
     register_test("sequential sampler returns ordered indices", sequentialSamplerReturnsOrderedIndices);
     register_test("shuffle sampler is deterministic for seed", shuffleSamplerIsDeterministicForSeed);
+    register_test("shuffle sampler advances order across epochs", shuffleSamplerAdvancesOrderAcrossEpochs);
+    register_test("shuffle sampler matches python random shuffle", shuffleSamplerMatchesPythonRandomShuffle);
     register_test("split indices cover dataset once", splitIndicesCoverDatasetOnce);
     register_test("split rejects invalid ratios", splitRejectsInvalidRatios);
     register_test("split rejects non-finite ratios", splitRejectsNonFiniteRatios);
@@ -533,6 +592,7 @@ void register_dataloader_tests()
     register_test("async data loader drop last skips incomplete final batch",
                   asyncDataLoaderDropLastSkipsIncompleteFinalBatch);
     register_test("async data loader async returns all samples", asyncDataLoaderAsyncReturnsAllSamples);
+    register_test("async data loader async preserves sampler order", asyncDataLoaderAsyncPreservesSamplerOrder);
     register_test("async data loader dataset exceptions surface from next",
                   asyncDataLoaderDatasetExceptionsSurfaceFromNext);
     register_test("async data loader reset iterates again from beginning",

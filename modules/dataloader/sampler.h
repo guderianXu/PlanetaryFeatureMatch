@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <vector>
 
 namespace pfm
@@ -36,18 +37,25 @@ class SequentialSampler : public Sampler
 class ShuffleSampler : public Sampler
 {
   public:
-    /// Creates a deterministic shuffled sampler.
+    /// Creates a deterministic shuffled sampler using Python random.Random compatible shuffle order.
     /// \param count Number of samples.
     /// \param seed Random seed.
     ShuffleSampler(size_t count, uint64_t seed);
 
-    /// Returns shuffled indices.
-    /// \return Deterministically shuffled indices.
+    /// Returns shuffled indices for the next epoch.
+    /// \return Deterministically shuffled indices for the sampler's current epoch.
     std::vector<size_t> indices() const override;
 
   private:
+    void seedPythonRandom(uint64_t seed);
+    uint32_t nextPythonRandomWord() const;
+    uint64_t pythonGetRandBits(int bits) const;
+    uint64_t pythonRandBelow(uint64_t upper) const;
+
     size_t _count;
     uint64_t _seed;
+    mutable std::array<uint32_t, 624> _python_mt{};
+    mutable int _python_mti = 625;
 };
 
 class SubsetSampler : public Sampler

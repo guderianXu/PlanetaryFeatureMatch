@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <exception>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -53,10 +54,11 @@ class AsyncDataLoader
     std::optional<TensorBatch> next();
 
   private:
+    struct BatchRequest;
     struct QueueItem;
 
     TensorBatch makeBatch(const std::vector<size_t>& batch_indices);
-    std::optional<std::vector<size_t>> nextBatchIndices();
+    std::optional<BatchRequest> nextBatchIndices();
     void startAsyncEpoch();
     void stopAsyncEpoch();
     void workerLoop();
@@ -74,6 +76,9 @@ class AsyncDataLoader
     std::exception_ptr _first_exception;
     std::unique_ptr<BlockingQueue<QueueItem>> _queue;
     std::vector<std::thread> _workers;
+    std::map<size_t, TensorBatch> _pending_batches;
+    size_t _next_batch_sequence = 0;
+    size_t _next_emit_sequence = 0;
     size_t _finished_workers = 0;
     bool _exhausted = false;
 };

@@ -306,6 +306,8 @@ static void parse_train_python_compare_profile_options()
         "1.0",
         "--temperature",
         "0.07",
+        "--seed",
+        "20260603",
     });
 
     PFM_REQUIRE(parsed.training_profile == "python-compare");
@@ -313,6 +315,7 @@ static void parse_train_python_compare_profile_options()
     PFM_REQUIRE_CLOSE(parsed.synthetic_loss_weight, 0.1, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_loss_weight, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.temperature, 0.07, 1.0e-12);
+    PFM_REQUIRE(parsed.seed == 20260603);
 }
 
 static void parse_train_visualization_defaults_to_four_samples()

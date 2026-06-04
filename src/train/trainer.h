@@ -114,6 +114,8 @@ struct TrainConfig
     double train_ratio = 1.0;
     /// 验证 split 比例。
     double val_ratio = 0.0;
+    /// 训练随机种子，用于模型初始化、训练采样和 pair cache shuffle。
+    int seed = 1234;
     /// train/val split 随机种子。
     int split_seed = 42;
     /// 数据加载器后台 worker 数。

@@ -761,6 +761,7 @@ int run_train_command(const CliOptions& options)
         config.rotation_step_degrees = options.rotation_step_degrees;
         config.train_ratio = options.train_ratio;
         config.val_ratio = options.val_ratio;
+        config.seed = options.seed;
         config.split_seed = options.split_seed;
         config.synthetic_pair_cache_dir = options.synthetic_pair_cache_dir;
         config.extra_synthetic_pair_cache_dirs = options.extra_synthetic_pair_cache_dirs;

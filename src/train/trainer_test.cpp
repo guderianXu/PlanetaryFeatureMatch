@@ -21,6 +21,7 @@
 #include "feature_io/match_codec.h"
 #include "models/head_outputs.h"
 #include "models/planetary_graph_matcher.h"
+#include "models/pfm_model_v21.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"
 
@@ -191,6 +192,10 @@ std::vector<std::size_t> make_validation_image_indices_for_test(std::size_t tota
                                                                 const pfm::TrainConfig& config);
 double training_learning_rate_for_step_for_test(const pfm::TrainConfig& config, int64_t step, int64_t total_steps);
 bool training_profile_uses_dense_quality_forward_for_test(const std::string& training_profile);
+torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatcherImpl& graph_matcher,
+                                                      const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+                                                      const torch::Tensor& points_a, const torch::Tensor& points_b,
+                                                      int64_t meta_dim);
 
 } // namespace pfm::testing
 
@@ -1624,6 +1629,27 @@ static void trainer_python_compare_profile_skips_dense_quality_forward()
     PFM_REQUIRE(pfm::testing::training_profile_uses_dense_quality_forward_for_test("graph"));
 }
 
+static void trainer_python_compare_graph_loss_uses_candidate_mask_like_python()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->eval();
+
+    auto descriptors_a = torch::zeros({3, 8}, torch::kFloat32);
+    auto descriptors_b = torch::zeros({3, 8}, torch::kFloat32);
+    descriptors_a.index_put_({0, 0}, 1.0F);
+    descriptors_a.index_put_({1, 0}, -1.0F);
+    descriptors_a.index_put_({2, 0}, -1.0F);
+    descriptors_b.index_put_({0, 0}, -1.0F);
+    descriptors_b.index_put_({1, 0}, 1.0F);
+    descriptors_b.index_put_({2, 0}, 1.0F);
+    auto points = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}}, torch::kFloat32);
+
+    const auto loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a, descriptors_b,
+                                                                            points, points, 16);
+
+    PFM_REQUIRE(loss.item<float>() > 1000.0F);
+}
+
 static void trainer_descriptor_candidates_do_not_repeat_positive_target()
 {
     auto target_indices = torch::tensor({{0, 4}}, torch::kLong);
@@ -2282,7 +2308,7 @@ static void trainer_curriculum_disables_fixed_online_loader()
 static void trainer_cache_training_sampler_shuffles_cached_pairs_deterministically()
 {
     pfm::TrainConfig config;
-    config.split_seed = 123;
+    config.seed = 123;
 
     auto first = pfm::testing::make_cache_training_sample_indices_for_test(16, config);
     auto second = pfm::testing::make_cache_training_sample_indices_for_test(16, config);
@@ -2291,6 +2317,27 @@ static void trainer_cache_training_sampler_shuffles_cached_pairs_deterministical
     PFM_REQUIRE(torch::equal(first, second));
     PFM_REQUIRE(!torch::equal(first, sequential));
     PFM_REQUIRE(torch::equal(std::get<0>(first.sort()), sequential));
+}
+
+static void trainer_cache_training_sampler_uses_training_seed_not_split_seed()
+{
+    pfm::TrainConfig base;
+    base.seed = 123;
+    base.split_seed = 7;
+
+    auto same_seed_different_split = base;
+    same_seed_different_split.split_seed = 99;
+    auto different_seed_same_split = base;
+    different_seed_same_split.seed = 456;
+
+    const auto base_indices = pfm::testing::make_cache_training_sample_indices_for_test(32, base);
+    const auto same_seed_indices =
+        pfm::testing::make_cache_training_sample_indices_for_test(32, same_seed_different_split);
+    const auto different_seed_indices =
+        pfm::testing::make_cache_training_sample_indices_for_test(32, different_seed_same_split);
+
+    PFM_REQUIRE(torch::equal(base_indices, same_seed_indices));
+    PFM_REQUIRE(!torch::equal(base_indices, different_seed_indices));
 }
 
 static void trainer_hard_cache_dirs_are_repeated_after_base_and_extra_caches()
@@ -3029,6 +3076,8 @@ void register_trainer_tests()
                   trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples);
     register_test("trainer_python_compare_profile_skips_dense_quality_forward",
                   trainer_python_compare_profile_skips_dense_quality_forward);
+    register_test("trainer_python_compare_graph_loss_uses_candidate_mask_like_python",
+                  trainer_python_compare_graph_loss_uses_candidate_mask_like_python);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",
@@ -3122,6 +3171,8 @@ void register_trainer_tests()
     register_test("trainer_curriculum_disables_fixed_online_loader", trainer_curriculum_disables_fixed_online_loader);
     register_test("trainer_cache_training_sampler_shuffles_cached_pairs_deterministically",
                   trainer_cache_training_sampler_shuffles_cached_pairs_deterministically);
+    register_test("trainer_cache_training_sampler_uses_training_seed_not_split_seed",
+                  trainer_cache_training_sampler_uses_training_seed_not_split_seed);
     register_test("trainer_hard_cache_dirs_are_repeated_after_base_and_extra_caches",
                   trainer_hard_cache_dirs_are_repeated_after_base_and_extra_caches);
     register_test("trainer_hard_cache_indices_repeat_only_selected_pairs",
