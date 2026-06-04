@@ -376,6 +376,10 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_loss_weight must be non-negative and finite");
     }
+    if (!std::isfinite(config.training_texture_blend_weight) || config.training_texture_blend_weight < 0.0)
+    {
+        throw std::invalid_argument("training_texture_blend_weight must be non-negative and finite");
+    }
     if (!std::isfinite(config.temperature) || config.temperature <= 0.0)
     {
         throw std::invalid_argument("temperature must be positive and finite");
@@ -3537,6 +3541,18 @@ void append_module_parameters(ModuleHolderT& module, std::vector<torch::Tensor>&
     }
 }
 
+template <typename ModuleHolderT>
+void append_trainable_parameter_names(const std::string& prefix, ModuleHolderT& module, std::vector<std::string>& names)
+{
+    for (auto& named_parameter : module->named_parameters())
+    {
+        if (named_parameter.value().requires_grad())
+        {
+            names.push_back(prefix + "." + named_parameter.key());
+        }
+    }
+}
+
 std::vector<torch::Tensor> module_parameters(TrainModules& modules)
 {
     std::vector<torch::Tensor> parameters;
@@ -3550,6 +3566,21 @@ std::vector<torch::Tensor> module_parameters(TrainModules& modules)
     append_module_parameters(modules.semi_dense_branch, parameters);
     append_module_parameters(modules.graph_matcher, parameters);
     return parameters;
+}
+
+std::vector<std::string> trainable_parameter_names(TrainModules& modules)
+{
+    std::vector<std::string> names;
+    append_trainable_parameter_names("backbone", modules.backbone, names);
+    append_trainable_parameter_names("dual_fpn", modules.dual_fpn, names);
+    append_trainable_parameter_names("sparse_head", modules.sparse_head, names);
+    append_trainable_parameter_names("texture_adapter", modules.texture_adapter, names);
+    append_trainable_parameter_names("descriptor_fusion", modules.descriptor_fusion, names);
+    append_trainable_parameter_names("dense_head", modules.dense_head, names);
+    append_trainable_parameter_names("quality_head", modules.quality_head, names);
+    append_trainable_parameter_names("semi_dense_branch", modules.semi_dense_branch, names);
+    append_trainable_parameter_names("graph_matcher", modules.graph_matcher, names);
+    return names;
 }
 
 void set_module_trainable(torch::nn::Module& module, bool trainable)
@@ -3568,6 +3599,38 @@ bool is_sparse_descriptor_parameter(const std::string& name)
 bool is_sparse_viewpoint_descriptor_parameter(const std::string& name)
 {
     return name.rfind("descriptor_viewpoint_", 0) == 0;
+}
+
+bool is_sparse_context_parameter(const std::string& name)
+{
+    return name.rfind("context.", 0) == 0 || name.rfind("descriptor_context.", 0) == 0 ||
+           name.rfind("geometry_context.", 0) == 0;
+}
+
+bool is_sparse_keypoint_parameter(const std::string& name)
+{
+    return name.rfind("heatmap.", 0) == 0 || name.rfind("keypoint_context.", 0) == 0 ||
+           name.rfind("keypoint_offsets.", 0) == 0;
+}
+
+bool is_sparse_geometry_parameter(const std::string& name)
+{
+    return name.rfind("scale.", 0) == 0 || name.rfind("orientation.", 0) == 0 ||
+           name.rfind("affine.", 0) == 0 || name.rfind("geometry_context.", 0) == 0;
+}
+
+bool is_python_compare_sparse_parameter(const std::string& name, const TrainConfig& config)
+{
+    bool trainable = !config.freeze_descriptor_head && is_sparse_descriptor_parameter(name);
+    trainable = trainable || (config.train_sparse_context && is_sparse_context_parameter(name));
+    trainable = trainable || (config.train_keypoint_head && is_sparse_keypoint_parameter(name));
+    trainable = trainable || (config.train_geometry_head && is_sparse_geometry_parameter(name));
+    return trainable;
+}
+
+bool has_explicit_finetune_mode(const TrainConfig& config)
+{
+    return config.descriptor_only_finetune || config.viewpoint_head_only_finetune || config.graph_only_finetune;
 }
 
 void apply_descriptor_only_finetune(TrainModules& modules, const TrainConfig& config)
@@ -3681,6 +3744,51 @@ void set_all_modules_eval(TrainModules& modules)
     modules.quality_head->eval();
     modules.semi_dense_branch->eval();
     modules.graph_matcher->eval();
+}
+
+void apply_python_compare_trainable_selection(TrainModules& modules, const TrainConfig& config)
+{
+    const bool use_python_compare_profile = parse_training_profile(config.training_profile) == TrainingProfile::PythonCompare;
+    if (!use_python_compare_profile || has_explicit_finetune_mode(config))
+    {
+        return;
+    }
+
+    // Mirrors python/pfm_pytorch_training.py::descriptor_parameters for python-compare runs.
+    set_all_modules_trainable(modules, false);
+    set_module_trainable(*modules.backbone, config.train_backbone);
+    set_module_trainable(*modules.dual_fpn, config.train_dual_fpn);
+    for (auto& named_parameter : modules.sparse_head->named_parameters())
+    {
+        named_parameter.value().set_requires_grad(is_python_compare_sparse_parameter(named_parameter.key(), config));
+    }
+    set_module_trainable(*modules.texture_adapter, config.train_texture_adapter);
+    set_module_trainable(*modules.descriptor_fusion, config.train_descriptor_fusion);
+    set_module_trainable(*modules.quality_head, config.train_quality_head);
+    set_module_trainable(*modules.graph_matcher, config.train_graph_matcher);
+}
+
+void apply_trainable_parameter_selection(TrainModules& modules, const TrainConfig& config)
+{
+    apply_python_compare_trainable_selection(modules, config);
+    apply_descriptor_only_finetune(modules, config);
+    apply_viewpoint_head_only_finetune(modules, config);
+    apply_graph_only_finetune(modules, config);
+}
+
+int64_t count_trainable_parameter_values(const std::vector<torch::Tensor>& parameters)
+{
+    int64_t count = 0;
+    for (const auto& parameter : parameters)
+    {
+        count += parameter.numel();
+    }
+    return count;
+}
+
+double effective_python_compare_graph_loss_weight(const TrainConfig& config)
+{
+    return (config.train_graph_matcher || config.graph_only_finetune) ? config.graph_matcher_loss_weight : 0.0;
 }
 
 bool should_use_descriptor_finetune_anchor(const TrainConfig& config)
@@ -4265,25 +4373,6 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                                                          const TrainConfig& config)
 {
     auto zero = sparse_a.descriptors.sum() * 0.0;
-    auto attach_trainable_zero = [&zero](auto& module)
-    {
-        for (auto& parameter : module->parameters())
-        {
-            if (parameter.requires_grad())
-            {
-                zero = zero + parameter.sum() * 0.0;
-            }
-        }
-    };
-    attach_trainable_zero(modules.backbone);
-    attach_trainable_zero(modules.dual_fpn);
-    attach_trainable_zero(modules.sparse_head);
-    attach_trainable_zero(modules.texture_adapter);
-    attach_trainable_zero(modules.descriptor_fusion);
-    attach_trainable_zero(modules.dense_head);
-    attach_trainable_zero(modules.quality_head);
-    attach_trainable_zero(modules.semi_dense_branch);
-    attach_trainable_zero(modules.graph_matcher);
     std::vector<torch::Tensor> descriptor_losses;
     std::vector<torch::Tensor> graph_losses;
     std::vector<torch::Tensor> accuracies;
@@ -4293,6 +4382,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
     std::vector<torch::Tensor> ranks;
     std::vector<torch::Tensor> counts;
     const auto batch_size = view_a.size(0);
+    const auto graph_loss_weight = effective_python_compare_graph_loss_weight(config);
+    const bool use_graph_loss = graph_loss_weight > 0.0;
     descriptor_losses.reserve(static_cast<size_t>(batch_size));
     graph_losses.reserve(static_cast<size_t>(batch_size));
     for (int64_t batch = 0; batch < batch_size; ++batch)
@@ -4314,9 +4405,13 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
         margins.push_back(descriptor_metrics.positive_margin);
         ranks.push_back(descriptor_metrics.positive_rank);
         counts.push_back(torch::full({}, static_cast<float>(sample.points_a.size(0)), sparse_a.descriptors.options()));
-        graph_losses.push_back(make_python_compare_graph_loss(*modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
-                                                              normalize_python_descriptor_rows(desc_b), sample.points_a,
-                                                              sample.points_b, config.graph_keypoint_meta_dim));
+        if (use_graph_loss)
+        {
+            graph_losses.push_back(make_python_compare_graph_loss(
+                *modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
+                normalize_python_descriptor_rows(desc_b), sample.points_a, sample.points_b,
+                config.graph_keypoint_meta_dim));
+        }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
     {
@@ -4324,7 +4419,7 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
     }
     auto descriptor_loss = descriptor_losses.empty() ? zero : torch::stack(descriptor_losses).mean();
     auto graph_loss = graph_losses.empty() ? zero : torch::stack(graph_losses).mean();
-    auto total = descriptor_loss * config.synthetic_loss_weight + graph_loss * config.graph_matcher_loss_weight;
+    auto total = descriptor_loss * config.synthetic_loss_weight + graph_loss * graph_loss_weight;
     auto mean_or_zero = [&](const std::vector<torch::Tensor>& values)
     {
         return values.empty() ? zero : torch::stack(values).mean();
@@ -4799,11 +4894,18 @@ training_loss_from_pairs(TrainModules& modules, const std::vector<SyntheticPair>
         }
         else if (!training_profile_uses_dense_quality_forward(training_profile))
         {
-            constexpr double PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT = 1.0;
-            sparse_a = finalize_v21_python_aligned_sparse_output(
-                modules, std::move(raw_sparse_a), view_a, PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT);
-            sparse_b = finalize_v21_python_aligned_sparse_output(
-                modules, std::move(raw_sparse_b), view_b, PYTHON_COMPARE_TEXTURE_BLEND_WEIGHT);
+            if (config.train_blended_descriptors)
+            {
+                sparse_a = finalize_v21_python_aligned_sparse_output(
+                    modules, std::move(raw_sparse_a), view_a, config.training_texture_blend_weight);
+                sparse_b = finalize_v21_python_aligned_sparse_output(
+                    modules, std::move(raw_sparse_b), view_b, config.training_texture_blend_weight);
+            }
+            else
+            {
+                sparse_a = adapt_v21_sparse_output(std::move(raw_sparse_a));
+                sparse_b = adapt_v21_sparse_output(std::move(raw_sparse_b));
+            }
             dense = make_zero_dense_output_like_sparse(sparse_a);
         }
         else
@@ -6240,6 +6342,13 @@ bool training_profile_uses_dense_quality_forward_for_test(const std::string& tra
     return training_profile_uses_dense_quality_forward(parse_training_profile(training_profile));
 }
 
+std::vector<std::string> trainable_parameter_names_for_config_for_test(const TrainConfig& config)
+{
+    auto modules = make_modules(config, torch::kCPU);
+    apply_trainable_parameter_selection(modules, config);
+    return trainable_parameter_names(modules);
+}
+
 torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImpl& graph_matcher,
                                                       const torch::Tensor& desc_a, const torch::Tensor& desc_b,
                                                       const torch::Tensor& points_a, const torch::Tensor& points_b,
@@ -6272,9 +6381,7 @@ TrainResult train_model(const TrainConfig& config)
         move_modules_to_device(modules, device);
         set_all_modules_train(modules);
     }
-    apply_descriptor_only_finetune(modules, config);
-    apply_viewpoint_head_only_finetune(modules, config);
-    apply_graph_only_finetune(modules, config);
+    apply_trainable_parameter_selection(modules, config);
     keep_descriptor_only_frozen_modules_eval(modules, config);
     keep_graph_only_frozen_modules_eval(modules, config);
     std::unique_ptr<TrainModules> descriptor_anchor_modules;
@@ -6293,6 +6400,8 @@ TrainResult train_model(const TrainConfig& config)
     {
         throw std::invalid_argument("no trainable parameters selected");
     }
+    std::cout << "trainable parameters: tensors=" << parameters.size()
+              << " values=" << count_trainable_parameter_values(parameters) << "\n";
     auto optimizer_options = torch::optim::AdamWOptions(config.learning_rate).weight_decay(config.weight_decay);
     auto optimizer = torch::optim::AdamW(parameters, optimizer_options);
     std::unique_ptr<CsvMetricLogger> csv_logger;

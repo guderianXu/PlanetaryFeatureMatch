@@ -60,6 +60,7 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         "[--augmentation-curriculum] [--rotation-step-degrees 15] "
         "[--extreme-pair-ratio 0.2] [--learning-rate 0.0003] [--lr-warmup-steps 0] "
         "[--min-learning-rate-ratio 0.01] [--max-grad-norm 1.0] [--training-profile full] [--full-v21] "
+        "[--train-backbone] [--train-dual-fpn] [--train-blended-descriptors] [--train-graph-matcher] "
         "[--pair-cache-dir cache/train] [--pair-cache-limit 0] [--memory-cache-items 0] "
         "[--synthetic-pair-cache-dir build/pair_cache] [--cache-only] "
         "[--extra-synthetic-pair-cache-dir img/Rotate] [--graph-keypoint-meta-dim 16] [--log-csv metrics.csv] "
@@ -141,6 +142,30 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                       "Python-compatible descriptor synthetic loss weight");
     train->add_option("--graph-matcher-loss-weight", options.graph_matcher_loss_weight,
                       "Python-compatible graph matcher loss weight");
+    train->add_flag("--train-backbone", options.train_backbone, "Python-compatible: train backbone parameters");
+    train->add_flag("--train-dual-fpn", options.train_dual_fpn, "Python-compatible: train dual FPN parameters");
+    train->add_flag("--freeze-descriptor-head", options.freeze_descriptor_head,
+                    "Python-compatible: freeze sparse descriptor head parameters");
+    train->add_flag("--train-sparse-context", options.train_sparse_context,
+                    "Python-compatible: train sparse context parameters");
+    train->add_flag("--train-keypoint-head", options.train_keypoint_head,
+                    "Python-compatible: train keypoint head parameters");
+    train->add_flag("--train-geometry-head", options.train_geometry_head,
+                    "Python-compatible: train scale/orientation/affine head parameters");
+    train->add_flag("--train-blended-descriptors", options.train_blended_descriptors,
+                    "Python-compatible: train on texture-blended descriptor maps");
+    train->add_flag("--train-texture-adapter", options.train_texture_adapter,
+                    "Python-compatible: train texture descriptor adapter parameters");
+    train->add_flag("--train-descriptor-fusion", options.train_descriptor_fusion,
+                    "Python-compatible: train descriptor fusion adapter parameters");
+    train->add_flag("--train-quality-head", options.train_quality_head,
+                    "Python-compatible: train quality head parameters");
+    train->add_flag("--train-graph-matcher", options.train_graph_matcher,
+                    "Python-compatible: train graph matcher and enable graph matcher loss");
+    train
+        ->add_option("--training-texture-blend-weight", options.training_texture_blend_weight,
+                     "Python-compatible texture descriptor blend weight")
+        ->check(CLI::NonNegativeNumber);
     train->add_option("--temperature", options.temperature, "Python-compatible descriptor contrastive temperature");
     train->add_option("--pairs-per-image", options.pairs_per_image,
                       "Synthetic training pairs generated per source image");

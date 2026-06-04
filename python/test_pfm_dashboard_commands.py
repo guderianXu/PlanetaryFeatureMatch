@@ -54,6 +54,10 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--full-v21", script)
         self.assertIn("--memory-cache-items 16", script)
         self.assertIn("--training-crop-size 512", script)
+        self.assertIn("--weight-decay 0.0001", script)
+        self.assertIn("--train-backbone", script)
+        self.assertIn("--train-blended-descriptors", script)
+        self.assertIn("--train-graph-matcher", script)
 
     def test_compare_backend_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

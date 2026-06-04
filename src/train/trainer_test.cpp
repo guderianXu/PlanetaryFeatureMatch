@@ -192,6 +192,7 @@ std::vector<std::size_t> make_validation_image_indices_for_test(std::size_t tota
                                                                 const pfm::TrainConfig& config);
 double training_learning_rate_for_step_for_test(const pfm::TrainConfig& config, int64_t step, int64_t total_steps);
 bool training_profile_uses_dense_quality_forward_for_test(const std::string& training_profile);
+std::vector<std::string> trainable_parameter_names_for_config_for_test(const pfm::TrainConfig& config);
 torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatcherImpl& graph_matcher,
                                                       const torch::Tensor& desc_a, const torch::Tensor& desc_b,
                                                       const torch::Tensor& points_a, const torch::Tensor& points_b,
@@ -358,6 +359,18 @@ pfm::TrainConfig tiny_config(const TempTrainingDirectory& temp_dir)
     return config;
 }
 
+bool has_trainable_parameter_prefix(const std::vector<std::string>& names, const std::string& prefix)
+{
+    for (const auto& name : names)
+    {
+        if (name.rfind(prefix, 0) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 static void trainer_one_epoch_saves_loadable_checkpoint()
@@ -395,6 +408,18 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE(config.dataloader_workers == 0);
     PFM_REQUIRE(config.prefetch_batches == 2);
     PFM_REQUIRE(!config.pin_memory);
+    PFM_REQUIRE(!config.train_backbone);
+    PFM_REQUIRE(!config.train_dual_fpn);
+    PFM_REQUIRE(!config.freeze_descriptor_head);
+    PFM_REQUIRE(!config.train_sparse_context);
+    PFM_REQUIRE(!config.train_keypoint_head);
+    PFM_REQUIRE(!config.train_geometry_head);
+    PFM_REQUIRE(!config.train_blended_descriptors);
+    PFM_REQUIRE(!config.train_texture_adapter);
+    PFM_REQUIRE(!config.train_descriptor_fusion);
+    PFM_REQUIRE(!config.train_quality_head);
+    PFM_REQUIRE(!config.train_graph_matcher);
+    PFM_REQUIRE_CLOSE(config.training_texture_blend_weight, 1.0, 1.0e-12);
     PFM_REQUIRE(!config.descriptor_only_finetune);
     PFM_REQUIRE(!config.graph_only_finetune);
     PFM_REQUIRE_CLOSE(config.min_keypoint_intensity, 0.08, 1.0e-12);
@@ -1627,6 +1652,70 @@ static void trainer_python_compare_profile_skips_dense_quality_forward()
     PFM_REQUIRE(!pfm::testing::training_profile_uses_dense_quality_forward_for_test("full"));
     PFM_REQUIRE(pfm::testing::training_profile_uses_dense_quality_forward_for_test("descriptor"));
     PFM_REQUIRE(pfm::testing::training_profile_uses_dense_quality_forward_for_test("graph"));
+}
+
+static void trainer_python_compare_trainable_parameters_match_python_defaults()
+{
+    pfm::TrainConfig config;
+    config.training_profile = "python-compare";
+    config.graph_matcher_loss_weight = 1.0;
+
+    const auto names = pfm::testing::trainable_parameter_names_for_config_for_test(config);
+
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.descriptors."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "graph_matcher."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "backbone."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "dual_fpn."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "texture_adapter."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "descriptor_fusion."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "dense_head."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "quality_head."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "semi_dense_branch."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "sparse_head.heatmap."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "sparse_head.scale."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "sparse_head.orientation."));
+    PFM_REQUIRE(!has_trainable_parameter_prefix(names, "sparse_head.affine."));
+}
+
+static void trainer_python_compare_trainable_parameters_train_graph_when_requested()
+{
+    pfm::TrainConfig config;
+    config.training_profile = "python-compare";
+    config.train_graph_matcher = true;
+
+    const auto names = pfm::testing::trainable_parameter_names_for_config_for_test(config);
+
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.descriptors."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "graph_matcher."));
+}
+
+static void trainer_python_compare_trainable_parameters_follow_python_full_flags()
+{
+    pfm::TrainConfig config;
+    config.training_profile = "python-compare";
+    config.train_backbone = true;
+    config.train_dual_fpn = true;
+    config.train_sparse_context = true;
+    config.train_geometry_head = true;
+    config.train_blended_descriptors = true;
+    config.train_texture_adapter = true;
+    config.train_descriptor_fusion = true;
+    config.train_quality_head = true;
+    config.train_graph_matcher = true;
+
+    const auto names = pfm::testing::trainable_parameter_names_for_config_for_test(config);
+
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "backbone."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "dual_fpn."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.descriptors."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.descriptor_context."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.scale."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.orientation."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "sparse_head.affine."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "texture_adapter."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "descriptor_fusion."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "quality_head."));
+    PFM_REQUIRE(has_trainable_parameter_prefix(names, "graph_matcher."));
 }
 
 static void trainer_python_compare_graph_loss_uses_candidate_mask_like_python()
@@ -3076,6 +3165,12 @@ void register_trainer_tests()
                   trainer_python_compare_pair_loss_mask_keeps_python_center_intensity_samples);
     register_test("trainer_python_compare_profile_skips_dense_quality_forward",
                   trainer_python_compare_profile_skips_dense_quality_forward);
+    register_test("trainer_python_compare_trainable_parameters_match_python_defaults",
+                  trainer_python_compare_trainable_parameters_match_python_defaults);
+    register_test("trainer_python_compare_trainable_parameters_train_graph_when_requested",
+                  trainer_python_compare_trainable_parameters_train_graph_when_requested);
+    register_test("trainer_python_compare_trainable_parameters_follow_python_full_flags",
+                  trainer_python_compare_trainable_parameters_follow_python_full_flags);
     register_test("trainer_python_compare_graph_loss_uses_candidate_mask_like_python",
                   trainer_python_compare_graph_loss_uses_candidate_mask_like_python);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",

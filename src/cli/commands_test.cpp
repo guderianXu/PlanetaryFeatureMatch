@@ -156,6 +156,19 @@ static void parse_train_command()
         "12",
         "--training-profile",
         "smoke",
+        "--train-backbone",
+        "--train-dual-fpn",
+        "--freeze-descriptor-head",
+        "--train-sparse-context",
+        "--train-keypoint-head",
+        "--train-geometry-head",
+        "--train-blended-descriptors",
+        "--train-texture-adapter",
+        "--train-descriptor-fusion",
+        "--train-quality-head",
+        "--train-graph-matcher",
+        "--training-texture-blend-weight",
+        "0.75",
         "--synthetic-pair-cache-dir",
         "pair_cache",
         "--cache-only",
@@ -233,6 +246,18 @@ static void parse_train_command()
     PFM_REQUIRE_CLOSE(parsed.gradient_clip_norm, 0.75, 1.0e-12);
     PFM_REQUIRE(parsed.graph_keypoint_meta_dim == 12);
     PFM_REQUIRE(parsed.training_profile == "smoke");
+    PFM_REQUIRE(parsed.train_backbone);
+    PFM_REQUIRE(parsed.train_dual_fpn);
+    PFM_REQUIRE(parsed.freeze_descriptor_head);
+    PFM_REQUIRE(parsed.train_sparse_context);
+    PFM_REQUIRE(parsed.train_keypoint_head);
+    PFM_REQUIRE(parsed.train_geometry_head);
+    PFM_REQUIRE(parsed.train_blended_descriptors);
+    PFM_REQUIRE(parsed.train_texture_adapter);
+    PFM_REQUIRE(parsed.train_descriptor_fusion);
+    PFM_REQUIRE(parsed.train_quality_head);
+    PFM_REQUIRE(parsed.train_graph_matcher);
+    PFM_REQUIRE_CLOSE(parsed.training_texture_blend_weight, 0.75, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
     PFM_REQUIRE(parsed.cache_only);

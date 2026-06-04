@@ -26,6 +26,7 @@ class TrainingRequest:
     training_crop_size: int = 512
     samples_per_pair: int = 512
     learning_rate: float = 3.0e-5
+    weight_decay: float = 1.0e-4
     profile: str = "full"
     full_v21: bool = True
     memory_cache_items: int = 64
@@ -208,6 +209,8 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.temperature),
         "--learning-rate",
         str(request.learning_rate),
+        "--weight-decay",
+        str(request.weight_decay),
         "--memory-cache-items",
         str(request.memory_cache_items),
         "--dataloader-workers",
@@ -227,6 +230,18 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         parts.extend(["--max-train-batches", str(request.max_train_batches)])
     if request.pair_cache_limit > 0:
         parts.extend(["--pair-cache-limit", str(request.pair_cache_limit)])
+    train_flags = [
+        "--train-backbone",
+        "--train-dual-fpn",
+        "--train-sparse-context",
+        "--train-geometry-head",
+        "--train-blended-descriptors",
+        "--train-texture-adapter",
+        "--train-descriptor-fusion",
+        "--train-quality-head",
+        "--train-graph-matcher",
+    ]
+    parts.extend(train_flags)
     for cache_dir in request.cache_dirs:
         parts.extend(["--pair-cache-dir", _quote(cache_dir)])
     return "\n".join(

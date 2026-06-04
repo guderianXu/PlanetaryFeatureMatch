@@ -40,6 +40,30 @@ struct TrainConfig
     double synthetic_loss_weight = 0.1;
     /// Python 对齐训练中的 graph matcher loss 权重。
     double graph_matcher_loss_weight = 1.0;
+    /// Python 对齐训练时是否训练 backbone。
+    bool train_backbone = false;
+    /// Python 对齐训练时是否训练 dual FPN。
+    bool train_dual_fpn = false;
+    /// Python 对齐训练时是否冻结 descriptor head。
+    bool freeze_descriptor_head = false;
+    /// Python 对齐训练时是否训练 sparse context 分支。
+    bool train_sparse_context = false;
+    /// Python 对齐训练时是否训练 keypoint head。
+    bool train_keypoint_head = false;
+    /// Python 对齐训练时是否训练 geometry head。
+    bool train_geometry_head = false;
+    /// Python 对齐训练时是否融合 texture descriptor。
+    bool train_blended_descriptors = false;
+    /// Python 对齐训练时是否训练 texture adapter。
+    bool train_texture_adapter = false;
+    /// Python 对齐训练时是否训练 descriptor fusion。
+    bool train_descriptor_fusion = false;
+    /// Python 对齐训练时是否训练 quality head。
+    bool train_quality_head = false;
+    /// Python 对齐训练时是否训练 graph matcher 并启用其 loss。
+    bool train_graph_matcher = false;
+    /// Python 对齐训练中的 texture descriptor 融合权重。
+    double training_texture_blend_weight = 1.0;
     /// Python 对齐训练中的 descriptor softmax temperature。
     double temperature = 0.07;
     /// 训练图像缩放上限；0 或负值表示不缩放。

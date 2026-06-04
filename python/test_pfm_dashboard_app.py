@@ -103,6 +103,8 @@ class DashboardAppTest(unittest.TestCase):
                 urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
                 script = next((root / "runs").glob("align_default*/train.sh")).read_text(encoding="utf-8")
                 self.assertIn("--training-profile full", script)
+                self.assertIn("--train-backbone", script)
+                self.assertIn("--train-graph-matcher", script)
             finally:
                 server.shutdown()
                 server.server_close()
