@@ -47,10 +47,17 @@ void requireSameTensor(const torch::Tensor& lhs, const torch::Tensor& rhs)
 
 pfm::MatchSet makeMatchSet()
 {
-    return pfm::MatchSet{torch::tensor({{0, 1}, {2, 3}}, torch::kInt64), torch::tensor({0.95F, 0.85F}, torch::kFloat32),
-                         torch::tensor({{1.0F, 2.0F}, {3.0F, 4.0F}}, torch::kFloat32),
-                         torch::tensor({{5.0F, 6.0F}, {7.0F, 8.0F}}, torch::kFloat32),
-                         torch::tensor({{0.9F, 0.1F}, {0.2F, 0.8F}}, torch::kFloat32)};
+    auto match_set =
+        pfm::MatchSet{torch::tensor({{0, 1}, {2, 3}}, torch::kInt64),
+                      torch::tensor({0.95F, 0.85F}, torch::kFloat32),
+                      torch::tensor({{1.0F, 2.0F}, {3.0F, 4.0F}}, torch::kFloat32),
+                      torch::tensor({{5.0F, 6.0F}, {7.0F, 8.0F}}, torch::kFloat32),
+                      torch::tensor({{0.9F, 0.1F}, {0.2F, 0.8F}}, torch::kFloat32)};
+    match_set.graph_executed_layers = 3;
+    match_set.graph_attention_work_units = 57;
+    match_set.graph_full_attention_work_units = 75;
+    match_set.graph_attention_work_fraction = 57.0 / 75.0;
+    return match_set;
 }
 
 } // namespace
@@ -68,6 +75,10 @@ static void match_codec_round_trips_all_fields()
     requireSameTensor(actual.points_a, expected.points_a);
     requireSameTensor(actual.points_b, expected.points_b);
     requireSameTensor(actual.confidence, expected.confidence);
+    PFM_REQUIRE(actual.graph_executed_layers == expected.graph_executed_layers);
+    PFM_REQUIRE(actual.graph_attention_work_units == expected.graph_attention_work_units);
+    PFM_REQUIRE(actual.graph_full_attention_work_units == expected.graph_full_attention_work_units);
+    PFM_REQUIRE_CLOSE(actual.graph_attention_work_fraction, expected.graph_attention_work_fraction, 1.0e-12);
 }
 
 static void match_codec_rejects_missing_path()

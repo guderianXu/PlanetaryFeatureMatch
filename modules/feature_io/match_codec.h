@@ -19,6 +19,14 @@ struct MatchSet
     torch::Tensor points_b;
     /// 稠密/半稠密匹配置信度。
     torch::Tensor confidence;
+    /// v2.1 图匹配器实际执行的图注意力层数；非图匹配路径为 0。
+    int64_t graph_executed_layers = 0;
+    /// v2.1 图匹配器实际执行的注意力点对计算量代理。
+    int64_t graph_attention_work_units = 0;
+    /// v2.1 图匹配器满层注意力点对计算量代理。
+    int64_t graph_full_attention_work_units = 0;
+    /// v2.1 图匹配器实际计算量占满计算量的比例。
+    double graph_attention_work_fraction = 0.0;
 };
 
 /// 将匹配张量集合保存为 LibTorch archive。

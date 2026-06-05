@@ -92,6 +92,21 @@ enum class SparseGeometryFilter
     Local,
 };
 
+struct GraphInferenceTelemetry
+{
+    int64_t executed_layers = 0;
+    int64_t attention_work_units = 0;
+    int64_t full_attention_work_units = 0;
+    double attention_work_fraction = 0.0;
+};
+
+struct SparseMatchOutput
+{
+    torch::Tensor matches;
+    torch::Tensor scores;
+    GraphInferenceTelemetry graph;
+};
+
 bool matchDebugEnabled()
 {
     const char* value = std::getenv("PFM_MATCH_DEBUG");
@@ -161,6 +176,23 @@ v21::PfmV21GraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a
 {
     return matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b, true,
                            graph_options.width_prune_min_score, graph_options.early_stop_min_confidence);
+}
+
+GraphInferenceTelemetry graphTelemetry(const PlanetaryGraphMatcherOutput&)
+{
+    return GraphInferenceTelemetry{};
+}
+
+GraphInferenceTelemetry graphTelemetry(const v21::PfmV21GraphMatcherOutput& output)
+{
+    return GraphInferenceTelemetry{output.executed_layers, output.attention_work_units,
+                                   output.full_attention_work_units, output.attention_work_fraction};
+}
+
+SparseMatchOutput makeSparseMatchOutput(const std::pair<torch::Tensor, torch::Tensor>& sparse,
+                                        const GraphInferenceTelemetry& graph)
+{
+    return SparseMatchOutput{sparse.first, sparse.second, graph};
 }
 
 bool shouldUseWideTopKFallback(int64_t base_matches, int64_t wide_matches, double wide_mean_score)
@@ -1468,9 +1500,8 @@ applyGraphAcceptProbability(const std::pair<torch::Tensor, torch::Tensor>& match
 }
 
 template <typename GraphMatcherT>
-std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& features_a, const FeatureSet& features_b,
-                                                            GraphMatcherT& matcher,
-                                                            const GraphMatcherInferenceOptions& graph_options)
+SparseMatchOutput matchSparseFeatures(const FeatureSet& features_a, const FeatureSet& features_b,
+                                      GraphMatcherT& matcher, const GraphMatcherInferenceOptions& graph_options)
 {
     // 稀疏匹配流程：
     // 1. 计算互为最近邻描述子匹配，作为低成本基线和最终兜底。
@@ -1493,7 +1524,8 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     }
     if (features_a.descriptors.size(0) == 0 || features_b.descriptors.size(0) == 0)
     {
-        return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
+        return SparseMatchOutput{torch::empty({0, 2}, long_options), torch::empty({0}, float_options),
+                                 GraphInferenceTelemetry{}};
     }
     const auto debug = matchDebugEnabled();
     const auto descriptor_matches = matchMutualDescriptorFeatures(features_a, features_b, false);
@@ -1506,6 +1538,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     }
     std::pair<torch::Tensor, torch::Tensor> greedy{torch::empty({0, 2}, long_options),
                                                    torch::empty({0}, float_options)};
+    GraphInferenceTelemetry graph_telemetry;
     if (shouldUseGraphMatcherForSparseCount(features_a.descriptors.size(0), features_b.descriptors.size(0)))
     {
         // 先使用互匹配图 logits；数量不足时逐步放宽为贪心/宽松模式，以保留可被几何过滤验证的候选。
@@ -1514,6 +1547,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                                             features_b.descriptors.to(matcher_device, torch::kFloat32),
                                             features_b.keypoints.to(matcher_device, torch::kFloat32), matcher,
                                             graph_options);
+        graph_telemetry = graphTelemetry(output);
         greedy = mutualGraphLogitMatches(output.logits, features_a.descriptors.size(0), features_b.descriptors.size(0));
         greedy = applyGraphAcceptProbability(greedy, output, graph_options);
         if (greedy.first.size(0) < GEOMETRIC_CONSISTENCY_MIN_MATCHES)
@@ -1545,7 +1579,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     }
     if (graph_options.fallback_mode == GraphMatcherFallbackMode::None || returnRawGraphMatchesForDebug())
     {
-        return {matches, scores};
+        return makeSparseMatchOutput({matches, scores}, graph_telemetry);
     }
     Timer debug_timer;
     // Top-K 描述子候选覆盖非互为最近邻但几何上可成立的匹配，主要服务大视角和弱纹理样本。
@@ -1579,7 +1613,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
             }
             if (topk_projective.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_INLIERS)
             {
-                return topk_projective;
+                return makeSparseMatchOutput(topk_projective, graph_telemetry);
             }
         }
         auto topk_rotation =
@@ -1614,7 +1648,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
             }
             if (shouldUseProjectiveTopKRescue(unique_rotation.first.size(0), projective_rescue.first.size(0)))
             {
-                return projective_rescue;
+                return makeSparseMatchOutput(projective_rescue, graph_telemetry);
             }
         }
         if (shouldReturnRotationOnlyMatches(unique_rotation.first.size(0)))
@@ -1623,7 +1657,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
             {
                 std::cerr << "match debug: returning rotation-only descriptor matches before projective filter\n";
             }
-            return unique_rotation;
+            return makeSparseMatchOutput(unique_rotation, graph_telemetry);
         }
         if (unique_rotation.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_MATCHES)
         {
@@ -1656,7 +1690,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                         shouldPreferMutualDescriptorGeometry(descriptor_consistent.first.size(0),
                                                              topk_consistent.first.size(0)))
                     {
-                        return descriptor_consistent;
+                        return makeSparseMatchOutput(descriptor_consistent, graph_telemetry);
                     }
                 }
                 if (topk_consistent.first.size(0) < DESCRIPTOR_PROJECTIVE_RESCUE_MAX_BASE_MATCHES)
@@ -1674,7 +1708,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                     }
                     if (shouldUseProjectiveTopKRescue(topk_consistent.first.size(0), projective_rescue.first.size(0)))
                     {
-                        return projective_rescue;
+                        return makeSparseMatchOutput(projective_rescue, graph_telemetry);
                     }
                 }
                 if (descriptorTopKCandidatesPerSource() > DESCRIPTOR_CONSERVATIVE_TOPK_CANDIDATES_PER_SOURCE &&
@@ -1701,8 +1735,10 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                         if (shouldUseConservativeTopKFallback(topk_consistent.first.size(0),
                                                               conservative_consistent.first.size(0)))
                         {
-                            return trimLowConfidenceTopKTail(conservative_consistent.first,
-                                                             conservative_consistent.second);
+                            return makeSparseMatchOutput(
+                                trimLowConfidenceTopKTail(conservative_consistent.first,
+                                                          conservative_consistent.second),
+                                graph_telemetry);
                         }
                     }
                 }
@@ -1732,16 +1768,17 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                         if (shouldUseWideTopKFallback(topk_consistent.first.size(0), wide_consistent.first.size(0),
                                                       wide_mean_score))
                         {
-                            return wide_consistent;
+                            return makeSparseMatchOutput(wide_consistent, graph_telemetry);
                         }
                     }
                 }
-                return trimLowConfidenceTopKTail(topk_consistent.first, topk_consistent.second);
+                return makeSparseMatchOutput(trimLowConfidenceTopKTail(topk_consistent.first, topk_consistent.second),
+                                             graph_telemetry);
             }
         }
         if (unique_rotation.first.size(0) >= ROTATION_CONSISTENCY_MIN_MATCHES)
         {
-            return unique_rotation;
+            return makeSparseMatchOutput(unique_rotation, graph_telemetry);
         }
         if (descriptorReciprocalTopKFallback())
         {
@@ -1764,7 +1801,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                 }
                 if (reciprocal_consistent.first.size(0) > unique_rotation.first.size(0))
                 {
-                    return reciprocal_consistent;
+                    return makeSparseMatchOutput(reciprocal_consistent, graph_telemetry);
                 }
             }
         }
@@ -1780,12 +1817,12 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         }
         if (descriptor_consistent.first.size(0) >= GEOMETRIC_CONSISTENCY_MIN_INLIERS)
         {
-            return descriptor_consistent;
+            return makeSparseMatchOutput(descriptor_consistent, graph_telemetry);
         }
     }
     if (matches.size(0) == 0)
     {
-        return descriptor_matches;
+        return makeSparseMatchOutput(descriptor_matches, graph_telemetry);
     }
     auto merged = mergeSparseMatchCandidates(matches, scores, descriptor_matches.first, descriptor_matches.second);
     auto geometric = filterSparseGeometryConsistentMatches(features_a, features_b, merged.first, merged.second);
@@ -1800,9 +1837,9 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
         {
             std::cerr << "match debug: geometry failed, returning descriptor mutual candidates only\n";
         }
-        return descriptor_matches;
+        return makeSparseMatchOutput(descriptor_matches, graph_telemetry);
     }
-    return geometric;
+    return makeSparseMatchOutput(geometric, graph_telemetry);
 }
 
 template <typename GraphMatcherT>
@@ -1818,18 +1855,28 @@ MatchSet matchFeatureSetsWithMatcher(const FeatureSet& features_a, const Feature
     const auto sparse = matchSparseFeatures(features_a, features_b, matcher, graph_options);
     const int64_t dense_count = std::min(features_a.dense_points.size(0), features_b.dense_points.size(0));
     const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    auto make_match_set = [&](const torch::Tensor& points_a, const torch::Tensor& points_b,
+                              const torch::Tensor& confidence)
+    {
+        MatchSet result{sparse.matches, sparse.scores, points_a, points_b, confidence};
+        result.graph_executed_layers = sparse.graph.executed_layers;
+        result.graph_attention_work_units = sparse.graph.attention_work_units;
+        result.graph_full_attention_work_units = sparse.graph.full_attention_work_units;
+        result.graph_attention_work_fraction = sparse.graph.attention_work_fraction;
+        return result;
+    };
     if (dense_count == 0)
     {
-        return MatchSet{sparse.first, sparse.second, torch::empty({0, 2}, float_options),
-                        torch::empty({0, 2}, float_options), torch::empty({0}, float_options)};
+        return make_match_set(torch::empty({0, 2}, float_options), torch::empty({0, 2}, float_options),
+                              torch::empty({0}, float_options));
     }
 
     const auto confidence_a = features_a.dense_confidence.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count);
     const auto confidence_b = features_b.dense_confidence.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count);
-    return MatchSet{sparse.first, sparse.second,
-                    features_a.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
-                    features_b.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
-                    torch::minimum(confidence_a, confidence_b).contiguous()};
+    return make_match_set(
+        features_a.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
+        features_b.dense_points.to(torch::kCPU, torch::kFloat32).narrow(0, 0, dense_count).contiguous(),
+        torch::minimum(confidence_a, confidence_b).contiguous());
 }
 
 } // namespace

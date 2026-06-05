@@ -1176,6 +1176,10 @@ int run_match_command(const CliOptions& options)
                   << " features_b=" << metric_features_b.keypoints.size(0)
                   << " sparse_matches=" << match_set.sparse_matches.size(0)
                   << " dense_matches=" << match_set.points_a.size(0)
+                  << " graph_layers=" << match_set.graph_executed_layers
+                  << " graph_work=" << match_set.graph_attention_work_fraction
+                  << " graph_work_units=" << match_set.graph_attention_work_units << "/"
+                  << match_set.graph_full_attention_work_units
                   << " correct_matches=" << (has_warp_metrics ? warp_metrics.correct() : 0)
                   << " wrong_matches=" << (has_warp_metrics ? warp_metrics.total() - warp_metrics.correct() : 0)
                   << " match_precision=" << (has_warp_metrics ? warp_metrics.precision() : 0.0)

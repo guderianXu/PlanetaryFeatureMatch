@@ -25,12 +25,58 @@ void writeTensor(torch::serialize::OutputArchive& archive, const torch::Tensor& 
     archive.write(name, tensor);
 }
 
+void writeInt64(torch::serialize::OutputArchive& archive, int64_t value, const char* name)
+{
+    archive.write(name, torch::tensor(value, torch::TensorOptions().dtype(torch::kInt64)));
+}
+
+void writeDouble(torch::serialize::OutputArchive& archive, double value, const char* name)
+{
+    archive.write(name, torch::tensor(value, torch::TensorOptions().dtype(torch::kFloat64)));
+}
+
 torch::Tensor readTensor(torch::serialize::InputArchive& archive, const char* name)
 {
     torch::Tensor tensor;
     archive.read(name, tensor);
     requireDefined(tensor, name);
     return tensor;
+}
+
+int64_t readOptionalInt64(torch::serialize::InputArchive& archive, const char* name, int64_t default_value)
+{
+    try
+    {
+        torch::Tensor tensor;
+        archive.read(name, tensor);
+        if (!tensor.defined() || tensor.numel() == 0)
+        {
+            return default_value;
+        }
+        return tensor.to(torch::kCPU).to(torch::kInt64).reshape({-1}).index({0}).item<int64_t>();
+    }
+    catch (const c10::Error&)
+    {
+        return default_value;
+    }
+}
+
+double readOptionalDouble(torch::serialize::InputArchive& archive, const char* name, double default_value)
+{
+    try
+    {
+        torch::Tensor tensor;
+        archive.read(name, tensor);
+        if (!tensor.defined() || tensor.numel() == 0)
+        {
+            return default_value;
+        }
+        return tensor.to(torch::kCPU).to(torch::kFloat64).reshape({-1}).index({0}).item<double>();
+    }
+    catch (const c10::Error&)
+    {
+        return default_value;
+    }
 }
 
 } // namespace
@@ -43,6 +89,10 @@ void save_match_set(const MatchSet& match_set, const std::string& path)
     writeTensor(archive, match_set.points_a, "points_a");
     writeTensor(archive, match_set.points_b, "points_b");
     writeTensor(archive, match_set.confidence, "confidence");
+    writeInt64(archive, match_set.graph_executed_layers, "graph_executed_layers");
+    writeInt64(archive, match_set.graph_attention_work_units, "graph_attention_work_units");
+    writeInt64(archive, match_set.graph_full_attention_work_units, "graph_full_attention_work_units");
+    writeDouble(archive, match_set.graph_attention_work_fraction, "graph_attention_work_fraction");
     try
     {
         archive.save_to(path);
@@ -59,9 +109,14 @@ MatchSet load_match_set(const std::string& path)
     {
         torch::serialize::InputArchive archive;
         archive.load_from(path);
-        return MatchSet{readTensor(archive, "sparse_matches"), readTensor(archive, "sparse_scores"),
-                        readTensor(archive, "points_a"), readTensor(archive, "points_b"),
-                        readTensor(archive, "confidence")};
+        auto match_set = MatchSet{readTensor(archive, "sparse_matches"), readTensor(archive, "sparse_scores"),
+                                  readTensor(archive, "points_a"), readTensor(archive, "points_b"),
+                                  readTensor(archive, "confidence")};
+        match_set.graph_executed_layers = readOptionalInt64(archive, "graph_executed_layers", 0);
+        match_set.graph_attention_work_units = readOptionalInt64(archive, "graph_attention_work_units", 0);
+        match_set.graph_full_attention_work_units = readOptionalInt64(archive, "graph_full_attention_work_units", 0);
+        match_set.graph_attention_work_fraction = readOptionalDouble(archive, "graph_attention_work_fraction", 0.0);
+        return match_set;
     }
     catch (const c10::Error& e)
     {
