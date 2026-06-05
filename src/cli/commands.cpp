@@ -156,6 +156,9 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--graph-matcher-no-match-min-distance", options.graph_matcher_no_match_min_distance,
                       "Minimum feature-grid distance between graph no-match negatives and positives")
         ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-train-max-attention-layers", options.graph_matcher_train_max_attention_layers,
+                      "Python-compatible GraphMatcher training attention layer budget; 0 uses all layers")
+        ->check(CLI::NonNegativeNumber);
     train->add_option("--graph-matcher-prune-ranking-weight", options.graph_matcher_prune_ranking_weight,
                       "Python-compatible LightGlue-style graph pruning ranking loss weight")
         ->check(CLI::NonNegativeNumber);

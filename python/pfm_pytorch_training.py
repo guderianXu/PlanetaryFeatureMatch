@@ -1384,6 +1384,7 @@ def graph_matcher_correspondence_loss(
     hard_negative_dustbin_spatial_min_distance: float = 0.0,
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
+    max_attention_layers: int = 0,
     generator: torch.Generator | None = None,
     return_components: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1487,7 +1488,14 @@ def graph_matcher_correspondence_loss(
     ).to(desc_b.device)
     meta_a = apply_graph_metadata_mode(meta_a, metadata_mode)
     meta_b = apply_graph_metadata_mode(meta_b, metadata_mode)
-    output = model.graph_matcher(desc_a, meta_a, desc_b, meta_b, apply_candidate_mask=False)
+    output = model.graph_matcher(
+        desc_a,
+        meta_a,
+        desc_b,
+        meta_b,
+        apply_candidate_mask=False,
+        max_attention_layers=max_attention_layers,
+    )
     targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
     col_loss = F.cross_entropy(output.logits[:, :count].T, targets)
@@ -2145,6 +2153,7 @@ def train_step(
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
+    graph_matcher_train_max_attention_layers: int = 0,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
@@ -2293,6 +2302,7 @@ def train_step(
                             hard_negative_dustbin_spatial_min_distance=graph_matcher_hard_negative_dustbin_spatial_min_distance,
                             semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
+                            max_attention_layers=graph_matcher_train_max_attention_layers,
                             generator=generator,
                             return_components=True,
                         )
@@ -3189,6 +3199,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
+    parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
@@ -3290,6 +3301,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-no-match-weight must be nonnegative")
     if args.graph_matcher_no_match_min_distance < 0.0:
         parser.error("--graph-matcher-no-match-min-distance must be nonnegative")
+    if args.graph_matcher_train_max_attention_layers < 0:
+        parser.error("--graph-matcher-train-max-attention-layers must be nonnegative")
     if args.graph_matcher_accept_weight < 0.0:
         parser.error("--graph-matcher-accept-weight must be nonnegative")
     if args.graph_matcher_accept_negative_topk < 0:
@@ -3817,6 +3830,7 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
@@ -3846,6 +3860,9 @@ def main() -> int:
                     "graph_matcher_stop_confidence_weight": args.graph_matcher_stop_confidence_weight
                     if args.train_graph_matcher
                     else 0.0,
+                    "graph_matcher_train_max_attention_layers": args.graph_matcher_train_max_attention_layers
+                    if args.train_graph_matcher
+                    else 0,
                     **metrics,
                 }
             )

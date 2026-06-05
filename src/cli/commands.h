@@ -84,6 +84,7 @@ struct CliOptions
     int graph_matcher_accept_negative_topk = 8;
     int graph_matcher_no_match_points = 0;
     double graph_matcher_no_match_min_distance = 4.0;
+    int graph_matcher_train_max_attention_layers = 0;
     double graph_matcher_prune_ranking_weight = 0.1;
     double graph_matcher_prune_ranking_margin = 0.25;
     double graph_matcher_stop_confidence_weight = 0.05;

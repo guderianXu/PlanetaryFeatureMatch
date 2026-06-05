@@ -1395,6 +1395,24 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.accept_head[-1].weight.grad)
 
+    def test_graph_matcher_correspondence_loss_can_train_with_attention_layer_budget(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=3)
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
+        descriptors_b = descriptors_a.clone()
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+
+        loss = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            max_attention_layers=1,
+        )
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(model.graph_matcher.last_executed_attention_layers, 1)
+
     def test_graph_matcher_prune_ranking_loss_penalizes_hard_negative_accept_scores(self):
         logits = torch.zeros(4, 4)
         accept_logits = torch.tensor(
@@ -1610,6 +1628,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "32",
             "--graph-matcher-no-match-weight",
             "0.25",
+            "--graph-matcher-train-max-attention-layers",
+            "2",
             "--graph-matcher-accept-weight",
             "0.2",
             "--graph-matcher-accept-negative-topk",
@@ -1654,6 +1674,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_metadata_mode, "no_xy")
         self.assertEqual(args.graph_matcher_no_match_points, 32)
         self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.25)
+        self.assertEqual(args.graph_matcher_train_max_attention_layers, 2)
         self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
         self.assertEqual(args.graph_matcher_accept_negative_topk, 6)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.15)

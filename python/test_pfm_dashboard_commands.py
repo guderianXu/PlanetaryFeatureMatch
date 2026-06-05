@@ -22,6 +22,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_no_match_points=32,
                 graph_matcher_no_match_weight=0.1,
                 graph_matcher_no_match_min_distance=5.0,
+                graph_matcher_train_max_attention_layers=2,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
                 graph_min_accept_probability=0.7,
@@ -43,6 +44,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-no-match-points 32", script)
         self.assertIn("--graph-matcher-no-match-weight 0.1", script)
         self.assertIn("--graph-matcher-no-match-min-distance 5.0", script)
+        self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--generate-training-report", script)
@@ -57,6 +59,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("graph_width_prune_keep_ratio=0.4", run_html)
         self.assertIn("graph_matcher_no_match_points=32", run_html)
         self.assertIn("graph_matcher_no_match_weight=0.1", run_html)
+        self.assertIn("graph_matcher_train_max_attention_layers=2", run_html)
         self.assertIn("graph_matcher_stop_confidence_weight=0.07", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
@@ -89,6 +92,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 memory_cache_items=16,
                 graph_matcher_no_match_points=24,
                 graph_matcher_no_match_min_distance=6.0,
+                graph_matcher_train_max_attention_layers=2,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
             )
@@ -106,6 +110,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--weight-decay 0.0001", script)
         self.assertIn("--graph-matcher-no-match-points 24", script)
         self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
+        self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--train-backbone", script)
@@ -164,6 +169,19 @@ class DashboardCommandsTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "graph_max_attention_work_fraction must be in"):
+                create_training_runs(request)
+
+    def test_graph_matcher_train_attention_layer_budget_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+                graph_matcher_train_max_attention_layers=-1,
+            )
+
+            with self.assertRaisesRegex(ValueError, "graph_matcher_train_max_attention_layers must be nonnegative"):
                 create_training_runs(request)
 
 

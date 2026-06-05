@@ -48,6 +48,8 @@ struct TrainConfig
     int graph_matcher_no_match_points = 0;
     /// no-match 负例与正例关键点的最小特征网格距离。
     double graph_matcher_no_match_min_distance = 4.0;
+    /// Python 对齐训练中 GraphMatcher 最多执行的注意力层数；0 表示满层训练。
+    int graph_matcher_train_max_attention_layers = 0;
     /// Python 对齐训练中 LightGlue 式剪枝排序 loss 权重。
     double graph_matcher_prune_ranking_weight = 0.1;
     /// Python 对齐训练中剪枝排序 loss 的 logit 间隔。

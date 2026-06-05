@@ -45,6 +45,7 @@ class TrainingRequest:
     graph_matcher_no_match_points: int = 0
     graph_matcher_no_match_weight: float = 0.0
     graph_matcher_no_match_min_distance: float = 4.0
+    graph_matcher_train_max_attention_layers: int = 0
     graph_matcher_stop_confidence_weight: float = 0.05
     graph_matcher_stop_confidence_margin: float = 0.5
     temperature: float = 0.07
@@ -105,6 +106,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_matcher_no_match_points={request.graph_matcher_no_match_points}</li>
 <li>graph_matcher_no_match_weight={request.graph_matcher_no_match_weight}</li>
 <li>graph_matcher_no_match_min_distance={request.graph_matcher_no_match_min_distance}</li>
+<li>graph_matcher_train_max_attention_layers={request.graph_matcher_train_max_attention_layers}</li>
 <li>graph_matcher_stop_confidence_weight={request.graph_matcher_stop_confidence_weight}</li>
 <li>graph_matcher_stop_confidence_margin={request.graph_matcher_stop_confidence_margin}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
@@ -164,6 +166,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         str(request.graph_matcher_no_match_weight),
         "--graph-matcher-no-match-min-distance",
         str(request.graph_matcher_no_match_min_distance),
+        "--graph-matcher-train-max-attention-layers",
+        str(request.graph_matcher_train_max_attention_layers),
         "--graph-matcher-stop-confidence-weight",
         str(request.graph_matcher_stop_confidence_weight),
         "--graph-matcher-stop-confidence-margin",
@@ -271,6 +275,8 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.graph_matcher_no_match_points),
         "--graph-matcher-no-match-min-distance",
         str(request.graph_matcher_no_match_min_distance),
+        "--graph-matcher-train-max-attention-layers",
+        str(request.graph_matcher_train_max_attention_layers),
         "--graph-matcher-stop-confidence-weight",
         str(request.graph_matcher_stop_confidence_weight),
         "--graph-matcher-stop-confidence-margin",
@@ -342,6 +348,8 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_matcher_no_match_weight must be nonnegative")
     if request.graph_matcher_no_match_min_distance < 0.0:
         raise ValueError("graph_matcher_no_match_min_distance must be nonnegative")
+    if request.graph_matcher_train_max_attention_layers < 0:
+        raise ValueError("graph_matcher_train_max_attention_layers must be nonnegative")
     if request.graph_matcher_stop_confidence_weight < 0.0:
         raise ValueError("graph_matcher_stop_confidence_weight must be nonnegative")
     if request.graph_matcher_stop_confidence_margin < 0.0:
