@@ -85,6 +85,23 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(output.matches.size(1), 2)
         self.assertEqual(output.scores.dim(), 1)
 
+    def test_graph_matcher_match_scores_include_accept_probability(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=4, hidden_dim=8, attention_layers=1, keypoint_meta_dim=4)
+        desc = torch.eye(4)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+
+        output = graph(desc, keypoints, desc, keypoints, apply_candidate_mask=False)
+
+        self.assertGreater(output.matches.size(0), 0)
+        row_prob = torch.softmax(output.logits[:4, :], dim=1)[:, :4]
+        col_prob = torch.softmax(output.logits[:, :4], dim=0)[:4, :]
+        dual_scores = row_prob * col_prob
+        source = output.matches[:, 0]
+        target = output.matches[:, 1]
+        expected = dual_scores[source, target] * torch.sigmoid(output.accept_logits[source, target])
+
+        self.assertTrue(torch.allclose(output.scores, expected.cpu(), atol=1.0e-6))
+
     def test_graph_matcher_residual_logits_preserve_raw_descriptor_signal(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=4, hidden_dim=8, attention_layers=1, keypoint_meta_dim=4)
         with torch.no_grad():

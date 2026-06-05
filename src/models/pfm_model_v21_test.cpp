@@ -100,6 +100,30 @@ static void pfm_v21_graph_matcher_accepts_full_metadata()
     PFM_REQUIRE(torch::isfinite(output.accept_logits).all().item<bool>());
 }
 
+static void pfm_v21_graph_matcher_scores_include_accept_probability()
+{
+    using torch::indexing::Slice;
+
+    auto matcher = pfm::v21::PfmV21GraphMatcher(4, 8, 1, 4);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    auto descriptors = torch::eye(4, torch::kFloat32);
+    auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}}, torch::kFloat32);
+
+    const auto output = matcher->forward(descriptors, keypoints, descriptors, keypoints, false);
+
+    PFM_REQUIRE(output.matches.size(0) > 0);
+    auto row_prob = torch::softmax(output.logits.index({Slice(0, 4), Slice()}), 1).index({Slice(), Slice(0, 4)});
+    auto col_prob = torch::softmax(output.logits.index({Slice(), Slice(0, 4)}), 0).index({Slice(0, 4), Slice()});
+    auto dual_scores = row_prob * col_prob;
+    auto source = output.matches.index({Slice(), 0}).to(output.logits.device());
+    auto target = output.matches.index({Slice(), 1}).to(output.logits.device());
+    auto expected = dual_scores.index({source, target}) * torch::sigmoid(output.accept_logits.index({source, target}));
+
+    PFM_REQUIRE(torch::allclose(output.scores, expected.to(torch::kCPU), 1.0e-6, 1.0e-6));
+}
+
 static void pfm_v21_graph_matcher_scalar_parameters_match_python_shapes()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16);
@@ -499,6 +523,8 @@ void register_pfm_model_v21_tests()
     register_test("pfm v21 forward single returns python feature shapes",
                   pfm_v21_forward_single_returns_python_feature_shapes);
     register_test("pfm v21 graph matcher accepts full metadata", pfm_v21_graph_matcher_accepts_full_metadata);
+    register_test("pfm v21 graph matcher scores include accept probability",
+                  pfm_v21_graph_matcher_scores_include_accept_probability);
     register_test("pfm v21 graph matcher scalar parameters match python shapes",
                   pfm_v21_graph_matcher_scalar_parameters_match_python_shapes);
     register_test("pfm v21 graph matcher can disable candidate mask for training loss",

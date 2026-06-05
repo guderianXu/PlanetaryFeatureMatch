@@ -1097,6 +1097,8 @@ class PlanetaryGraphMatcher(nn.Module):
         source_indices = source_indices[inlier_mask]
         target_indices = best_indices[inlier_mask]
         probabilities = best_values[inlier_mask]
+        if probabilities.numel() > 0 and accept_logits.numel() > 0:
+            probabilities = probabilities * torch.sigmoid(accept_logits[source_indices, target_indices])
         matches = torch.stack([source_indices, target_indices], dim=1).to(device="cpu", dtype=torch.long).contiguous()
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
         kept_keypoints_a = int(indices_a.numel())

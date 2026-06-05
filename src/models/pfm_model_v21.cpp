@@ -1241,6 +1241,10 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     source_indices = source_indices.index({inlier_mask});
     auto target_indices = best_indices.index({inlier_mask});
     auto probabilities = best_values.index({inlier_mask});
+    if (probabilities.numel() > 0 && accept_logits.numel() > 0)
+    {
+        probabilities = probabilities * torch::sigmoid(accept_logits.index({source_indices, target_indices}));
+    }
     auto matches = torch::stack({source_indices, target_indices}, 1).to(torch::kCPU, torch::kInt64).contiguous();
     auto scores = probabilities.to(torch::kCPU, torch::kFloat32).contiguous();
     const int64_t kept_keypoints_a = indices_a.size(0);
