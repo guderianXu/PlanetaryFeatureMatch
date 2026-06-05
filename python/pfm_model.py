@@ -852,7 +852,7 @@ class PlanetaryGraphMatcher(nn.Module):
             return pair_logits.new_tensor(0.0)
         row_confidence = torch.softmax(pair_logits, dim=1).max(dim=1).values
         column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values
-        return torch.minimum(row_confidence.min(), column_confidence.min())
+        return torch.minimum(row_confidence.mean(), column_confidence.mean())
 
     def forward(
         self,

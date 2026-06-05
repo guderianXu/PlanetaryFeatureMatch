@@ -220,6 +220,44 @@ static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()
     PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
 }
 
+static void pfm_v21_graph_matcher_early_stop_tolerates_single_uncertain_keypoint()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(5, 8, 3, 4);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key() == "graph_delta_scale")
+        {
+            parameter.value().fill_(0.0F);
+        }
+        if (parameter.key() == "accept_logit_scale")
+        {
+            parameter.value().fill_(0.0F);
+        }
+        if (parameter.key() == "raw_score_temperature")
+        {
+            parameter.value().fill_(0.03F);
+        }
+    }
+
+    auto descriptors_a = torch::eye(5, torch::kFloat32);
+    auto descriptors_b = torch::eye(5, torch::kFloat32);
+    descriptors_a.index_put_({4}, torch::zeros({5}, torch::kFloat32));
+    descriptors_b.index_put_({4}, torch::zeros({5}, torch::kFloat32));
+    auto keypoints = torch::zeros({5, 2}, torch::kFloat32);
+    keypoints.index_put_({1, 0}, 1.0F);
+    keypoints.index_put_({2, 0}, 2.0F);
+    keypoints.index_put_({3, 0}, 3.0F);
+    keypoints.index_put_({4, 0}, 4.0F);
+
+    const auto output = matcher->forward(descriptors_a, keypoints, descriptors_b, keypoints, true, -1.0, 0.8);
+
+    PFM_REQUIRE(output.logits.sizes() == torch::IntArrayRef({6, 6}));
+    PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
+}
+
 static void pfm_v21_optimizer_step_updates_parameters()
 {
     torch::manual_seed(7);
@@ -272,5 +310,7 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_width_pruning_restores_full_logits);
     register_test("pfm v21 graph matcher can stop attention layers when confident",
                   pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
+    register_test("pfm v21 graph matcher early stop tolerates single uncertain keypoint",
+                  pfm_v21_graph_matcher_early_stop_tolerates_single_uncertain_keypoint);
     register_test("pfm v21 optimizer step updates parameters", pfm_v21_optimizer_step_updates_parameters);
 }

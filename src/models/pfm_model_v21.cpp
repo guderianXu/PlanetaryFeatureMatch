@@ -918,7 +918,7 @@ torch::Tensor PfmV21GraphMatcherImpl::assignmentConfidence(const torch::Tensor& 
     }
     auto row_confidence = std::get<0>(torch::softmax(pair_logits, 1).max(1));
     auto column_confidence = std::get<0>(torch::softmax(pair_logits, 0).max(0));
-    return torch::minimum(row_confidence.min(), column_confidence.min());
+    return torch::minimum(row_confidence.mean(), column_confidence.mean());
 }
 
 int64_t PfmV21GraphMatcherImpl::lastExecutedAttentionLayers() const

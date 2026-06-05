@@ -129,6 +129,26 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(output.logits.shape), (3, 3))
         self.assertEqual(graph.last_executed_attention_layers, 1)
 
+    def test_graph_matcher_early_stop_tolerates_single_uncertain_keypoint(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=5, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
+        with torch.no_grad():
+            graph.graph_delta_scale.fill_(0.0)
+            graph.accept_logit_scale.fill_(0.0)
+            graph.raw_score_temperature.fill_(0.03)
+        desc_a = torch.eye(5)
+        desc_b = torch.eye(5)
+        desc_a[4] = 0.0
+        desc_b[4] = 0.0
+        keypoints = torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]],
+            dtype=torch.float32,
+        )
+
+        output = graph(desc_a, keypoints, desc_b, keypoints, early_stop_min_confidence=0.8)
+
+        self.assertEqual(tuple(output.logits.shape), (6, 6))
+        self.assertEqual(graph.last_executed_attention_layers, 1)
+
     def test_current_libtorch_checkpoint_loads_strictly_when_available(self):
         checkpoint = Path("runs/rotation_clean_2026-05-25/rotation_clean_ft_e1_b2.pt")
         if not checkpoint.exists():
