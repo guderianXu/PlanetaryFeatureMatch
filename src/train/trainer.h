@@ -40,6 +40,10 @@ struct TrainConfig
     double synthetic_loss_weight = 0.1;
     /// Python 对齐训练中的 graph matcher loss 权重。
     double graph_matcher_loss_weight = 1.0;
+    /// Python 对齐训练中 LightGlue 式接受/剪枝置信度 loss 权重。
+    double graph_matcher_accept_weight = 0.2;
+    /// Python 对齐训练中 accept loss 采样的每行困难负样本数量。
+    int graph_matcher_accept_negative_topk = 8;
     /// Python 对齐训练时是否训练 backbone。
     bool train_backbone = false;
     /// Python 对齐训练时是否训练 dual FPN。

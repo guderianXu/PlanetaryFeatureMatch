@@ -32,6 +32,14 @@ from patch_descriptor_training import (
 
 
 GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
+GRAPH_MATCHER_LOSS_METRIC_KEYS = (
+    "graph_matcher_total_loss",
+    "graph_matcher_ce_loss",
+    "graph_matcher_no_match_loss",
+    "graph_matcher_accept_loss",
+    "graph_matcher_raw_preservation_loss",
+    "graph_matcher_hard_negative_dustbin_loss",
+)
 
 
 @dataclass(frozen=True)
@@ -1371,9 +1379,30 @@ def graph_matcher_correspondence_loss(
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
     generator: torch.Generator | None = None,
-) -> torch.Tensor:
+    return_components: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def components(
+        total_loss: torch.Tensor,
+        ce_loss: torch.Tensor,
+        no_match_loss: torch.Tensor,
+        accept_loss: torch.Tensor,
+        raw_preservation_loss: torch.Tensor,
+        hard_negative_dustbin_loss: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "graph_matcher_total_loss": total_loss,
+            "graph_matcher_ce_loss": ce_loss,
+            "graph_matcher_no_match_loss": no_match_loss,
+            "graph_matcher_accept_loss": accept_loss,
+            "graph_matcher_raw_preservation_loss": raw_preservation_loss,
+            "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
+        }
+
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
-        return descriptors_a.new_tensor(0.0)
+        zero = descriptors_a.new_tensor(0.0)
+        if return_components:
+            return zero, components(zero, zero, zero, zero, zero, zero)
+        return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
     points_b_xy = points_b_xy[:count]
@@ -1452,7 +1481,12 @@ def graph_matcher_correspondence_loss(
     targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
     col_loss = F.cross_entropy(output.logits[:, :count].T, targets)
-    loss = 0.5 * (row_loss + col_loss)
+    match_ce_loss = 0.5 * (row_loss + col_loss)
+    no_match_loss = output.logits.new_zeros(())
+    accept_loss = output.logits.new_zeros(())
+    raw_preservation_loss = output.logits.new_zeros(())
+    hard_negative_dustbin_loss = output.logits.new_zeros(())
+    loss = match_ce_loss
     total_a = desc_a.size(0)
     total_b = desc_b.size(0)
     if no_match_weight > 0.0 and (total_a > count or total_b > count):
@@ -1464,25 +1498,28 @@ def graph_matcher_correspondence_loss(
             dustbin_row = torch.full((total_b - count,), total_a, dtype=torch.long, device=output.logits.device)
             no_match_terms.append(F.cross_entropy(output.logits[:, count:total_b].T, dustbin_row))
         if no_match_terms:
-            loss = loss + float(no_match_weight) * torch.stack(no_match_terms).mean()
+            no_match_loss = torch.stack(no_match_terms).mean()
+            loss = loss + float(no_match_weight) * no_match_loss
     if accept_weight > 0.0:
-        loss = loss + float(accept_weight) * graph_matcher_acceptance_loss(
+        accept_loss = graph_matcher_acceptance_loss(
             output,
             desc_a,
             desc_b,
             positive_count=count,
             negative_topk=accept_negative_topk,
         )
+        loss = loss + float(accept_weight) * accept_loss
     if raw_preservation_weight > 0.0:
-        loss = loss + float(raw_preservation_weight) * graph_matcher_raw_preservation_loss(
+        raw_preservation_loss = graph_matcher_raw_preservation_loss(
             output.logits,
             desc_a[:count],
             desc_b[:count],
             target_margin=raw_preservation_margin,
             raw_margin_threshold=raw_preservation_raw_margin,
         )
+        loss = loss + float(raw_preservation_weight) * raw_preservation_loss
     if hard_negative_dustbin_weight > 0.0:
-        loss = loss + float(hard_negative_dustbin_weight) * graph_matcher_hard_negative_dustbin_loss(
+        hard_negative_dustbin_loss = graph_matcher_hard_negative_dustbin_loss(
             output.logits,
             desc_a[:count],
             desc_b[:count],
@@ -1491,6 +1528,16 @@ def graph_matcher_correspondence_loss(
             margin=hard_negative_dustbin_margin,
             points_b_xy=points_b_xy[:count],
             spatial_min_distance=hard_negative_dustbin_spatial_min_distance,
+        )
+        loss = loss + float(hard_negative_dustbin_weight) * hard_negative_dustbin_loss
+    if return_components:
+        return loss, components(
+            loss,
+            match_ce_loss,
+            no_match_loss,
+            accept_loss,
+            raw_preservation_loss,
+            hard_negative_dustbin_loss,
         )
     return loss
 
@@ -2018,6 +2065,7 @@ def train_step(
         raise ValueError("gradient_accumulation_steps must be positive")
     optimizer.zero_grad(set_to_none=True)
     metric_rows: list[dict[str, float]] = []
+    graph_metric_rows: list[dict[str, float]] = []
     sampled_count = 0
     pseudo_label_points = 0
     pseudo_keypoint_points = 0
@@ -2129,7 +2177,7 @@ def train_step(
                         desc_b = normalize_descriptor_batch(sample_descriptors(descriptors_b, points_b))
                         metrics = paired_descriptor_metrics(desc_a.detach(), desc_b.detach())
                     if graph_matcher_loss_weight > 0.0:
-                        graph_loss = graph_matcher_correspondence_loss(
+                        graph_loss, graph_components = graph_matcher_correspondence_loss(
                             model,
                             descriptors_a,
                             descriptors_b,
@@ -2151,6 +2199,16 @@ def train_step(
                             semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
                             generator=generator,
+                            return_components=True,
+                        )
+                        graph_metric_rows.append(
+                            {
+                                key: float(value.detach().cpu())
+                                if bool(torch.isfinite(value.detach()).all())
+                                else float("nan")
+                                for key, value in graph_components.items()
+                            }
+                            | {"points": float(points_a.size(0))}
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
                     record_pose_training_metrics(
@@ -2371,6 +2429,7 @@ def train_step(
             metric_rows,
             sampled_count=sampled_count,
         )
+        metrics.update(aggregate_graph_matcher_loss_metrics(graph_metric_rows))
         metrics["pseudo_label_points"] = float(pseudo_label_points)
         metrics["pseudo_keypoint_points"] = float(pseudo_keypoint_points)
         metrics["pseudo_label_pairs"] = float(pseudo_label_pairs)
@@ -2398,6 +2457,7 @@ def train_step(
         "grad_l2": grad_norm,
         "skipped": 0.0,
         **averaged_step_metrics(metric_rows, sampled_count),
+        **aggregate_graph_matcher_loss_metrics(graph_metric_rows),
         "pseudo_label_points": float(pseudo_label_points),
         "pseudo_keypoint_points": float(pseudo_keypoint_points),
         "pseudo_label_pairs": float(pseudo_label_pairs),
@@ -2450,6 +2510,21 @@ def aggregate_descriptor_metrics(rows: list[dict[str, float]]) -> dict[str, floa
             continue
         result[key] = sum(float(row[key]) * weight for row, weight in zip(rows, weights)) / total_points
     return result
+
+
+def aggregate_graph_matcher_loss_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
+    if not rows:
+        return {key: 0.0 for key in GRAPH_MATCHER_LOSS_METRIC_KEYS}
+    total_points = sum(max(0.0, float(row.get("points", 0.0))) for row in rows)
+    if total_points <= 0.0:
+        total_points = float(len(rows))
+        weights = [1.0 for _ in rows]
+    else:
+        weights = [max(0.0, float(row.get("points", 0.0))) for row in rows]
+    return {
+        key: sum(float(row.get(key, 0.0)) * weight for row, weight in zip(rows, weights)) / total_points
+        for key in GRAPH_MATCHER_LOSS_METRIC_KEYS
+    }
 
 
 def split_train_eval_pairs(pair_paths: list[Path], *, eval_pairs: int) -> tuple[list[Path], list[Path]]:
@@ -3019,7 +3094,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
-    parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
@@ -3482,18 +3557,32 @@ def main() -> int:
                 "hard_negative_weight",
                 "diversity_weight",
                 "abstention_weight",
+                "graph_matcher_loss_weight",
+                "graph_matcher_accept_weight",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
                 "mean_positive_rank",
                 "mean_positive_score",
                 "mean_negative_score",
+                "graph_matcher_total_loss",
+                "graph_matcher_ce_loss",
+                "graph_matcher_no_match_loss",
+                "graph_matcher_accept_loss",
+                "graph_matcher_raw_preservation_loss",
+                "graph_matcher_hard_negative_dustbin_loss",
                 "points",
                 "pseudo_label_points",
                 "pseudo_keypoint_points",
                 "pseudo_label_pairs",
                 "false_match_points",
                 "false_match_pairs",
+                "online_false_match_points",
+                "online_false_match_pairs",
+                "illumination_consistency_points",
+                "illumination_consistency_pairs",
+                "illumination_match_points",
+                "illumination_match_pairs",
                 "pose_easy_pairs",
                 "pose_medium_pairs",
                 "pose_hard_pairs",
@@ -3634,6 +3723,8 @@ def main() -> int:
                     "hard_negative_weight": hard_negative_weight,
                     "diversity_weight": diversity_weight,
                     "abstention_weight": args.abstention_weight,
+                    "graph_matcher_loss_weight": args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0,
+                    "graph_matcher_accept_weight": args.graph_matcher_accept_weight if args.train_graph_matcher else 0.0,
                     **metrics,
                 }
             )
@@ -3651,6 +3742,8 @@ def main() -> int:
                     f"tw={teacher_weight:.3f} syn={args.synthetic_loss_weight:.3f} "
                     f"hn={hard_negative_weight:.3f} div={diversity_weight:.3f} "
                     f"abst={args.abstention_weight:.3f} "
+                    f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
+                    f"gacc={metrics.get('graph_matcher_accept_loss', 0.0):.6f} "
                     f"skip={int(metrics['skipped'])} "
                     f"top1={metrics['top1_accuracy']:.4f} top5={metrics['top5_accuracy']:.4f} "
                     f"rank={metrics['mean_positive_rank']:.2f} "

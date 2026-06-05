@@ -800,6 +800,8 @@ int run_train_command(const CliOptions& options)
         config.samples_per_pair = options.samples_per_pair;
         config.synthetic_loss_weight = options.synthetic_loss_weight;
         config.graph_matcher_loss_weight = options.graph_matcher_loss_weight;
+        config.graph_matcher_accept_weight = options.graph_matcher_accept_weight;
+        config.graph_matcher_accept_negative_topk = options.graph_matcher_accept_negative_topk;
         config.train_backbone = options.train_backbone;
         config.train_dual_fpn = options.train_dual_fpn;
         config.freeze_descriptor_head = options.freeze_descriptor_head;

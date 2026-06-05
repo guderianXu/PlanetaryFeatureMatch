@@ -817,6 +817,28 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["mean_negative_score"], 0.35)
         self.assertEqual(metrics["points"], 40.0)
 
+    def test_aggregate_graph_matcher_loss_metrics_weights_by_points(self):
+        rows = [
+            {
+                "graph_matcher_ce_loss": 2.0,
+                "graph_matcher_accept_loss": 0.4,
+                "graph_matcher_no_match_loss": 0.1,
+                "points": 8.0,
+            },
+            {
+                "graph_matcher_ce_loss": 4.0,
+                "graph_matcher_accept_loss": 0.8,
+                "graph_matcher_no_match_loss": 0.3,
+                "points": 24.0,
+            },
+        ]
+
+        metrics = train.aggregate_graph_matcher_loss_metrics(rows)
+
+        self.assertAlmostEqual(metrics["graph_matcher_ce_loss"], 3.5)
+        self.assertAlmostEqual(metrics["graph_matcher_accept_loss"], 0.7)
+        self.assertAlmostEqual(metrics["graph_matcher_no_match_loss"], 0.25)
+
     def test_split_train_eval_pairs_uses_tail_as_held_out(self):
         paths = [Path(f"pair_{index:06d}.pt") for index in range(6)]
 
@@ -1370,6 +1392,28 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.accept_head[-1].weight.grad)
 
+    def test_graph_matcher_correspondence_loss_can_return_lightglue_components(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
+        descriptors_b = descriptors_a.clone()
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+
+        loss, components = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            accept_weight=0.5,
+            accept_negative_topk=2,
+            return_components=True,
+        )
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(components["graph_matcher_ce_loss"].detach()), 0.0)
+        self.assertGreater(float(components["graph_matcher_accept_loss"].detach()), 0.0)
+        self.assertIn("graph_matcher_total_loss", components)
+
     def test_graph_matcher_raw_preservation_loss_penalizes_degraded_raw_margin(self):
         desc = torch.eye(3)
         logits = torch.zeros(4, 4)
@@ -1566,6 +1610,20 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.training_spatial_bins, 8)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
+
+    def test_parse_args_enables_lightglue_accept_loss_for_graph_training_by_default(self):
+        argv = [
+            "pfm_pytorch_training.py",
+            "--init-random",
+            "--cache-dir",
+            "train",
+            "--train-graph-matcher",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = train.parse_args()
+
+        self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
 
     def test_parse_args_accepts_gradient_accumulation_steps(self):
         argv = [
@@ -1883,6 +1941,67 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["loss"], 3.0)
         self.assertEqual(metrics["points"], 4.0)
         self.assertAlmostEqual(metrics["top1_accuracy"], 0.5)
+
+    def test_train_step_reports_graph_matcher_accept_metrics(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_graph.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+
+        def fake_graph_loss(*_args, **kwargs):
+            self.assertTrue(kwargs.get("return_components"))
+            return parameter * 3.0, {
+                "graph_matcher_total_loss": torch.tensor(3.0),
+                "graph_matcher_ce_loss": torch.tensor(2.0),
+                "graph_matcher_no_match_loss": torch.tensor(0.0),
+                "graph_matcher_accept_loss": torch.tensor(0.5),
+                "graph_matcher_raw_preservation_loss": torch.tensor(0.0),
+                "graph_matcher_hard_negative_dustbin_loss": torch.tensor(0.0),
+            }
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "graph_matcher_correspondence_loss", side_effect=fake_graph_loss),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                synthetic_loss_weight=0.0,
+                graph_matcher_loss_weight=1.0,
+                graph_matcher_accept_weight=0.2,
+            )
+
+        self.assertAlmostEqual(metrics["graph_matcher_ce_loss"], 2.0)
+        self.assertAlmostEqual(metrics["graph_matcher_accept_loss"], 0.5)
 
     def test_train_step_adds_illumination_consistency_loss(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))
