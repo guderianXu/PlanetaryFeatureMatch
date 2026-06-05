@@ -148,6 +148,7 @@ def compute_visual(
     keypoint_score_mode: str,
     max_keypoints: int,
     min_intensity: float,
+    matcher_mode: str,
     texture_fraction: float,
     weak_texture_fraction: float,
     keypoint_spatial_bins: int,
@@ -156,6 +157,7 @@ def compute_visual(
     max_matches: int,
     min_score: float,
     min_margin: float,
+    graph_width_prune_min_score: float,
     mutual: bool,
     geometry_filter: str,
     input_local_contrast: bool,
@@ -172,7 +174,7 @@ def compute_visual(
         )
     pair = pfm_pytorch_training.resize_pair_for_training(pair, max_image_size=max_image_size)
     with torch.no_grad():
-        descriptors_a, descriptors_b, score_a, score_b, _, _ = match_eval.feature_maps_and_keypoint_scores_for_pair(
+        descriptors_a, descriptors_b, score_a, score_b, raw_a, raw_b = match_eval.feature_maps_and_keypoint_scores_for_pair(
             model,
             pair,
             mode=descriptor_mode,
@@ -203,7 +205,37 @@ def compute_visual(
         )
         rows_a = match_eval.gather_descriptor_rows(descriptors_a, selected_a)
         rows_b = match_eval.gather_descriptor_rows(descriptors_b, selected_b)
-        if mutual:
+        if matcher_mode == "graph_matcher":
+            row_scores_a = match_eval.gather_score_rows(score_a, selected_a)
+            row_scores_b = match_eval.gather_score_rows(score_b, selected_b)
+            meta_dim = getattr(getattr(model, "config", None), "graph_keypoint_meta_dim", 2)
+            metadata_a = match_eval.graph_metadata_from_raw_features(
+                raw_a,
+                keypoints_a,
+                meta_dim=meta_dim,
+                fallback_scores=row_scores_a,
+            )
+            metadata_b = match_eval.graph_metadata_from_raw_features(
+                raw_b,
+                keypoints_b,
+                meta_dim=meta_dim,
+                fallback_scores=row_scores_b,
+            )
+            matches, scores = match_eval.graph_matcher_matches(
+                model,
+                rows_a,
+                keypoints_a,
+                rows_b,
+                keypoints_b,
+                max_matches=max_matches,
+                min_score=min_score,
+                graph_width_prune_min_score=graph_width_prune_min_score,
+                scores_a=row_scores_a,
+                scores_b=row_scores_b,
+                metadata_a=metadata_a,
+                metadata_b=metadata_b,
+            )
+        elif mutual:
             matches, scores = match_eval.mutual_nearest_matches(
                 rows_a,
                 rows_b,
@@ -794,6 +826,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--descriptor-mode", choices=["learned", "texture", "blend"], default="learned")
     parser.add_argument("--texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--keypoint-score-mode", choices=["texture", "learned"], default="texture")
+    parser.add_argument("--matcher-mode", choices=["raw_descriptor", "graph_matcher"], default="raw_descriptor")
     parser.add_argument("--max-keypoints", type=int, default=512)
     parser.add_argument("--min-intensity", type=float, default=0.01)
     parser.add_argument("--texture-fraction", type=float, default=0.85)
@@ -808,6 +841,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draw-matches", type=int, default=0)
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
+    parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--mutual", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
@@ -833,6 +867,8 @@ def main() -> int:
         raise ValueError("--filtered-max-matches must be nonnegative; use 0 to keep all matches")
     if args.filtered_draw_matches < 0:
         raise ValueError("--filtered-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.graph_width_prune_min_score < -1.0:
+        raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.filtered_min_margin < 0.0:
         raise ValueError("--filtered-min-margin must be nonnegative")
     if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
@@ -891,6 +927,7 @@ def main() -> int:
                 keypoint_score_mode=args.keypoint_score_mode,
                 max_keypoints=args.max_keypoints,
                 min_intensity=args.min_intensity,
+                matcher_mode=args.matcher_mode,
                 texture_fraction=args.texture_fraction,
                 weak_texture_fraction=args.weak_texture_fraction,
                 keypoint_spatial_bins=args.keypoint_spatial_bins,
@@ -899,6 +936,7 @@ def main() -> int:
                 max_matches=args.max_matches,
                 min_score=args.min_score,
                 min_margin=args.min_margin,
+                graph_width_prune_min_score=args.graph_width_prune_min_score,
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
                 input_local_contrast=args.input_local_contrast,
@@ -945,6 +983,7 @@ def main() -> int:
                     keypoint_score_mode=args.keypoint_score_mode,
                     max_keypoints=args.max_keypoints,
                     min_intensity=args.min_intensity,
+                    matcher_mode=args.matcher_mode,
                     texture_fraction=args.texture_fraction,
                     weak_texture_fraction=args.weak_texture_fraction,
                     keypoint_spatial_bins=args.keypoint_spatial_bins,
@@ -953,6 +992,7 @@ def main() -> int:
                     max_matches=args.filtered_max_matches,
                     min_score=args.filtered_min_score,
                     min_margin=args.filtered_min_margin,
+                    graph_width_prune_min_score=args.graph_width_prune_min_score,
                     mutual=args.filtered_mutual,
                     geometry_filter=args.filtered_geometry_filter,
                     input_local_contrast=args.input_local_contrast,
@@ -1031,6 +1071,7 @@ def main() -> int:
                         keypoint_score_mode=args.keypoint_score_mode,
                         max_keypoints=args.max_keypoints,
                         min_intensity=args.min_intensity,
+                        matcher_mode=args.matcher_mode,
                         texture_fraction=args.texture_fraction,
                         weak_texture_fraction=args.weak_texture_fraction,
                         keypoint_spatial_bins=args.keypoint_spatial_bins,
@@ -1039,6 +1080,7 @@ def main() -> int:
                         max_matches=args.max_matches,
                         min_score=args.min_score,
                         min_margin=args.min_margin,
+                        graph_width_prune_min_score=args.graph_width_prune_min_score,
                         mutual=args.mutual,
                         geometry_filter=args.geometry_filter,
                         input_local_contrast=args.input_local_contrast,

@@ -498,6 +498,7 @@ def graph_matcher_matches(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_width_prune_min_score: float = -1.0,
     scores_a: torch.Tensor | None = None,
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
@@ -509,6 +510,8 @@ def graph_matcher_matches(
         raise ValueError("graph_acceptance_margin must be non-negative")
     if graph_min_raw_margin < 0.0:
         raise ValueError("graph_min_raw_margin must be non-negative")
+    if graph_width_prune_min_score < -1.0:
+        raise ValueError("graph_width_prune_min_score must be at least -1.0; -1 disables pruning")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -534,11 +537,15 @@ def graph_matcher_matches(
         )
     else:
         meta_b = metadata_b.to(model_device, torch.float32)
+    graph_kwargs = {}
+    if graph_width_prune_min_score > -1.0:
+        graph_kwargs["width_prune_min_score"] = float(graph_width_prune_min_score)
     output = model.graph_matcher(
         desc_a.to(model_device, torch.float32),
         meta_a,
         desc_b.to(model_device, torch.float32),
         meta_b,
+        **graph_kwargs,
     )
     use_calibrated_logits = (
         abs(float(graph_dustbin_delta)) > 0.0
@@ -833,6 +840,7 @@ def match_pair_descriptor_maps(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_width_prune_min_score: float = -1.0,
     mutual: bool = False,
     geometry_filter: str = "none",
     texture_fraction: float = 1.0,
@@ -925,6 +933,7 @@ def match_pair_descriptor_maps(
             graph_acceptance_margin=graph_acceptance_margin,
             graph_min_raw_score=graph_min_raw_score,
             graph_min_raw_margin=graph_min_raw_margin,
+            graph_width_prune_min_score=graph_width_prune_min_score,
             scores_a=row_scores_a,
             scores_b=row_scores_b,
             metadata_a=metadata_a,
@@ -1168,6 +1177,7 @@ def evaluate_pair_path(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_width_prune_min_score: float = -1.0,
 ) -> MatchEvalResult:
     if min_target_gradient < 0.0:
         raise ValueError("min_target_gradient must be non-negative")
@@ -1212,6 +1222,7 @@ def evaluate_pair_path(
             graph_acceptance_margin=graph_acceptance_margin,
             graph_min_raw_score=graph_min_raw_score,
             graph_min_raw_margin=graph_min_raw_margin,
+            graph_width_prune_min_score=graph_width_prune_min_score,
             mutual=mutual,
             geometry_filter=geometry_filter,
             keypoint_spatial_bins=keypoint_spatial_bins,
@@ -1270,6 +1281,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -1318,6 +1330,8 @@ def main() -> int:
     args = parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
+    if args.graph_width_prune_min_score < -1.0:
+        raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     model = load_model(args)
     model.eval()
     device = torch.device(args.device)
@@ -1355,6 +1369,7 @@ def main() -> int:
                 graph_acceptance_margin=args.graph_acceptance_margin,
                 graph_min_raw_score=args.graph_min_raw_score,
                 graph_min_raw_margin=args.graph_min_raw_margin,
+                graph_width_prune_min_score=args.graph_width_prune_min_score,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

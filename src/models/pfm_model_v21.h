@@ -299,10 +299,11 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     /// @param descriptors_b MxD 的 B 视图描述子。
     /// @param keypoints_b MxC 的 B 视图关键点或元数据。
     /// @param apply_candidate_mask 是否应用候选 top-k 剪枝；训练监督 loss 可关闭以避免随机初期屏蔽真值。
+    /// @param width_prune_min_score LightGlue 风格宽度剪枝阈值；-1 表示关闭。
     /// @return 匹配 logits、互选匹配、概率和接受 logits。
     PfmV21GraphMatcherOutput forward(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
                                      const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
-                                     bool apply_candidate_mask = true);
+                                     bool apply_candidate_mask = true, double width_prune_min_score = -1.0);
 
   private:
     torch::Tensor metadata(const torch::Tensor& keypoints_or_meta) const;

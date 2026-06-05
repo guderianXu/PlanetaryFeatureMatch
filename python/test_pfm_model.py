@@ -100,6 +100,25 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(pair_logits.argmax(dim=1).tolist(), [1, 3, 0, 2])
         self.assertGreater(float(pair_logits.max(dim=1).values.min().detach()), 5.0)
 
+    def test_graph_matcher_width_pruning_restores_full_logits(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=1, keypoint_meta_dim=4)
+        with torch.no_grad():
+            graph.graph_delta_scale.fill_(0.0)
+            graph.accept_logit_scale.fill_(0.0)
+            graph.raw_score_temperature.fill_(0.1)
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        keypoints_a = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        keypoints_b = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+
+        output = graph(desc_a, keypoints_a, desc_b, keypoints_b, width_prune_min_score=0.5)
+
+        self.assertEqual(tuple(output.logits.shape), (4, 3))
+        self.assertEqual(tuple(output.accept_logits.shape), (3, 2))
+        self.assertNotIn(2, output.matches[:, 0].tolist())
+        self.assertTrue(torch.all(output.logits[2, :2] < -9000.0))
+        self.assertTrue(torch.all(output.accept_logits[2] < -9000.0))
+
     def test_current_libtorch_checkpoint_loads_strictly_when_available(self):
         checkpoint = Path("runs/rotation_clean_2026-05-25/rotation_clean_ft_e1_b2.pt")
         if not checkpoint.exists():

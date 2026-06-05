@@ -984,6 +984,8 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         args.visual_descriptor_mode,
         "--keypoint-score-mode",
         args.visual_keypoint_score_mode,
+        "--matcher-mode",
+        args.visual_matcher_mode,
         "--max-keypoints",
         str(args.visual_max_keypoints),
         "--max-matches",
@@ -992,6 +994,8 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         str(args.visual_draw_matches),
         "--threshold-px",
         str(args.visual_threshold_px),
+        "--graph-width-prune-min-score",
+        str(args.visual_graph_width_prune_min_score),
     ]
     command.append("--filtered-report" if args.visual_filtered_report else "--no-filtered-report")
     command.extend(
@@ -1780,10 +1784,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-max-image-size", type=int, default=768)
     parser.add_argument("--visual-descriptor-mode", choices=["learned", "texture", "blend"], default="learned")
     parser.add_argument("--visual-keypoint-score-mode", choices=["texture", "learned"], default="texture")
+    parser.add_argument("--visual-matcher-mode", choices=["raw_descriptor", "graph_matcher"], default="raw_descriptor")
     parser.add_argument("--visual-max-keypoints", type=int, default=384)
     parser.add_argument("--visual-max-matches", type=int, default=0)
     parser.add_argument("--visual-draw-matches", type=int, default=0)
     parser.add_argument("--visual-threshold-px", type=float, default=5.0)
+    parser.add_argument("--visual-graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--visual-filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
@@ -1832,6 +1838,8 @@ def main() -> int:
         raise ValueError("--visual-filtered-draw-matches must be nonnegative; use 0 to draw all matches")
     if args.visual_filtered_min_margin < 0.0:
         raise ValueError("--visual-filtered-min-margin must be non-negative")
+    if args.visual_graph_width_prune_min_score < -1.0:
+        raise ValueError("--visual-graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.hard_curriculum_max_probability < 0.0 or args.hard_curriculum_max_probability > 1.0:
         raise ValueError("--hard-curriculum-max-probability must be in [0, 1]")
     if args.false_match_curriculum_max_probability < 0.0 or args.false_match_curriculum_max_probability > 1.0:

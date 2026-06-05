@@ -834,6 +834,7 @@ class PlanetaryGraphMatcher(nn.Module):
         descriptors_b: torch.Tensor,
         keypoints_b: torch.Tensor,
         apply_candidate_mask: bool = True,
+        width_prune_min_score: float = -1.0,
     ) -> GraphMatcherOutput:
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
@@ -843,24 +844,54 @@ class PlanetaryGraphMatcher(nn.Module):
         desc_b = descriptors_b.to(dtype=torch.float32)
         kp_a = self._metadata(keypoints_a).to(device=desc_a.device)
         kp_b = self._metadata(keypoints_b).to(device=desc_b.device)
-        embed_a = torch.relu(self.descriptor_projection(desc_a) + self.keypoint_projection(kp_a))
-        embed_b = torch.relu(self.descriptor_projection(desc_b) + self.keypoint_projection(kp_b))
-        for layer in self.attention_layers:
-            embed_a, embed_b = layer(embed_a, embed_b)
-        embed_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
-        embed_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
-        raw_similarity = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
-        graph_delta = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
-        graph_delta = graph_delta + self._geometry_compatibility_bias(kp_a, kp_b)
-        accept_logits = self._acceptance_logits(raw_similarity, graph_delta, kp_a, kp_b)
-        raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
-        delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
-        accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
-        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
-        if apply_candidate_mask:
-            candidate_mask = self._candidate_mask(desc_a, desc_b)
-            pair_logits = pair_logits.masked_fill(~candidate_mask, -1.0e4)
-            accept_logits = accept_logits.masked_fill(~candidate_mask, -1.0e4)
+        raw_similarity_full = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
+        prune_enabled = float(width_prune_min_score) > -1.0
+        if prune_enabled:
+            if raw_similarity_full.numel() == 0:
+                keep_a = torch.zeros(desc_a.size(0), dtype=torch.bool, device=desc_a.device)
+                keep_b = torch.zeros(desc_b.size(0), dtype=torch.bool, device=desc_b.device)
+            else:
+                keep_a = raw_similarity_full.max(dim=1).values >= float(width_prune_min_score)
+                keep_b = raw_similarity_full.max(dim=0).values >= float(width_prune_min_score)
+        else:
+            keep_a = torch.ones(desc_a.size(0), dtype=torch.bool, device=desc_a.device)
+            keep_b = torch.ones(desc_b.size(0), dtype=torch.bool, device=desc_b.device)
+        indices_a = keep_a.nonzero(as_tuple=False).flatten()
+        indices_b = keep_b.nonzero(as_tuple=False).flatten()
+        desc_work_a = desc_a.index_select(0, indices_a)
+        desc_work_b = desc_b.index_select(0, indices_b)
+        kp_work_a = kp_a.index_select(0, indices_a)
+        kp_work_b = kp_b.index_select(0, indices_b)
+        if desc_work_a.size(0) == 0 or desc_work_b.size(0) == 0:
+            pair_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
+            accept_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
+        else:
+            embed_a = torch.relu(self.descriptor_projection(desc_work_a) + self.keypoint_projection(kp_work_a))
+            embed_b = torch.relu(self.descriptor_projection(desc_work_b) + self.keypoint_projection(kp_work_b))
+            for layer in self.attention_layers:
+                embed_a, embed_b = layer(embed_a, embed_b)
+            embed_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
+            embed_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
+            raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b)
+            graph_delta = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
+            graph_delta = graph_delta + self._geometry_compatibility_bias(kp_work_a, kp_work_b)
+            accept_logits_work = self._acceptance_logits(raw_similarity, graph_delta, kp_work_a, kp_work_b)
+            raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
+            delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
+            accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
+            pair_logits_work = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits_work
+            if apply_candidate_mask:
+                candidate_mask = self._candidate_mask(desc_work_a, desc_work_b)
+                pair_logits_work = pair_logits_work.masked_fill(~candidate_mask, -1.0e4)
+                accept_logits_work = accept_logits_work.masked_fill(~candidate_mask, -1.0e4)
+            if prune_enabled:
+                pair_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
+                accept_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
+                pair_logits[indices_a[:, None], indices_b[None, :]] = pair_logits_work
+                accept_logits[indices_a[:, None], indices_b[None, :]] = accept_logits_work
+            else:
+                pair_logits = pair_logits_work
+                accept_logits = accept_logits_work
         logits = torch.zeros(
             descriptors_a.size(0) + 1,
             descriptors_b.size(0) + 1,

@@ -155,6 +155,55 @@ static void pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss()
     PFM_REQUIRE(torch::isfinite(unmasked.logits).all().item<bool>());
 }
 
+static void pfm_v21_graph_matcher_width_pruning_restores_full_logits()
+{
+    using torch::indexing::Slice;
+
+    auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 1, 4);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key() == "graph_delta_scale")
+        {
+            parameter.value().fill_(0.0F);
+        }
+        if (parameter.key() == "accept_logit_scale")
+        {
+            parameter.value().fill_(0.0F);
+        }
+        if (parameter.key() == "raw_score_temperature")
+        {
+            parameter.value().fill_(0.1F);
+        }
+    }
+
+    auto descriptors_a = torch::zeros({3, 2}, torch::kFloat32);
+    auto descriptors_b = torch::zeros({2, 2}, torch::kFloat32);
+    descriptors_a.index_put_({0, 0}, 1.0F);
+    descriptors_a.index_put_({1, 1}, 1.0F);
+    descriptors_a.index_put_({2, 0}, -1.0F);
+    descriptors_b.index_put_({0, 0}, 1.0F);
+    descriptors_b.index_put_({1, 1}, 1.0F);
+    auto keypoints_a = torch::zeros({3, 2}, torch::kFloat32);
+    auto keypoints_b = torch::zeros({2, 2}, torch::kFloat32);
+    keypoints_a.index_put_({1, 0}, 1.0F);
+    keypoints_a.index_put_({2, 0}, 2.0F);
+    keypoints_b.index_put_({1, 0}, 1.0F);
+
+    const auto output = matcher->forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b, true, 0.5);
+
+    PFM_REQUIRE(output.logits.sizes() == torch::IntArrayRef({4, 3}));
+    PFM_REQUIRE(output.accept_logits.sizes() == torch::IntArrayRef({3, 2}));
+    if (output.matches.numel() > 0)
+    {
+        PFM_REQUIRE((output.matches.index({Slice(), 0}) != 2).all().item<bool>());
+    }
+    PFM_REQUIRE((output.logits.index({2, Slice(0, 2)}) < -9000.0F).all().item<bool>());
+    PFM_REQUIRE((output.accept_logits.index({2, Slice()}) < -9000.0F).all().item<bool>());
+}
+
 static void pfm_v21_optimizer_step_updates_parameters()
 {
     torch::manual_seed(7);
@@ -203,5 +252,7 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_scalar_parameters_match_python_shapes);
     register_test("pfm v21 graph matcher can disable candidate mask for training loss",
                   pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss);
+    register_test("pfm v21 graph matcher width pruning restores full logits",
+                  pfm_v21_graph_matcher_width_pruning_restores_full_logits);
     register_test("pfm v21 optimizer step updates parameters", pfm_v21_optimizer_step_updates_parameters);
 }
