@@ -138,6 +138,8 @@ def mutual_matches_with_margins(
     min_score: float,
     min_margin: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if max_matches < 0:
+        raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
     if rows_a.size(0) == 0 or rows_b.size(0) == 0:
         device = rows_a.device
         return (
@@ -167,7 +169,8 @@ def mutual_matches_with_margins(
             matches.append([source, target])
             scores.append(score)
             margins.append(margin)
-    order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:max_matches]
+    limit = len(scores) if max_matches == 0 else max_matches
+    order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:limit]
     device = rows_a.device
     if not order:
         return (
@@ -286,6 +289,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.max_matches < 0:
+        raise ValueError("--max-matches must be nonnegative; use 0 to keep all matches")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
     device = torch.device(args.device)

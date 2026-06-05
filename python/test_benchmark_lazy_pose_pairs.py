@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+from unittest import mock
 
 import torch
 
@@ -10,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "python"))
 
-from benchmark_lazy_pose_pairs import PhotometricAugmentConfig, StreamingCsvRows, apply_photometric_augmentation
+import benchmark_lazy_pose_pairs as lazy_bench
+from benchmark_lazy_pose_pairs import (
+    PhotometricAugmentConfig,
+    StreamingCsvRows,
+    apply_local_contrast_normalization,
+    apply_photometric_augmentation,
+)
 from patch_descriptor_training import SyntheticPair
 
 
@@ -57,6 +64,86 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertTrue(torch.allclose(augmented.view_b, pair.view_b))
         self.assertTrue(torch.allclose(augmented.warp_a_to_b, pair.warp_a_to_b))
         self.assertTrue(torch.equal(augmented.valid_mask, pair.valid_mask))
+
+    def test_local_contrast_normalization_preserves_geometry(self) -> None:
+        pair = self.make_pair()
+
+        normalized = apply_local_contrast_normalization(pair, strength=0.75, kernel_size=3)
+
+        self.assertFalse(torch.allclose(normalized.view_a, pair.view_a))
+        self.assertFalse(torch.allclose(normalized.view_b, pair.view_b))
+        self.assertTrue(torch.equal(normalized.valid_mask, pair.valid_mask))
+        self.assertTrue(torch.allclose(normalized.warp_a_to_b, pair.warp_a_to_b))
+        self.assertGreaterEqual(float(normalized.view_a.min()), 0.0)
+        self.assertLessEqual(float(normalized.view_a.max()), 1.0)
+
+    def test_parse_args_accepts_rejection_and_hard_negative_options(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--train-graph-matcher",
+            "--graph-matcher-loss-weight",
+            "0.4",
+            "--graph-matcher-no-match-points",
+            "64",
+            "--graph-matcher-no-match-weight",
+            "0.2",
+            "--abstention-weight",
+            "0.3",
+            "--warp-hard-negative-weight",
+            "0.2",
+            "--false-match-csv",
+            "false.csv",
+            "--false-match-weight",
+            "0.5",
+            "--false-match-curriculum-max-probability",
+            "0.75",
+            "--hard-variant",
+            "extreme",
+            "--hard-valid-fraction-max",
+            "0.55",
+            "--hard-curriculum-max-probability",
+            "0.8",
+            "--input-local-contrast",
+            "--input-local-contrast-strength",
+            "0.6",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertTrue(args.train_graph_matcher)
+        self.assertEqual(args.graph_matcher_no_match_points, 64)
+        self.assertEqual(args.false_match_csv, [Path("false.csv")])
+        self.assertEqual(args.hard_variant, ["extreme"])
+        self.assertTrue(args.input_local_contrast)
+        self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
+
+    def test_render_manifest_uses_image_path_as_uint8_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image_path = root / "images_u8" / "sample.tif"
+            depth_path = root / "depth.tif"
+            tsai_path = root / "sample.tsai"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"x")
+            depth_path.write_bytes(b"x")
+            tsai_path.write_text("x", encoding="utf-8")
+            manifest = root / "render_manifest.csv"
+            manifest.write_text(
+                "pose_id,base_id,variant,split,tsai_path,image_path,depth_path\n"
+                f"p,b,nadir,train,{tsai_path},{image_path},{depth_path}\n",
+                encoding="utf-8",
+            )
+
+            records = lazy_bench._read_render_manifest(manifest, {})
+
+        self.assertEqual(records[0].uint8_path, image_path)
 
     def test_streaming_csv_rows_flushes_after_each_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

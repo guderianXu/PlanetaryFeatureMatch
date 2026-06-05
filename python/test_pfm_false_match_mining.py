@@ -46,6 +46,22 @@ class PFMFalseMatchMiningTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0].score, 0.8)
         self.assertAlmostEqual(rows[0].margin, 0.1)
 
+    def test_zero_max_matches_keeps_all_mutual_false_match_candidates(self):
+        desc_a = torch.eye(5, dtype=torch.float32)[:4]
+        desc_b = torch.eye(5, dtype=torch.float32)[:4]
+
+        matches, scores, margins = miner.mutual_matches_with_margins(
+            desc_a,
+            desc_b,
+            max_matches=0,
+            min_score=-1.0,
+            min_margin=0.0,
+        )
+
+        self.assertEqual(matches.tolist(), [[0, 0], [1, 1], [2, 2], [3, 3]])
+        self.assertEqual(scores.numel(), 4)
+        self.assertEqual(margins.numel(), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

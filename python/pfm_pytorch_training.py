@@ -2567,8 +2567,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-output-dir", type=Path, default=None)
     parser.add_argument("--report-sample-count", type=int, default=16)
     parser.add_argument("--report-max-keypoints", type=int, default=2048)
-    parser.add_argument("--report-max-matches", type=int, default=512)
-    parser.add_argument("--report-draw-matches", type=int, default=160)
+    parser.add_argument("--report-max-matches", type=int, default=0)
+    parser.add_argument("--report-draw-matches", type=int, default=0)
     parser.add_argument("--report-min-margin", type=float, default=0.0)
     parser.add_argument("--report-matcher-mode", choices=["raw_descriptor", "graph_matcher", "both"], default="raw_descriptor")
     parser.add_argument("--report-texture-keypoint-fraction", type=float, default=1.0)
@@ -2677,10 +2677,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--report-sample-count must be nonnegative")
     if args.report_max_keypoints <= 0:
         parser.error("--report-max-keypoints must be positive")
-    if args.report_max_matches <= 0:
-        parser.error("--report-max-matches must be positive")
-    if args.report_draw_matches <= 0:
-        parser.error("--report-draw-matches must be positive")
+    if args.report_max_matches < 0:
+        parser.error("--report-max-matches must be nonnegative; use 0 to keep all matches")
+    if args.report_draw_matches < 0:
+        parser.error("--report-draw-matches must be nonnegative; use 0 to draw all matches")
     if args.report_min_margin < 0.0:
         parser.error("--report-min-margin must be nonnegative")
     if args.report_texture_keypoint_fraction < 0.0 or args.report_texture_keypoint_fraction > 1.0:
@@ -2971,8 +2971,12 @@ def main() -> int:
             handle,
             fieldnames=[
                 "step",
+                "batch",
+                "total_batches",
+                "total_iterations",
                 "epoch",
                 "epoch_progress",
+                "total_epochs",
                 "loss",
                 "grad_l2",
                 "skipped",
@@ -3004,6 +3008,7 @@ def main() -> int:
         for step in range(1, args.steps + 1):
             epoch_float = step / float(steps_per_epoch)
             epoch_index = min(int((step - 1) // steps_per_epoch) + 1, max(1, math.ceil(total_epochs)))
+            batch_index = ((step - 1) % steps_per_epoch) + 1
             teacher_weight = scheduled_value(
                 step,
                 start=args.teacher_weight,
@@ -3121,8 +3126,12 @@ def main() -> int:
             writer.writerow(
                 {
                     "step": step,
+                    "batch": batch_index,
+                    "total_batches": steps_per_epoch,
+                    "total_iterations": args.steps,
                     "epoch": epoch_index,
                     "epoch_progress": epoch_float,
+                    "total_epochs": total_epochs,
                     "teacher_weight": teacher_weight,
                     "synthetic_loss_weight": args.synthetic_loss_weight,
                     "hard_negative_weight": hard_negative_weight,

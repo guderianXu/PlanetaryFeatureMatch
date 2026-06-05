@@ -397,8 +397,8 @@ def greedy_unique_matches(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if topk <= 0:
         raise ValueError("topk must be positive")
-    if max_matches <= 0:
-        raise ValueError("max_matches must be positive")
+    if max_matches < 0:
+        raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -418,6 +418,7 @@ def greedy_unique_matches(
     used_b: set[int] = set()
     matches: list[list[int]] = []
     scores: list[float] = []
+    limit = min(desc_a.size(0), desc_b.size(0)) if max_matches == 0 else max_matches
     for score, source, target in candidates:
         if source in used_a or target in used_b:
             continue
@@ -425,7 +426,7 @@ def greedy_unique_matches(
         used_b.add(target)
         matches.append([source, target])
         scores.append(score)
-        if len(matches) >= max_matches:
+        if len(matches) >= limit:
             break
     device = desc_a.device
     if not matches:
@@ -444,8 +445,8 @@ def mutual_nearest_matches(
     min_score: float = -1.0,
     min_margin: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if max_matches <= 0:
-        raise ValueError("max_matches must be positive")
+    if max_matches < 0:
+        raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
     if min_margin < 0.0:
         raise ValueError("min_margin must be non-negative")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
@@ -473,7 +474,8 @@ def mutual_nearest_matches(
         if int(best_sources[target].detach().cpu()) == source:
             matches.append([source, target])
             scores.append(score)
-    order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:max_matches]
+    limit = len(scores) if max_matches == 0 else max_matches
+    order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:limit]
     device = desc_a.device
     if not order:
         return torch.empty(0, 2, dtype=torch.long, device=device), torch.empty(0, dtype=torch.float32, device=device)
@@ -501,8 +503,8 @@ def graph_matcher_matches(
     metadata_a: torch.Tensor | None = None,
     metadata_b: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if max_matches <= 0:
-        raise ValueError("max_matches must be positive")
+    if max_matches < 0:
+        raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
     if graph_acceptance_margin < 0.0:
         raise ValueError("graph_acceptance_margin must be non-negative")
     if graph_min_raw_margin < 0.0:
@@ -581,7 +583,8 @@ def graph_matcher_matches(
             )
     matches = matches[keep]
     scores = scores[keep]
-    order = torch.argsort(scores, descending=True)[:max_matches]
+    limit = scores.numel() if max_matches == 0 else max_matches
+    order = torch.argsort(scores, descending=True)[:limit]
     return matches.index_select(0, order), scores.index_select(0, order)
 
 

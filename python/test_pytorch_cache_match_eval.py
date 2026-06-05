@@ -507,6 +507,14 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertEqual(matches.tolist(), [[0, 0], [2, 1]])
 
+    def test_zero_max_matches_keeps_all_unique_descriptor_matches(self):
+        desc_a = torch.eye(5, dtype=torch.float32)[:4]
+        desc_b = torch.eye(5, dtype=torch.float32)[:4]
+
+        matches, _ = eval_py.greedy_unique_matches(desc_a, desc_b, max_matches=0, min_score=-1.0)
+
+        self.assertEqual(matches.tolist(), [[0, 0], [1, 1], [2, 2], [3, 3]])
+
     def test_mutual_nearest_matches_can_require_best_second_margin(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         desc_b = torch.tensor([[1.0, 0.0], [0.99, 0.01], [0.0, 1.0]])

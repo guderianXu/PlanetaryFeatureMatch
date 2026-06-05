@@ -28,6 +28,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_DIR = PROJECT_ROOT / "python"
@@ -37,9 +38,16 @@ for candidate in (PYTHON_DIR, SCRIPTS_DIR):
         sys.path.insert(0, str(candidate))
 
 import pfm_model  # noqa: E402
+import pytorch_cache_match_eval as match_eval  # noqa: E402
 from generate_cross_position_pose_pairs import parse_tsai, read_float_tif  # noqa: E402
 from patch_descriptor_training import SyntheticPair  # noqa: E402
-from pfm_pytorch_training import descriptor_parameters, train_step  # noqa: E402
+from pfm_pytorch_training import (  # noqa: E402
+    FalseMatchLabels,
+    descriptor_parameters,
+    hard_pair_probability,
+    read_false_match_labels,
+    train_step,
+)
 
 
 DEFAULT_TARGET_VARIANTS = (
@@ -148,6 +156,9 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
             if not pose_id or pose_id == "pose_id":
                 continue
             image_path = Path(row["image_path"])
+            uint8_path = uint8_paths.get(str(image_path))
+            if uint8_path is None and image_path.exists():
+                uint8_path = image_path
             records.append(
                 RenderRecord(
                     pose_id=pose_id,
@@ -156,7 +167,7 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
                     split=row["split"],
                     tsai_path=Path(row["tsai_path"]),
                     image_path=image_path,
-                    uint8_path=uint8_paths.get(str(image_path)),
+                    uint8_path=uint8_path,
                     depth_path=Path(row["depth_path"]),
                 )
             )
@@ -344,6 +355,36 @@ def apply_photometric_augmentation(
     return SyntheticPair(
         view_a=_augment_single_view(pair.view_a, config, generator_a),
         view_b=_augment_single_view(pair.view_b, config, generator_b),
+        warp_a_to_b=pair.warp_a_to_b,
+        valid_mask=pair.valid_mask,
+    )
+
+
+def _local_contrast_single_view(view: torch.Tensor, *, strength: float, kernel_size: int) -> torch.Tensor:
+    if strength <= 0.0:
+        return view
+    kernel = max(3, int(kernel_size))
+    if kernel % 2 == 0:
+        kernel += 1
+    image = view.to(torch.float32).clamp(0.0, 1.0)
+    batch = image.unsqueeze(0)
+    mean = F.avg_pool2d(batch, kernel_size=kernel, stride=1, padding=kernel // 2, count_include_pad=False)
+    high_pass = torch.clamp((batch - mean) * 0.75 + 0.5, 0.0, 1.0)
+    normalized = (1.0 - float(strength)) * batch + float(strength) * high_pass
+    return normalized.squeeze(0).clamp(0.0, 1.0).contiguous()
+
+
+def apply_local_contrast_normalization(
+    pair: SyntheticPair,
+    *,
+    strength: float,
+    kernel_size: int = 31,
+) -> SyntheticPair:
+    if strength <= 0.0:
+        return pair
+    return SyntheticPair(
+        view_a=_local_contrast_single_view(pair.view_a, strength=strength, kernel_size=kernel_size),
+        view_b=_local_contrast_single_view(pair.view_b, strength=strength, kernel_size=kernel_size),
         warp_a_to_b=pair.warp_a_to_b,
         valid_mask=pair.valid_mask,
     )
@@ -894,12 +935,183 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         "--threshold-px",
         str(args.visual_threshold_px),
     ]
+    command.append("--filtered-report" if args.visual_filtered_report else "--no-filtered-report")
+    command.extend(
+        [
+            "--filtered-geometry-filter",
+            args.visual_filtered_geometry_filter,
+            "--filtered-min-margin",
+            str(args.visual_filtered_min_margin),
+            "--filtered-min-score",
+            str(args.visual_filtered_min_score),
+            "--filtered-max-matches",
+            str(args.visual_filtered_max_matches),
+            "--filtered-draw-matches",
+            str(args.visual_filtered_draw_matches),
+        ]
+    )
+    if args.input_local_contrast:
+        command.extend(
+            [
+                "--input-local-contrast",
+                "--input-local-contrast-strength",
+                str(args.input_local_contrast_strength),
+                "--input-local-contrast-kernel",
+                str(args.input_local_contrast_kernel),
+            ]
+        )
+    if args.visual_filtered_mutual:
+        command.append("--filtered-mutual")
+    else:
+        command.append("--no-filtered-mutual")
     try:
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
     except Exception as exc:
         _write_visual_report_error(report_dir, command=command, error=str(exc))
         return report_dir
     return report_dir
+
+
+def select_hard_lazy_specs(specs: list[LazyPairSpec], hard_variants: list[str]) -> list[LazyPairSpec]:
+    tokens = [item.strip().lower() for item in hard_variants if item.strip()]
+    if not tokens:
+        return []
+    selected: list[LazyPairSpec] = []
+    for spec in specs:
+        variant = spec.target.variant.lower()
+        if any(token in variant or token in spec.reference.base_id.lower() for token in tokens):
+            selected.append(spec)
+    return selected
+
+
+def _valid_source_mask(valid_mask: torch.Tensor, points_a: torch.Tensor) -> torch.Tensor:
+    if points_a.numel() == 0:
+        return torch.empty(0, dtype=torch.bool, device=points_a.device)
+    height, width = valid_mask.shape
+    in_bounds = (
+        (points_a[:, 0] >= 0.0)
+        & (points_a[:, 0] <= float(width - 1))
+        & (points_a[:, 1] >= 0.0)
+        & (points_a[:, 1] <= float(height - 1))
+    )
+    rounded = points_a.round().to(torch.long)
+    x = rounded[:, 0].clamp(0, width - 1)
+    y = rounded[:, 1].clamp(0, height - 1)
+    return in_bounds.to(valid_mask.device) & valid_mask.to(points_a.device)[y, x]
+
+
+@torch.no_grad()
+def mine_false_matches_for_lazy_pair(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    pair: SyntheticPair,
+    pair_path: Path,
+    *,
+    device: torch.device,
+    descriptor_mode: str,
+    texture_blend_weight: float,
+    keypoint_score_mode: str,
+    max_keypoints: int,
+    max_matches: int,
+    min_intensity: float,
+    min_score: float,
+    min_margin: float,
+    threshold_px: float,
+) -> tuple[dict[str, FalseMatchLabels], list[dict[str, object]]]:
+    if max_matches < 0:
+        raise ValueError("false match mining max_matches must be nonnegative")
+    was_training = model.training
+    model.eval()
+    try:
+        pair_device = SyntheticPair(
+            view_a=pair.view_a.to(device=device, non_blocking=True),
+            view_b=pair.view_b.to(device=device, non_blocking=True),
+            warp_a_to_b=pair.warp_a_to_b.to(device=device, non_blocking=True),
+            valid_mask=pair.valid_mask.to(device=device, non_blocking=True),
+        )
+        descriptors_a, descriptors_b, score_a, score_b, _, _ = match_eval.feature_maps_and_keypoint_scores_for_pair(
+            model,
+            pair_device,
+            mode=descriptor_mode,
+            texture_blend_weight=texture_blend_weight,
+            keypoint_score_mode=keypoint_score_mode,
+        )
+        keypoints_a, selected_a = match_eval.select_descriptor_keypoints(
+            pair_device.view_a,
+            descriptors_a,
+            max_keypoints=max_keypoints,
+            min_intensity=min_intensity,
+            texture_fraction=1.0,
+            weak_texture_fraction=0.0,
+            keypoint_scores=score_a,
+        )
+        keypoints_b, selected_b = match_eval.select_descriptor_keypoints(
+            pair_device.view_b,
+            descriptors_b,
+            max_keypoints=max_keypoints,
+            min_intensity=min_intensity,
+            texture_fraction=1.0,
+            weak_texture_fraction=0.0,
+            keypoint_scores=score_b,
+        )
+        rows_a = match_eval.gather_descriptor_rows(descriptors_a, selected_a)
+        rows_b = match_eval.gather_descriptor_rows(descriptors_b, selected_b)
+        matches, scores = match_eval.mutual_nearest_matches(
+            rows_a,
+            rows_b,
+            max_matches=max_matches,
+            min_score=min_score,
+            min_margin=min_margin,
+        )
+        if matches.numel() == 0:
+            return {}, []
+        _, image_height_a, image_width_a = pair_device.view_a.shape
+        _, image_height_b, image_width_b = pair_device.view_b.shape
+        points_a = match_eval._feature_to_image_points(
+            keypoints_a.index_select(0, matches[:, 0].to(keypoints_a.device)),
+            feature_height=descriptors_a.size(2),
+            feature_width=descriptors_a.size(3),
+            image_height=image_height_a,
+            image_width=image_width_a,
+        )
+        points_b = match_eval._feature_to_image_points(
+            keypoints_b.index_select(0, matches[:, 1].to(keypoints_b.device)),
+            feature_height=descriptors_b.size(2),
+            feature_width=descriptors_b.size(3),
+            image_height=image_height_b,
+            image_width=image_width_b,
+        )
+        target_b = match_eval.sample_warp(pair_device.warp_a_to_b, points_a)
+        errors = (target_b.to(points_b.device) - points_b).norm(dim=1)
+        valid = _valid_source_mask(pair_device.valid_mask, points_a)
+        wrong = (~valid.to(errors.device)) | errors.gt(float(threshold_px))
+        indices = torch.nonzero(wrong, as_tuple=False).reshape(-1)
+        if indices.numel() == 0:
+            return {}, []
+        false_a = points_a.index_select(0, indices).detach().cpu()
+        false_b = points_b.index_select(0, indices).detach().cpu()
+        path_key = pair_path.as_posix()
+        labels = {
+            path_key: FalseMatchLabels(
+                points_a_xy=false_a.to(torch.float32),
+                points_b_xy=false_b.to(torch.float32),
+            )
+        }
+        rows = []
+        for local_index in indices.detach().cpu().tolist():
+            rows.append(
+                {
+                    "pair_pt": path_key,
+                    "ax": f"{float(points_a[local_index, 0].detach().cpu()):.3f}",
+                    "ay": f"{float(points_a[local_index, 1].detach().cpu()):.3f}",
+                    "bx": f"{float(points_b[local_index, 0].detach().cpu()):.3f}",
+                    "by": f"{float(points_b[local_index, 1].detach().cpu()):.3f}",
+                    "error_px": f"{float(errors[local_index].detach().cpu()):.3f}",
+                    "score": f"{float(scores[local_index].detach().cpu()):.6f}",
+                }
+            )
+        return labels, rows
+    finally:
+        model.train(was_training)
 
 
 def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, object]:
@@ -919,18 +1131,25 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "top1_accuracy",
         "mean_positive_rank",
         "points",
+        "false_match_points",
+        "false_match_pairs",
+        "hard_lazy_pairs",
         "data_wait_ms",
         "train_ms",
         "valid_fraction_mean",
         "worker_elapsed_ms_mean",
         "photometric_augment",
         "photometric_probability",
+        "input_local_contrast",
+        "graph_matcher_loss_weight",
+        "abstention_weight",
         "gpu_util_percent",
         "gpu_mem_used_mib",
         "gpu_mem_total_mib",
     ]
     metrics_writer = StreamingCsvRows(args.output_dir / "train_metrics.csv", train_metric_fields).open()
-    iterator = iter_lazy_pairs(
+    hard_specs = select_hard_lazy_specs(specs, args.hard_variant)
+    base_iterator = iter_lazy_pairs(
         specs,
         count=args.steps * args.batch_pairs,
         workers=args.workers,
@@ -946,79 +1165,205 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         skip_bad_pairs=args.skip_bad_pairs,
         max_bad_pairs=args.max_bad_pairs,
     )
+    hard_iterator: Iterator[LazyPairResult] | None = None
+    if hard_specs:
+        hard_iterator = iter_lazy_pairs(
+            hard_specs,
+            count=args.steps * args.batch_pairs,
+            workers=args.workers,
+            prefetch=args.prefetch_batches,
+            cache_max_items=args.worker_cache_items,
+            crop_size=args.crop_size,
+            image_source=args.image_source,
+            max_attempts=args.max_attempts,
+            min_valid_fraction=args.min_valid_fraction,
+            absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
+            relative_depth_tolerance=args.relative_depth_tolerance,
+            seed=args.seed + 91013,
+            skip_bad_pairs=args.skip_bad_pairs,
+            max_bad_pairs=args.max_bad_pairs,
+        )
+        print(f"hard_lazy_specs={len(hard_specs)} hard_variants={','.join(args.hard_variant)}", flush=True)
+    static_false_matches = read_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
+    false_match_handle = None
+    false_match_writer: csv.DictWriter | None = None
+    if args.mine_false_matches:
+        false_output = args.false_match_output or (args.output_dir / "false_matches.csv")
+        false_output.parent.mkdir(parents=True, exist_ok=True)
+        false_match_handle = false_output.open("w", encoding="utf-8", newline="")
+        false_match_writer = csv.DictWriter(
+            false_match_handle,
+            fieldnames=["pair_pt", "ax", "ay", "bx", "by", "error_px", "score"],
+        )
+        false_match_writer.writeheader()
 
     start = time.perf_counter()
-    for step in range(1, args.steps + 1):
-        fetch_start = time.perf_counter()
-        results = [next(iterator) for _ in range(args.batch_pairs)]
-        data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
-        fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
-        augmented_pairs = [
-            apply_photometric_augmentation(
-                result.pair,
-                photometric_config,
-                seed=args.seed + step * 1000003 + pair_index * 9176,
+    try:
+        for step in range(1, args.steps + 1):
+            fetch_start = time.perf_counter()
+            hard_probability = hard_pair_probability(
+                step,
+                max_probability=args.hard_curriculum_max_probability,
+                warmup_steps=args.hard_curriculum_warmup_steps,
             )
-            for pair_index, result in enumerate(results)
-        ]
-        prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
-        train_start = time.perf_counter()
-        metrics = train_step(
-            model,
-            optimizer,
-            [],
-            device=device,
-            batch_pairs=args.batch_pairs,
-            samples_per_pair=args.samples_per_pair,
-            min_intensity=args.min_intensity,
-            generator=generator,
-            temperature=args.temperature,
-            teacher_weight=args.teacher_weight,
-            synthetic_loss_weight=args.synthetic_loss_weight,
-            diversity_weight=args.diversity_weight,
-            max_grad_norm=args.max_grad_norm,
-            skip_nonfinite_steps=args.skip_nonfinite_steps,
-            train_blended_descriptors=args.train_blended_descriptors,
-            texture_blend_weight=args.texture_blend_weight,
-            graph_matcher_loss_weight=args.graph_matcher_loss_weight,
-            training_spatial_bins=args.training_spatial_bins,
-            training_crop_size=0,
-            training_max_image_size=0,
-            forced_pair_paths=fake_paths,
-            prefetched_pairs=prefetched,
-        )
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        train_ms = (time.perf_counter() - train_start) * 1000.0
-        gpu = _gpu_snapshot()
-        row = {
-            "step": step,
-            "loss": f"{metrics.get('loss', float('nan')):.6f}",
-            "top1_accuracy": f"{metrics.get('top1_accuracy', float('nan')):.6f}",
-            "mean_positive_rank": f"{metrics.get('mean_positive_rank', float('nan')):.3f}",
-            "points": f"{metrics.get('points', 0.0):.0f}",
-            "data_wait_ms": f"{data_wait_ms:.2f}",
-            "train_ms": f"{train_ms:.2f}",
-            "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
-            "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
-            "photometric_augment": int(photometric_config.enabled),
-            "photometric_probability": f"{photometric_config.probability:.3f}",
-            **gpu,
-        }
-        rows.append(row)
-        metrics_writer.write(row)
-        if step == 1 or step % max(1, args.progress_every) == 0:
-            elapsed = time.perf_counter() - start
-            print(
-                f"train step={step}/{args.steps} loss={row['loss']} "
-                f"top1={row['top1_accuracy']} data_wait={data_wait_ms:.1f}ms "
-                f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
-                flush=True,
+            use_hard_iterator = hard_iterator is not None and random.random() < hard_probability
+            active_iterator = hard_iterator if use_hard_iterator and hard_iterator is not None else base_iterator
+            results = [next(active_iterator) for _ in range(args.batch_pairs)]
+            data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
+            fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
+            augmented_pairs = []
+            for pair_index, result in enumerate(results):
+                pair = apply_photometric_augmentation(
+                    result.pair,
+                    photometric_config,
+                    seed=args.seed + step * 1000003 + pair_index * 9176,
+                )
+                if args.input_local_contrast:
+                    pair = apply_local_contrast_normalization(
+                        pair,
+                        strength=args.input_local_contrast_strength,
+                        kernel_size=args.input_local_contrast_kernel,
+                    )
+                augmented_pairs.append(pair)
+            prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
+            mined_false_matches = dict(static_false_matches)
+            mined_false_rows: list[dict[str, object]] = []
+            false_probability = hard_pair_probability(
+                step,
+                max_probability=args.false_match_curriculum_max_probability,
+                warmup_steps=args.false_match_curriculum_warmup_steps,
             )
-        if args.save_every_steps > 0 and step % args.save_every_steps == 0:
-            _save_training_state(args.output_dir / "checkpoints" / "latest_pytorch_pfm_state.pt", model, args, step)
-
-    metrics_writer.close()
+            if args.mine_false_matches and args.false_match_weight > 0.0 and random.random() < false_probability:
+                for pair_path, pair in zip(fake_paths, augmented_pairs):
+                    labels, label_rows = mine_false_matches_for_lazy_pair(
+                        model,
+                        pair,
+                        pair_path,
+                        device=device,
+                        descriptor_mode=args.visual_descriptor_mode,
+                        texture_blend_weight=args.texture_blend_weight,
+                        keypoint_score_mode=args.visual_keypoint_score_mode,
+                        max_keypoints=args.false_match_mine_max_keypoints,
+                        max_matches=args.false_match_mine_max_matches,
+                        min_intensity=args.min_intensity,
+                        min_score=args.false_match_mine_min_score,
+                        min_margin=args.false_match_mine_min_margin,
+                        threshold_px=args.false_match_mine_threshold_px,
+                    )
+                    mined_false_matches.update(labels)
+                    mined_false_rows.extend(label_rows)
+                if false_match_writer is not None and false_match_handle is not None:
+                    for mined_row in mined_false_rows:
+                        false_match_writer.writerow(mined_row)
+                    false_match_handle.flush()
+            train_start = time.perf_counter()
+            metrics = train_step(
+                model,
+                optimizer,
+                [],
+                device=device,
+                batch_pairs=args.batch_pairs,
+                samples_per_pair=args.samples_per_pair,
+                min_intensity=args.min_intensity,
+                generator=generator,
+                temperature=args.temperature,
+                teacher_weight=args.teacher_weight,
+                synthetic_loss_weight=args.synthetic_loss_weight,
+                hard_negative_weight=args.hard_negative_weight,
+                diversity_weight=args.diversity_weight,
+                warp_hard_negative_weight=args.warp_hard_negative_weight,
+                warp_hard_negative_radius=args.warp_hard_negative_radius,
+                warp_hard_negative_margin=args.warp_hard_negative_margin,
+                warp_hard_negative_candidates=args.warp_hard_negative_candidates,
+                abstention_weight=args.abstention_weight,
+                abstention_negative_radius=args.abstention_negative_radius,
+                abstention_max_false_score=args.abstention_max_false_score,
+                abstention_topk=args.abstention_topk,
+                abstention_candidates=args.abstention_candidates,
+                max_grad_norm=args.max_grad_norm,
+                skip_nonfinite_steps=args.skip_nonfinite_steps,
+                train_blended_descriptors=args.train_blended_descriptors,
+                texture_blend_weight=args.texture_blend_weight,
+                false_matches=mined_false_matches,
+                false_match_weight=args.false_match_weight,
+                false_match_max_points=args.false_match_max_points,
+                false_match_max_score=args.false_match_max_score,
+                false_match_pair_paths=fake_paths,
+                false_match_probability=1.0 if mined_false_matches else 0.0,
+                graph_matcher_loss_weight=args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0,
+                graph_matcher_metadata_mode=args.graph_matcher_metadata_mode,
+                graph_matcher_no_match_points=args.graph_matcher_no_match_points,
+                graph_matcher_no_match_weight=args.graph_matcher_no_match_weight,
+                graph_matcher_no_match_min_distance=args.graph_matcher_no_match_min_distance,
+                graph_matcher_accept_weight=args.graph_matcher_accept_weight,
+                graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
+                graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
+                graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
+                graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
+                graph_matcher_hard_negative_dustbin_weight=args.graph_matcher_hard_negative_dustbin_weight,
+                graph_matcher_hard_negative_dustbin_topk=args.graph_matcher_hard_negative_dustbin_topk,
+                graph_matcher_hard_negative_dustbin_margin=args.graph_matcher_hard_negative_dustbin_margin,
+                graph_matcher_hard_negative_dustbin_spatial_min_distance=(
+                    args.graph_matcher_hard_negative_dustbin_spatial_min_distance
+                ),
+                graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
+                graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                training_spatial_bins=args.training_spatial_bins,
+                training_crop_size=0,
+                training_max_image_size=0,
+                forced_pair_paths=fake_paths,
+                prefetched_pairs=prefetched,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            train_ms = (time.perf_counter() - train_start) * 1000.0
+            gpu = _gpu_snapshot()
+            hard_lazy_pairs = sum(
+                1
+                for result in results
+                if use_hard_iterator
+                or (
+                    args.hard_valid_fraction_max > 0.0
+                    and result.valid_fraction <= float(args.hard_valid_fraction_max)
+                )
+            )
+            row = {
+                "step": step,
+                "loss": f"{metrics.get('loss', float('nan')):.6f}",
+                "top1_accuracy": f"{metrics.get('top1_accuracy', float('nan')):.6f}",
+                "mean_positive_rank": f"{metrics.get('mean_positive_rank', float('nan')):.3f}",
+                "points": f"{metrics.get('points', 0.0):.0f}",
+                "false_match_points": f"{metrics.get('false_match_points', 0.0):.0f}",
+                "false_match_pairs": f"{metrics.get('false_match_pairs', 0.0):.0f}",
+                "hard_lazy_pairs": hard_lazy_pairs,
+                "data_wait_ms": f"{data_wait_ms:.2f}",
+                "train_ms": f"{train_ms:.2f}",
+                "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
+                "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
+                "photometric_augment": int(photometric_config.enabled),
+                "photometric_probability": f"{photometric_config.probability:.3f}",
+                "input_local_contrast": int(args.input_local_contrast),
+                "graph_matcher_loss_weight": f"{args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0:.6f}",
+                "abstention_weight": f"{args.abstention_weight:.6f}",
+                **gpu,
+            }
+            rows.append(row)
+            metrics_writer.write(row)
+            if step == 1 or step % max(1, args.progress_every) == 0:
+                elapsed = time.perf_counter() - start
+                print(
+                    f"train step={step}/{args.steps} loss={row['loss']} "
+                    f"top1={row['top1_accuracy']} false={row['false_match_points']} "
+                    f"hard={row['hard_lazy_pairs']} data_wait={data_wait_ms:.1f}ms "
+                    f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
+                    flush=True,
+                )
+            if args.save_every_steps > 0 and step % args.save_every_steps == 0:
+                _save_training_state(args.output_dir / "checkpoints" / "latest_pytorch_pfm_state.pt", model, args, step)
+    finally:
+        metrics_writer.close()
+        if false_match_handle is not None:
+            false_match_handle.close()
     elapsed = time.perf_counter() - start
     data_wait_values = [float(row["data_wait_ms"]) for row in rows]
     train_values = [float(row["train_ms"]) for row in rows]
@@ -1095,6 +1440,19 @@ def _save_training_state(
                 "photometric_gamma": float(args.photometric_gamma),
                 "photometric_shadow": float(args.photometric_shadow),
                 "photometric_noise": float(args.photometric_noise),
+                "input_local_contrast": bool(args.input_local_contrast),
+                "input_local_contrast_strength": float(args.input_local_contrast_strength),
+                "hard_variant": list(args.hard_variant),
+                "hard_curriculum_max_probability": float(args.hard_curriculum_max_probability),
+                "false_match_csv": [str(path) for path in args.false_match_csv],
+                "false_match_weight": float(args.false_match_weight),
+                "mine_false_matches": bool(args.mine_false_matches),
+                "train_graph_matcher": bool(args.train_graph_matcher),
+                "graph_matcher_loss_weight": float(args.graph_matcher_loss_weight),
+                "graph_matcher_no_match_points": int(args.graph_matcher_no_match_points),
+                "graph_matcher_no_match_weight": float(args.graph_matcher_no_match_weight),
+                "abstention_weight": float(args.abstention_weight),
+                "warp_hard_negative_weight": float(args.warp_hard_negative_weight),
             },
         },
         path,
@@ -1139,13 +1497,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--teacher-weight", type=float, default=1.0)
     parser.add_argument("--synthetic-loss-weight", type=float, default=1.0)
+    parser.add_argument("--hard-negative-weight", type=float, default=0.5)
     parser.add_argument("--diversity-weight", type=float, default=0.10)
+    parser.add_argument("--warp-hard-negative-weight", type=float, default=0.0)
+    parser.add_argument("--warp-hard-negative-radius", type=float, default=2.0)
+    parser.add_argument("--warp-hard-negative-margin", type=float, default=0.2)
+    parser.add_argument("--warp-hard-negative-candidates", type=int, default=4096)
+    parser.add_argument("--abstention-weight", type=float, default=0.0)
+    parser.add_argument("--abstention-negative-radius", type=float, default=2.0)
+    parser.add_argument("--abstention-max-false-score", type=float, default=0.35)
+    parser.add_argument("--abstention-topk", type=int, default=8)
+    parser.add_argument("--abstention-candidates", type=int, default=4096)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--skip-nonfinite-steps", action="store_true")
     parser.add_argument("--train-blended-descriptors", action="store_true")
     parser.add_argument("--texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--graph-matcher-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--graph-matcher-metadata-mode",
+        choices=["full", "descriptor_only", "no_xy", "no_geometry", "no_quality"],
+        default="full",
+    )
+    parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
+    parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
+    parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
+    parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
     parser.add_argument("--training-spatial-bins", type=int, default=0)
+    parser.add_argument("--hard-variant", action="append", default=[])
+    parser.add_argument("--hard-valid-fraction-max", type=float, default=0.0)
+    parser.add_argument("--hard-curriculum-max-probability", type=float, default=0.0)
+    parser.add_argument("--hard-curriculum-warmup-steps", type=int, default=100)
+    parser.add_argument("--false-match-csv", action="append", type=Path, default=[])
+    parser.add_argument("--false-match-weight", type=float, default=0.0)
+    parser.add_argument("--false-match-max-points", type=int, default=128)
+    parser.add_argument("--false-match-max-score", type=float, default=0.25)
+    parser.add_argument("--false-match-curriculum-max-probability", type=float, default=0.0)
+    parser.add_argument("--false-match-curriculum-warmup-steps", type=int, default=100)
+    parser.add_argument("--mine-false-matches", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--false-match-output", type=Path, default=None)
+    parser.add_argument("--false-match-mine-max-keypoints", type=int, default=384)
+    parser.add_argument("--false-match-mine-max-matches", type=int, default=0)
+    parser.add_argument("--false-match-mine-min-score", type=float, default=-1.0)
+    parser.add_argument("--false-match-mine-min-margin", type=float, default=0.02)
+    parser.add_argument("--false-match-mine-threshold-px", type=float, default=5.0)
+    parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
+    parser.add_argument("--input-local-contrast-kernel", type=int, default=31)
     parser.add_argument("--photometric-augment", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--photometric-probability", type=float, default=0.85)
     parser.add_argument("--photometric-brightness", type=float, default=0.16)
@@ -1172,9 +1579,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-descriptor-mode", choices=["learned", "texture", "blend"], default="learned")
     parser.add_argument("--visual-keypoint-score-mode", choices=["texture", "learned"], default="texture")
     parser.add_argument("--visual-max-keypoints", type=int, default=384)
-    parser.add_argument("--visual-max-matches", type=int, default=128)
-    parser.add_argument("--visual-draw-matches", type=int, default=80)
+    parser.add_argument("--visual-max-matches", type=int, default=0)
+    parser.add_argument("--visual-draw-matches", type=int, default=0)
     parser.add_argument("--visual-threshold-px", type=float, default=5.0)
+    parser.add_argument("--visual-filtered-report", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visual-filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visual-filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
+    parser.add_argument("--visual-filtered-min-score", type=float, default=-1.0)
+    parser.add_argument("--visual-filtered-min-margin", type=float, default=0.02)
+    parser.add_argument("--visual-filtered-max-matches", type=int, default=0)
+    parser.add_argument("--visual-filtered-draw-matches", type=int, default=0)
     return parser.parse_args()
 
 
@@ -1192,6 +1606,32 @@ def main() -> int:
         raise ValueError("--steps must be positive in train mode")
     if not 0.0 <= args.photometric_probability <= 1.0:
         raise ValueError("--photometric-probability must be in [0, 1]")
+    if args.visual_max_matches < 0:
+        raise ValueError("--visual-max-matches must be nonnegative; use 0 to keep all matches")
+    if args.visual_draw_matches < 0:
+        raise ValueError("--visual-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.visual_filtered_max_matches < 0:
+        raise ValueError("--visual-filtered-max-matches must be nonnegative; use 0 to keep all matches")
+    if args.visual_filtered_draw_matches < 0:
+        raise ValueError("--visual-filtered-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.visual_filtered_min_margin < 0.0:
+        raise ValueError("--visual-filtered-min-margin must be non-negative")
+    if args.hard_curriculum_max_probability < 0.0 or args.hard_curriculum_max_probability > 1.0:
+        raise ValueError("--hard-curriculum-max-probability must be in [0, 1]")
+    if args.false_match_curriculum_max_probability < 0.0 or args.false_match_curriculum_max_probability > 1.0:
+        raise ValueError("--false-match-curriculum-max-probability must be in [0, 1]")
+    if args.false_match_weight < 0.0:
+        raise ValueError("--false-match-weight must be non-negative")
+    if args.false_match_max_points < 0:
+        raise ValueError("--false-match-max-points must be non-negative")
+    if args.false_match_mine_max_keypoints <= 0:
+        raise ValueError("--false-match-mine-max-keypoints must be positive")
+    if args.false_match_mine_max_matches < 0:
+        raise ValueError("--false-match-mine-max-matches must be nonnegative; use 0 to keep all matches")
+    if args.false_match_mine_min_margin < 0.0:
+        raise ValueError("--false-match-mine-min-margin must be non-negative")
+    if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
+        raise ValueError("--input-local-contrast-strength must be in [0, 1]")
     for name in (
         "photometric_brightness",
         "photometric_contrast",

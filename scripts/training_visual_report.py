@@ -675,7 +675,7 @@ def cpu_pair(pair: SyntheticPair) -> SyntheticPair:
 
 
 def selected_draw_indices(result: VisualMatchResult, draw_matches: int) -> np.ndarray:
-    if result.matches <= draw_matches:
+    if draw_matches <= 0 or result.matches <= draw_matches:
         return np.arange(result.matches, dtype=np.int64)
     order = np.argsort(-result.scores)
     wrong = order[~result.correct[order]]
@@ -1360,8 +1360,8 @@ def parse_args() -> argparse.Namespace:
         default="full",
     )
     parser.add_argument("--max-keypoints", type=int, default=2048)
-    parser.add_argument("--max-matches", type=int, default=512)
-    parser.add_argument("--draw-matches", type=int, default=160)
+    parser.add_argument("--max-matches", type=int, default=0)
+    parser.add_argument("--draw-matches", type=int, default=0)
     parser.add_argument("--min-intensity", type=float, default=0.0)
     parser.add_argument("--texture-keypoint-fraction", type=float, default=1.0)
     parser.add_argument("--weak-texture-keypoint-fraction", type=float, default=0.0)
@@ -1385,10 +1385,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--sample-count must be nonnegative")
     if args.max_keypoints <= 0:
         parser.error("--max-keypoints must be positive")
-    if args.max_matches <= 0:
-        parser.error("--max-matches must be positive")
-    if args.draw_matches <= 0:
-        parser.error("--draw-matches must be positive")
+    if args.max_matches < 0:
+        parser.error("--max-matches must be nonnegative; use 0 to keep all matches")
+    if args.draw_matches < 0:
+        parser.error("--draw-matches must be nonnegative; use 0 to draw all matches")
     if args.texture_keypoint_fraction < 0.0 or args.texture_keypoint_fraction > 1.0:
         parser.error("--texture-keypoint-fraction must be in [0, 1]")
     if args.weak_texture_keypoint_fraction < 0.0 or args.weak_texture_keypoint_fraction > 1.0:

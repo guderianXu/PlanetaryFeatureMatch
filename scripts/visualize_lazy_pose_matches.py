@@ -39,6 +39,7 @@ from benchmark_lazy_pose_pairs import (  # noqa: E402
     LazyPairSpec,
     _read_render_manifest,
     _read_uint8_manifest,
+    apply_local_contrast_normalization,
     build_pair_specs,
     generate_lazy_pair,
 )
@@ -156,9 +157,19 @@ def compute_visual(
     min_score: float,
     min_margin: float,
     mutual: bool,
+    geometry_filter: str,
+    input_local_contrast: bool,
+    input_local_contrast_strength: float,
+    input_local_contrast_kernel: int,
     threshold_px: float,
 ) -> LazyMatchVisual:
     pair = move_pair_to_device(result.pair, device=device)
+    if input_local_contrast:
+        pair = apply_local_contrast_normalization(
+            pair,
+            strength=input_local_contrast_strength,
+            kernel_size=input_local_contrast_kernel,
+        )
     pair = pfm_pytorch_training.resize_pair_for_training(pair, max_image_size=max_image_size)
     with torch.no_grad():
         descriptors_a, descriptors_b, score_a, score_b, _, _ = match_eval.feature_maps_and_keypoint_scores_for_pair(
@@ -240,7 +251,7 @@ def compute_visual(
         target_b = match_eval.sample_warp(pair.warp_a_to_b, points_a)
         errors = (target_b.to(points_b.device) - points_b).norm(dim=1)
         correct = errors <= float(threshold_px)
-        return LazyMatchVisual(
+        visual = LazyMatchVisual(
             label=label,
             spec=result.spec,
             pair=cpu_pair(pair),
@@ -251,10 +262,73 @@ def compute_visual(
             errors=errors.detach().cpu().numpy(),
             correct=correct.detach().cpu().numpy().astype(bool, copy=False),
         )
+        if geometry_filter != "none":
+            return filter_visual_matches(visual, geometry_filter=geometry_filter, threshold_px=threshold_px, label=label)
+        return visual
+
+
+def filter_visual_matches(
+    result: LazyMatchVisual,
+    *,
+    geometry_filter: str,
+    threshold_px: float,
+    label: str | None = None,
+) -> LazyMatchVisual:
+    if geometry_filter == "none" or result.matches == 0:
+        return LazyMatchVisual(
+            label=label or f"{result.label} / filtered",
+            spec=result.spec,
+            pair=result.pair,
+            valid_fraction=result.valid_fraction,
+            points_a=result.points_a.copy(),
+            points_b=result.points_b.copy(),
+            scores=result.scores.copy(),
+            errors=result.errors.copy(),
+            correct=result.correct.copy(),
+            image_name=result.image_name,
+        )
+    points_a = torch.from_numpy(result.points_a).to(torch.float32)
+    points_b = torch.from_numpy(result.points_b).to(torch.float32)
+    scores = torch.from_numpy(result.scores).to(torch.float32)
+    local_indices = torch.arange(result.matches, dtype=torch.long)
+    local_matches = torch.stack([local_indices, local_indices], dim=1)
+    if geometry_filter == "affine":
+        kept, _ = match_eval.filter_affine_consistent_matches(
+            points_a,
+            points_b,
+            local_matches,
+            scores,
+            threshold_px=threshold_px,
+            min_inliers=4,
+        )
+    elif geometry_filter == "local":
+        kept, _ = match_eval.filter_local_displacement_consistent_matches(
+            points_a,
+            points_b,
+            local_matches,
+            scores,
+            threshold_px=threshold_px,
+            min_inliers=4,
+        )
+    else:
+        raise ValueError(f"unsupported geometry filter: {geometry_filter}")
+    keep = kept[:, 0].detach().cpu().numpy().astype(np.int64, copy=False) if kept.numel() > 0 else np.empty(0, dtype=np.int64)
+    return LazyMatchVisual(
+        label=label or f"{result.label} / filtered",
+        spec=result.spec,
+        pair=result.pair,
+        valid_fraction=result.valid_fraction,
+        points_a=result.points_a[keep],
+        points_b=result.points_b[keep],
+        scores=result.scores[keep],
+        errors=result.errors[keep],
+        correct=result.correct[keep],
+        image_name=result.image_name,
+    )
 
 
 def selected_draw_indices(result: LazyMatchVisual, draw_matches: int) -> np.ndarray:
-    if result.matches <= draw_matches:
+    if draw_matches <= 0 or result.matches <= draw_matches:
         return np.arange(result.matches, dtype=np.int64)
     order = np.argsort(-result.scores)
     wrong = order[~result.correct[order]]
@@ -445,6 +519,9 @@ def metric_series(rows: list[dict[str, float]], *names: str) -> np.ndarray:
 
 def smooth_series(values: np.ndarray, window: int) -> np.ndarray:
     if values.size == 0 or window <= 1:
+        return values
+    window = min(int(window), int(values.size))
+    if window <= 1:
         return values
     finite = np.isfinite(values)
     cleaned = np.where(finite, values, 0.0)
@@ -723,12 +800,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weak-texture-fraction", type=float, default=0.05)
     parser.add_argument("--keypoint-spatial-bins", type=int, default=12)
     parser.add_argument("--keypoint-cell-cap", type=int, default=6)
+    parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
+    parser.add_argument("--input-local-contrast-kernel", type=int, default=31)
     parser.add_argument("--topk", type=int, default=1)
-    parser.add_argument("--max-matches", type=int, default=160)
-    parser.add_argument("--draw-matches", type=int, default=96)
+    parser.add_argument("--max-matches", type=int, default=0)
+    parser.add_argument("--draw-matches", type=int, default=0)
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
     parser.add_argument("--mutual", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
+    parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
+    parser.add_argument("--filtered-max-matches", type=int, default=0)
+    parser.add_argument("--filtered-draw-matches", type=int, default=0)
+    parser.add_argument("--filtered-min-score", type=float, default=-1.0)
+    parser.add_argument("--filtered-min-margin", type=float, default=0.02)
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--illumination-stress", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--illumination-stress-limit", type=int, default=6)
@@ -737,6 +825,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.max_matches < 0:
+        raise ValueError("--max-matches must be nonnegative; use 0 to keep all matches")
+    if args.draw_matches < 0:
+        raise ValueError("--draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.filtered_max_matches < 0:
+        raise ValueError("--filtered-max-matches must be nonnegative; use 0 to keep all matches")
+    if args.filtered_draw_matches < 0:
+        raise ValueError("--filtered-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.filtered_min_margin < 0.0:
+        raise ValueError("--filtered-min-margin must be nonnegative")
+    if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
+        raise ValueError("--input-local-contrast-strength must be in [0, 1]")
     start = time.perf_counter()
     configure_matplotlib_fonts()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -800,6 +900,10 @@ def main() -> int:
                 min_score=args.min_score,
                 min_margin=args.min_margin,
                 mutual=args.mutual,
+                geometry_filter=args.geometry_filter,
+                input_local_contrast=args.input_local_contrast,
+                input_local_contrast_strength=args.input_local_contrast_strength,
+                input_local_contrast_kernel=args.input_local_contrast_kernel,
                 threshold_px=args.threshold_px,
             )
         except Exception as exc:
@@ -816,7 +920,48 @@ def main() -> int:
     if not all_results:
         raise RuntimeError(f"all candidate pairs failed, skipped={skipped}")
 
-    selected = choose_representatives(all_results, args.select_count)
+    raw_selected = choose_representatives(all_results, args.select_count)
+    filtered_selected: list[LazyMatchVisual] = []
+    if args.filtered_report:
+        for result in raw_selected:
+            pair = result.pair
+            filtered_input = LazyPairResult(
+                spec=result.spec,
+                pair=pair,
+                valid_fraction=result.valid_fraction,
+                valid_pixels=int(pair.valid_mask.sum().item()),
+                attempt_count=1,
+                elapsed_ms=0.0,
+            )
+            filtered_selected.append(
+                compute_visual(
+                    model,
+                    filtered_input,
+                    label=f"{result.label} / filtered",
+                    device=device,
+                    max_image_size=args.max_image_size,
+                    descriptor_mode=args.descriptor_mode,
+                    texture_blend_weight=args.texture_blend_weight,
+                    keypoint_score_mode=args.keypoint_score_mode,
+                    max_keypoints=args.max_keypoints,
+                    min_intensity=args.min_intensity,
+                    texture_fraction=args.texture_fraction,
+                    weak_texture_fraction=args.weak_texture_fraction,
+                    keypoint_spatial_bins=args.keypoint_spatial_bins,
+                    keypoint_cell_cap=args.keypoint_cell_cap,
+                    topk=args.topk,
+                    max_matches=args.filtered_max_matches,
+                    min_score=args.filtered_min_score,
+                    min_margin=args.filtered_min_margin,
+                    mutual=args.filtered_mutual,
+                    geometry_filter=args.filtered_geometry_filter,
+                    input_local_contrast=args.input_local_contrast,
+                    input_local_contrast_strength=args.input_local_contrast_strength,
+                    input_local_contrast_kernel=args.input_local_contrast_kernel,
+                    threshold_px=args.threshold_px,
+                )
+            )
+    selected = raw_selected + filtered_selected
     image_paths: dict[str, Path] = {}
     for index, result in enumerate(selected, 1):
         image_name = f"{index:02d}_{result.label}_{result.spec.reference.base_id}_{result.spec.target.variant}.png"
@@ -839,6 +984,8 @@ def main() -> int:
         image_paths[image_name] = image_path
 
     write_summary_csv(selected, args.output_dir / "summary.csv")
+    if filtered_selected:
+        write_summary_csv(filtered_selected, args.output_dir / "filtered_summary.csv")
     metadata = {
         "config": {
             "input_channels": config.input_channels,
@@ -870,7 +1017,7 @@ def main() -> int:
     artifact_paths["匹配误差直方图"] = args.output_dir / "match_error_histogram.png"
     if args.illumination_stress:
         stress_visuals: list[LazyMatchVisual] = []
-        for stress_item in make_illumination_stress_lazy_results(selected[: max(0, args.illumination_stress_limit)]):
+        for stress_item in make_illumination_stress_lazy_results(raw_selected[: max(0, args.illumination_stress_limit)]):
             try:
                 stress_visuals.append(
                     compute_visual(
@@ -893,6 +1040,10 @@ def main() -> int:
                         min_score=args.min_score,
                         min_margin=args.min_margin,
                         mutual=args.mutual,
+                        geometry_filter=args.geometry_filter,
+                        input_local_contrast=args.input_local_contrast,
+                        input_local_contrast_strength=args.input_local_contrast_strength,
+                        input_local_contrast_kernel=args.input_local_contrast_kernel,
                         threshold_px=args.threshold_px,
                     )
                 )
