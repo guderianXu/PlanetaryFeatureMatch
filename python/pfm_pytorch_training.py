@@ -492,6 +492,118 @@ def false_match_feature_correspondences(
     return feature_a, feature_b
 
 
+def _scale_feature_to_image_grid(
+    points_xy: torch.Tensor,
+    *,
+    feature_height: int,
+    feature_width: int,
+    image_height: int,
+    image_width: int,
+) -> torch.Tensor:
+    if points_xy.numel() == 0:
+        return points_xy.new_empty((0, 2))
+    x = points_xy[:, 0] * float(max(1, image_width - 1)) / float(max(1, feature_width - 1))
+    y = points_xy[:, 1] * float(max(1, image_height - 1)) / float(max(1, feature_height - 1))
+    return torch.stack([x, y], dim=1)
+
+
+def _sample_warp_points(warp_a_to_b: torch.Tensor, points_a_xy: torch.Tensor) -> torch.Tensor:
+    if points_a_xy.numel() == 0:
+        return points_a_xy.new_empty((0, 2))
+    if warp_a_to_b.dim() != 3 or warp_a_to_b.size(2) != 2:
+        raise ValueError("warp_a_to_b must have shape HxWx2")
+    height, width, _ = warp_a_to_b.shape
+    grid = _normalize_xy(points_a_xy.to(warp_a_to_b.device, torch.float32), height, width).view(1, -1, 1, 2)
+    sampled = F.grid_sample(
+        warp_a_to_b.permute(2, 0, 1).unsqueeze(0).to(torch.float32),
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    return sampled.squeeze(0).squeeze(-1).T.contiguous()
+
+
+def _valid_source_mask(valid_mask: torch.Tensor, points_a_xy: torch.Tensor) -> torch.Tensor:
+    if points_a_xy.numel() == 0:
+        return torch.empty(0, dtype=torch.bool, device=valid_mask.device)
+    height, width = valid_mask.shape
+    points = points_a_xy.to(valid_mask.device, torch.float32)
+    in_bounds = (
+        torch.isfinite(points).all(dim=1)
+        & (points[:, 0] >= 0.0)
+        & (points[:, 0] <= float(width - 1))
+        & (points[:, 1] >= 0.0)
+        & (points[:, 1] <= float(height - 1))
+    )
+    rounded = points.round().to(torch.long)
+    x = rounded[:, 0].clamp(0, width - 1)
+    y = rounded[:, 1].clamp(0, height - 1)
+    return in_bounds & valid_mask.to(torch.bool)[y, x]
+
+
+def _descriptor_rows_at_indices(descriptors: torch.Tensor, selected_indices: torch.Tensor) -> torch.Tensor:
+    if descriptors.dim() != 4 or descriptors.size(0) != 1:
+        raise ValueError("descriptors must have shape 1xDxHxW")
+    flat = descriptors.squeeze(0).permute(1, 2, 0).reshape(-1, descriptors.size(1))
+    if selected_indices.numel() == 0:
+        return flat.new_empty((0, descriptors.size(1)))
+    return flat.index_select(0, selected_indices.to(descriptors.device)).contiguous()
+
+
+def _cyclic_similarity_matrix(desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+    if desc_a.dim() != 2 or desc_b.dim() != 2:
+        raise ValueError("descriptors must have shape NxD")
+    if desc_a.size(1) != desc_b.size(1):
+        raise ValueError("descriptor dimensions must match")
+    desc_a = normalize_descriptor_batch(desc_a)
+    desc_b = normalize_descriptor_batch(desc_b)
+    channels = desc_a.size(1)
+    if channels < 4 or channels % 4 != 0:
+        return desc_a @ desc_b.T
+    group = channels // 4
+    scores = [desc_a @ torch.roll(desc_b, shifts=turns * group, dims=1).T for turns in range(4)]
+    return torch.stack(scores, dim=0).max(dim=0).values
+
+
+def _mutual_nearest_descriptor_matches(
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    *,
+    max_matches: int,
+    min_score: float,
+    min_margin: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if max_matches < 0:
+        raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
+    if min_margin < 0.0:
+        raise ValueError("min_margin must be non-negative")
+    if desc_a.size(0) == 0 or desc_b.size(0) == 0:
+        empty_matches = torch.empty(0, 2, dtype=torch.long, device=desc_a.device)
+        return empty_matches, torch.empty(0, dtype=torch.float32, device=desc_a.device)
+    similarity = _cyclic_similarity_matrix(desc_a, desc_b)
+    best_scores, best_targets = similarity.max(dim=1)
+    best_sources = similarity.max(dim=0).indices
+    source_indices = torch.arange(similarity.size(0), dtype=torch.long, device=similarity.device)
+    keep = best_sources.index_select(0, best_targets) == source_indices
+    keep &= best_scores >= float(min_score)
+    if min_margin > 0.0 and similarity.size(1) > 1:
+        top2 = similarity.topk(2, dim=1).values
+        keep &= (top2[:, 0] - top2[:, 1]) >= float(min_margin)
+    kept_sources = torch.nonzero(keep, as_tuple=False).reshape(-1)
+    if kept_sources.numel() == 0:
+        empty_matches = torch.empty(0, 2, dtype=torch.long, device=desc_a.device)
+        return empty_matches, torch.empty(0, dtype=torch.float32, device=desc_a.device)
+    kept_scores = best_scores.index_select(0, kept_sources)
+    order = kept_scores.argsort(descending=True, stable=True)
+    limit = order.numel() if max_matches == 0 else min(max_matches, order.numel())
+    order = order[:limit]
+    sources = kept_sources.index_select(0, order)
+    targets = best_targets.index_select(0, sources)
+    matches = torch.stack([sources, targets], dim=1)
+    return matches.contiguous(), kept_scores.index_select(0, order).contiguous()
+
+
 def select_pseudo_labeled_training_pairs(
     pair_paths: list[Path],
     labels_by_pair: dict[str, PseudoLabelMatches],
@@ -618,6 +730,148 @@ def image_local_texture_scores(image: torch.Tensor, points_xy: torch.Tensor) -> 
     x = rounded[:, 0].clamp(0, width - 1)
     y = rounded[:, 1].clamp(0, height - 1)
     return texture[0, 0, y, x].to(points_xy.device)
+
+
+def _descriptor_keypoints_for_online_false_mining(
+    image: torch.Tensor,
+    descriptors: torch.Tensor,
+    *,
+    max_keypoints: int,
+    min_intensity: float,
+    keypoint_scores: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if image.dim() != 3:
+        raise ValueError("image must have shape CxHxW")
+    if descriptors.dim() != 4 or descriptors.size(0) != 1:
+        raise ValueError("descriptors must have shape 1xDxHxW")
+    if max_keypoints <= 0:
+        raise ValueError("max_keypoints must be positive")
+    _, image_height, image_width = image.shape
+    descriptor_height = descriptors.size(2)
+    descriptor_width = descriptors.size(3)
+    yy, xx = torch.meshgrid(
+        torch.arange(descriptor_height, device=descriptors.device),
+        torch.arange(descriptor_width, device=descriptors.device),
+        indexing="ij",
+    )
+    keypoints = torch.stack([xx.to(torch.float32), yy.to(torch.float32)], dim=-1).reshape(-1, 2)
+    image_points = _scale_feature_to_image_grid(
+        keypoints,
+        feature_height=descriptor_height,
+        feature_width=descriptor_width,
+        image_height=image_height,
+        image_width=image_width,
+    )
+    rounded = image_points.round().to(torch.long)
+    x = rounded[:, 0].clamp(0, image_width - 1)
+    y = rounded[:, 1].clamp(0, image_height - 1)
+    intensity = image.to(descriptors.device, torch.float32).mean(dim=0)[y, x]
+    valid = intensity > float(min_intensity) if min_intensity > 0.0 else torch.ones_like(intensity, dtype=torch.bool)
+    selected = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    if selected.numel() == 0:
+        return keypoints.new_empty((0, 2)), selected
+    if selected.numel() > max_keypoints:
+        if keypoint_scores is not None:
+            if keypoint_scores.dim() == 4:
+                scores = keypoint_scores[0, 0].to(descriptors.device, torch.float32)
+            elif keypoint_scores.dim() == 2:
+                scores = keypoint_scores.to(descriptors.device, torch.float32)
+            else:
+                raise ValueError("keypoint_scores must have shape 1x1xHxW or HxW")
+            if tuple(scores.shape) != (descriptor_height, descriptor_width):
+                scores = F.interpolate(
+                    scores.view(1, 1, scores.size(0), scores.size(1)),
+                    size=(descriptor_height, descriptor_width),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0]
+            flat_scores = scores.reshape(-1)
+        else:
+            flat_scores = image_local_texture_scores(image.to(descriptors.device), image_points)
+        selected_scores = flat_scores.index_select(0, selected)
+        order = selected_scores.argsort(descending=True, stable=True)[:max_keypoints]
+        selected = selected.index_select(0, order)
+    return keypoints.index_select(0, selected).contiguous(), selected.to(torch.long).contiguous()
+
+
+def online_false_match_feature_correspondences(
+    pair: SyntheticPair,
+    descriptors_a: torch.Tensor,
+    descriptors_b: torch.Tensor,
+    *,
+    max_keypoints: int,
+    max_matches: int,
+    min_intensity: float,
+    min_score: float,
+    min_margin: float,
+    threshold_px: float,
+    max_points: int,
+    generator: torch.Generator | None = None,
+    keypoint_scores_a: torch.Tensor | None = None,
+    keypoint_scores_b: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if threshold_px < 0.0:
+        raise ValueError("threshold_px must be non-negative")
+    if max_points < 0:
+        raise ValueError("max_points must be non-negative")
+    keypoints_a, selected_a = _descriptor_keypoints_for_online_false_mining(
+        pair.view_a,
+        descriptors_a,
+        max_keypoints=max_keypoints,
+        min_intensity=min_intensity,
+        keypoint_scores=keypoint_scores_a,
+    )
+    keypoints_b, selected_b = _descriptor_keypoints_for_online_false_mining(
+        pair.view_b,
+        descriptors_b,
+        max_keypoints=max_keypoints,
+        min_intensity=min_intensity,
+        keypoint_scores=keypoint_scores_b,
+    )
+    rows_a = _descriptor_rows_at_indices(descriptors_a, selected_a)
+    rows_b = _descriptor_rows_at_indices(descriptors_b, selected_b)
+    matches, _ = _mutual_nearest_descriptor_matches(
+        rows_a,
+        rows_b,
+        max_matches=max_matches,
+        min_score=min_score,
+        min_margin=min_margin,
+    )
+    if matches.numel() == 0:
+        return keypoints_a.new_empty((0, 2)), keypoints_b.new_empty((0, 2))
+    _, image_height_a, image_width_a = pair.view_a.shape
+    _, image_height_b, image_width_b = pair.view_b.shape
+    points_a_feature = keypoints_a.index_select(0, matches[:, 0].to(keypoints_a.device))
+    points_b_feature = keypoints_b.index_select(0, matches[:, 1].to(keypoints_b.device))
+    points_a_image = _scale_feature_to_image_grid(
+        points_a_feature,
+        feature_height=descriptors_a.size(2),
+        feature_width=descriptors_a.size(3),
+        image_height=image_height_a,
+        image_width=image_width_a,
+    )
+    points_b_image = _scale_feature_to_image_grid(
+        points_b_feature,
+        feature_height=descriptors_b.size(2),
+        feature_width=descriptors_b.size(3),
+        image_height=image_height_b,
+        image_width=image_width_b,
+    )
+    target_b = _sample_warp_points(pair.warp_a_to_b, points_a_image)
+    errors = (target_b.to(points_b_image.device) - points_b_image).norm(dim=1)
+    valid_source = _valid_source_mask(pair.valid_mask, points_a_image).to(errors.device)
+    wrong = (~valid_source) | (~torch.isfinite(target_b).all(dim=1).to(errors.device)) | errors.gt(float(threshold_px))
+    false_indices = torch.nonzero(wrong, as_tuple=False).reshape(-1)
+    if false_indices.numel() == 0:
+        return keypoints_a.new_empty((0, 2)), keypoints_b.new_empty((0, 2))
+    take = false_indices.numel() if max_points <= 0 else min(max_points, false_indices.numel())
+    if take < false_indices.numel():
+        order = torch.randperm(false_indices.numel(), generator=generator, device=false_indices.device)[:take]
+        false_indices = false_indices.index_select(0, order)
+    return (
+        points_a_feature.index_select(0, false_indices).contiguous(),
+        points_b_feature.index_select(0, false_indices).contiguous(),
+    )
 
 
 def weak_texture_balanced_order(
@@ -1653,6 +1907,14 @@ def train_step(
     false_match_max_score: float = 0.25,
     false_match_pair_paths: list[Path] | None = None,
     false_match_probability: float = 0.0,
+    online_false_match_weight: float = 0.0,
+    online_false_match_max_points: int = 0,
+    online_false_match_max_score: float = 0.25,
+    online_false_match_max_keypoints: int = 256,
+    online_false_match_max_matches: int = 0,
+    online_false_match_min_score: float = -1.0,
+    online_false_match_min_margin: float = 0.02,
+    online_false_match_threshold_px: float = 5.0,
     pose_metadata: pose_pair_metadata.PoseMetadataIndex | None = None,
     pose_balanced_sampling: bool = False,
     pose_difficulty_loss_weight: float = 0.0,
@@ -1689,6 +1951,8 @@ def train_step(
     pseudo_label_pairs = 0
     false_match_points = 0
     false_match_pairs = 0
+    online_false_match_points = 0
+    online_false_match_pairs = 0
     pose_counts = {
         "pose_easy_pairs": 0.0,
         "pose_medium_pairs": 0.0,
@@ -1890,6 +2154,35 @@ def train_step(
                         pair_losses.append(float(false_match_weight) * negative_loss)
                         false_match_points += false_a.size(0)
                         false_match_pairs += 1
+                if online_false_match_weight > 0.0:
+                    online_false_a, online_false_b = online_false_match_feature_correspondences(
+                        pair,
+                        descriptors_a,
+                        descriptors_b,
+                        max_keypoints=online_false_match_max_keypoints,
+                        max_matches=online_false_match_max_matches,
+                        min_intensity=min_intensity,
+                        min_score=online_false_match_min_score,
+                        min_margin=online_false_match_min_margin,
+                        threshold_px=online_false_match_threshold_px,
+                        max_points=online_false_match_max_points,
+                        generator=generator,
+                        keypoint_scores_a=heatmap_a,
+                        keypoint_scores_b=heatmap_b,
+                    )
+                    if online_false_a.size(0) > 0:
+                        online_negative_loss = false_match_negative_loss(
+                            descriptors_a,
+                            descriptors_b,
+                            online_false_a,
+                            online_false_b,
+                            max_false_score=online_false_match_max_score,
+                        )
+                        pair_losses.append(float(online_false_match_weight) * online_negative_loss)
+                        online_false_match_points += online_false_a.size(0)
+                        online_false_match_pairs += 1
+                        false_match_points += online_false_a.size(0)
+                        false_match_pairs += 1
                 if pair_losses:
                     losses.append(torch.stack(pair_losses).sum())
             if not losses:
@@ -1919,6 +2212,8 @@ def train_step(
         metrics["pseudo_label_pairs"] = float(pseudo_label_pairs)
         metrics["false_match_points"] = float(false_match_points)
         metrics["false_match_pairs"] = float(false_match_pairs)
+        metrics["online_false_match_points"] = float(online_false_match_points)
+        metrics["online_false_match_pairs"] = float(online_false_match_pairs)
         metrics["pose_easy_pairs"] = pose_counts["pose_easy_pairs"]
         metrics["pose_medium_pairs"] = pose_counts["pose_medium_pairs"]
         metrics["pose_hard_pairs"] = pose_counts["pose_hard_pairs"]
@@ -1940,6 +2235,8 @@ def train_step(
         "pseudo_label_pairs": float(pseudo_label_pairs),
         "false_match_points": float(false_match_points),
         "false_match_pairs": float(false_match_pairs),
+        "online_false_match_points": float(online_false_match_points),
+        "online_false_match_pairs": float(online_false_match_pairs),
         "pose_easy_pairs": pose_counts["pose_easy_pairs"],
         "pose_medium_pairs": pose_counts["pose_medium_pairs"],
         "pose_hard_pairs": pose_counts["pose_hard_pairs"],

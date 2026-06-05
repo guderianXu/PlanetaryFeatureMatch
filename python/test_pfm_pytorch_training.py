@@ -514,6 +514,40 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.5)
 
+    def test_online_false_match_feature_correspondences_mines_wrong_mutual_match(self):
+        view = torch.ones(1, 4, 4)
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        warp = torch.stack([xx.to(torch.float32), yy.to(torch.float32)], dim=-1)
+        pair = SyntheticPair(
+            view_a=view,
+            view_b=view,
+            warp_a_to_b=warp,
+            valid_mask=torch.ones(4, 4, dtype=torch.bool),
+        )
+        descriptor_a = torch.zeros(1, 2, 2, 2)
+        descriptor_b = torch.zeros(1, 2, 2, 2)
+        descriptor_a[0, :, 0, 0] = torch.tensor([1.0, 0.0])
+        descriptor_a[0, :, 0, 1] = torch.tensor([0.0, 1.0])
+        descriptor_b[0, :, 0, 0] = torch.tensor([0.0, 1.0])
+        descriptor_b[0, :, 0, 1] = torch.tensor([1.0, 0.0])
+
+        false_a, false_b = train.online_false_match_feature_correspondences(
+            pair,
+            descriptor_a,
+            descriptor_b,
+            max_keypoints=4,
+            max_matches=0,
+            min_intensity=0.01,
+            min_score=0.0,
+            min_margin=0.0,
+            threshold_px=0.5,
+            max_points=8,
+            generator=torch.Generator().manual_seed(7),
+        )
+
+        self.assertTrue(any(torch.allclose(point, torch.tensor([0.0, 0.0])) for point in false_a))
+        self.assertTrue(any(torch.allclose(point, torch.tensor([1.0, 0.0])) for point in false_b))
+
     def test_descriptor_map_pair_loss_respects_warp_hard_negative_weight(self):
         descriptor_a = torch.zeros(1, 2, 1, 3)
         descriptor_b = torch.zeros(1, 2, 1, 3)
@@ -2104,6 +2138,66 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(metrics["points"], 0.0)
         self.assertEqual(metrics["false_match_points"], 3.0)
         self.assertEqual(metrics["false_match_pairs"], 1.0)
+
+    def test_train_step_adds_inline_online_false_match_loss(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[Path("pair_a.pt")]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(
+                train,
+                "online_false_match_feature_correspondences",
+                return_value=(torch.ones(4, 2), torch.ones(4, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss") as descriptor_loss,
+            mock.patch.object(train, "false_match_negative_loss", return_value=parameter * 4.0),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [Path("pair_a.pt")],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.25,
+                synthetic_loss_weight=0.0,
+                online_false_match_weight=0.5,
+                online_false_match_max_points=4,
+                online_false_match_max_keypoints=8,
+            )
+
+        descriptor_loss.assert_not_called()
+        self.assertAlmostEqual(float(parameter.detach()), 0.8, places=5)
+        self.assertEqual(metrics["points"], 0.0)
+        self.assertEqual(metrics["online_false_match_points"], 4.0)
+        self.assertEqual(metrics["online_false_match_pairs"], 1.0)
+        self.assertEqual(metrics["false_match_points"], 4.0)
 
     def test_train_step_passes_pseudo_and_false_pools_separately_to_sampler(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))
