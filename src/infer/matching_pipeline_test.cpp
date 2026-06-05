@@ -110,6 +110,24 @@ static void matchingPipelineUsesPlanetaryGraphMatcherOutput()
     PFM_REQUIRE(matches.confidence.sizes() == torch::IntArrayRef({2}));
 }
 
+static void matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher()
+{
+    const auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
+    const auto descriptors = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    const auto features_a =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    const auto features_b =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    pfm::v21::PfmV21GraphMatcher matcher(2, 8, 3, 2);
+    pfm::GraphMatcherInferenceOptions graph_options;
+    graph_options.early_stop_min_confidence = 0.0;
+
+    const auto matches = pfm::matchFeatureSets(features_a, features_b, *matcher, graph_options);
+
+    PFM_REQUIRE(matches.sparse_matches.dim() == 2);
+    PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
+}
+
 static void matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores()
 {
     const auto features_a = makeFeatureSet(torch::zeros({2, 3}, torch::kFloat32), torch::empty({0, 2}, torch::kFloat32),
@@ -1043,6 +1061,8 @@ void register_matching_pipeline_tests()
 {
     register_test("matching_pipeline_uses_planetary_graph_matcher_output",
                   matchingPipelineUsesPlanetaryGraphMatcherOutput);
+    register_test("matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher",
+                  matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher);
     register_test("matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores",
                   matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores);
     register_test("matching_pipeline_handles_empty_sparse_descriptors",

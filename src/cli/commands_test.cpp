@@ -436,6 +436,10 @@ static void parse_match_command()
         "0.08",
         "--sparse-geometry-filter",
         "rotation-only",
+        "--graph-width-prune-min-score",
+        "0.5",
+        "--graph-early-stop-min-confidence",
+        "0.85",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Match);
@@ -454,6 +458,8 @@ static void parse_match_command()
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.visualization_dir == "vis");
     PFM_REQUIRE(parsed.sparse_geometry_filter == "rotation-only");
+    PFM_REQUIRE_CLOSE(parsed.graph_width_prune_min_score, 0.5, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.85, 1.0e-12);
 }
 
 static void parse_match_defaults_to_sparse_mode()
@@ -502,6 +508,10 @@ static void parse_eval_command()
         "128",
         "--min-keypoint-intensity",
         "0.08",
+        "--graph-width-prune-min-score",
+        "0.25",
+        "--graph-early-stop-min-confidence",
+        "0.9",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Eval);
@@ -515,6 +525,8 @@ static void parse_eval_command()
     PFM_REQUIRE(parsed.max_matches == 128);
     PFM_REQUIRE_CLOSE(parsed.semi_dense_threshold, 0.25, 1.0e-6);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
+    PFM_REQUIRE_CLOSE(parsed.graph_width_prune_min_score, 0.25, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.9, 1.0e-12);
 }
 
 static void parse_export_command()

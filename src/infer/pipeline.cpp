@@ -648,6 +648,14 @@ FeatureDecodeConfig makeFeatureDecodeConfig(const CliOptions& options)
     return config;
 }
 
+GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& options)
+{
+    GraphMatcherInferenceOptions graph_options;
+    graph_options.width_prune_min_score = options.graph_width_prune_min_score;
+    graph_options.early_stop_min_confidence = options.graph_early_stop_min_confidence;
+    return graph_options;
+}
+
 ExtractedFeatureSet extract_feature_set(const std::string& image_path, InferenceModules& modules,
                                         const CheckpointConfig& checkpoint_config, torch::Device device,
                                         const FeatureDecodeConfig& decode_config, double min_keypoint_intensity,
@@ -933,10 +941,11 @@ int run_match_command(const CliOptions& options)
         {
             throw std::invalid_argument("sparse match strategy must be learned or python-raw-mutual");
         }
+        const auto graph_options = makeGraphMatcherInferenceOptions(options);
         auto raw_match_set =
             use_python_raw_mutual
                 ? matchFeatureSetsPythonRawMutual(extracted_a.features, extracted_b.features, options.max_matches)
-                : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher);
+                : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher, graph_options);
         auto match_set = filterMatchMode(raw_match_set, options.match_mode);
         if (!use_python_raw_mutual && !use_feature_files && options.match_mode != "dense" &&
             match_set.sparse_matches.size(0) < DESCRIPTOR_GRID_FALLBACK_MIN_SPARSE_MATCHES &&
@@ -950,7 +959,8 @@ int run_match_command(const CliOptions& options)
             auto grid_features_b =
                 make_descriptor_grid_feature_set(extracted_b.maps, decode_config, extracted_b.intensity_mask);
             auto grid_match_set = filterMatchMode(
-                matchFeatureSets(grid_features_a, grid_features_b, *modules.graph_matcher), options.match_mode);
+                matchFeatureSets(grid_features_a, grid_features_b, *modules.graph_matcher, graph_options),
+                options.match_mode);
             if (shouldUseDescriptorGridFallback(match_set.sparse_matches.size(0),
                                                 grid_match_set.sparse_matches.size(0)))
             {
@@ -972,7 +982,8 @@ int run_match_command(const CliOptions& options)
             auto high_density_features_a = decode_high_density_feature_set(extracted_a, decode_config);
             auto high_density_features_b = decode_high_density_feature_set(extracted_b, decode_config);
             auto high_density_match_set = filterMatchMode(
-                matchFeatureSets(high_density_features_a, high_density_features_b, *modules.graph_matcher),
+                matchFeatureSets(high_density_features_a, high_density_features_b, *modules.graph_matcher,
+                                 graph_options),
                 options.match_mode);
             if (shouldUseHighDensitySparseMatches(match_set.sparse_matches.size(0),
                                                   high_density_match_set.sparse_matches.size(0)))
@@ -994,7 +1005,8 @@ int run_match_command(const CliOptions& options)
             auto alternate_b = extract_feature_set(options.image_b, modules, checkpoint_config, device, decode_config,
                                                    options.min_keypoint_intensity, ALTERNATE_TEXTURE_BLEND_WEIGHT);
             auto alternate_match_set =
-                filterMatchMode(matchFeatureSets(alternate_a.features, alternate_b.features, *modules.graph_matcher),
+                filterMatchMode(matchFeatureSets(alternate_a.features, alternate_b.features, *modules.graph_matcher,
+                                                 graph_options),
                                 options.match_mode);
             if (options.min_keypoints < ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS && alternate_a.maps.descriptors.defined() &&
                 alternate_b.maps.descriptors.defined())
@@ -1002,7 +1014,8 @@ int run_match_command(const CliOptions& options)
                 auto alternate_high_density_a = decode_high_density_feature_set(alternate_a, decode_config);
                 auto alternate_high_density_b = decode_high_density_feature_set(alternate_b, decode_config);
                 auto alternate_high_density_match_set = filterMatchMode(
-                    matchFeatureSets(alternate_high_density_a, alternate_high_density_b, *modules.graph_matcher),
+                    matchFeatureSets(alternate_high_density_a, alternate_high_density_b, *modules.graph_matcher,
+                                     graph_options),
                     options.match_mode);
                 if (shouldUseHighDensitySparseMatches(alternate_match_set.sparse_matches.size(0),
                                                       alternate_high_density_match_set.sparse_matches.size(0)))
@@ -1032,14 +1045,16 @@ int run_match_command(const CliOptions& options)
             auto balanced_b = extract_feature_set(options.image_b, modules, checkpoint_config, device, decode_config,
                                                   options.min_keypoint_intensity, BALANCED_TEXTURE_BLEND_WEIGHT);
             auto balanced_match_set = filterMatchMode(
-                matchFeatureSets(balanced_a.features, balanced_b.features, *modules.graph_matcher), options.match_mode);
+                matchFeatureSets(balanced_a.features, balanced_b.features, *modules.graph_matcher, graph_options),
+                options.match_mode);
             if (options.min_keypoints < ADAPTIVE_HIGH_DENSITY_MIN_KEYPOINTS && balanced_a.maps.descriptors.defined() &&
                 balanced_b.maps.descriptors.defined())
             {
                 auto balanced_high_density_a = decode_high_density_feature_set(balanced_a, decode_config);
                 auto balanced_high_density_b = decode_high_density_feature_set(balanced_b, decode_config);
                 auto balanced_high_density_match_set = filterMatchMode(
-                    matchFeatureSets(balanced_high_density_a, balanced_high_density_b, *modules.graph_matcher),
+                    matchFeatureSets(balanced_high_density_a, balanced_high_density_b, *modules.graph_matcher,
+                                     graph_options),
                     options.match_mode);
                 if (shouldUseHighDensitySparseMatches(balanced_match_set.sparse_matches.size(0),
                                                       balanced_high_density_match_set.sparse_matches.size(0)))
@@ -1163,6 +1178,7 @@ int run_eval_command(const CliOptions& options)
         {
             throw std::invalid_argument("sparse match strategy must be learned or python-raw-mutual");
         }
+        const auto graph_options = makeGraphMatcherInferenceOptions(options);
 
         std::vector<std::pair<FeatureSet, FeatureSet>> feature_sets;
         std::vector<MatchSet> match_sets;
@@ -1177,7 +1193,8 @@ int run_eval_command(const CliOptions& options)
             match_sets.push_back(
                 use_python_raw_mutual
                     ? matchFeatureSetsPythonRawMutual(extracted_a.features, extracted_b.features, options.max_matches)
-                    : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher));
+                    : matchFeatureSets(extracted_a.features, extracted_b.features, *modules.graph_matcher,
+                                       graph_options));
             feature_sets.push_back(std::make_pair(std::move(extracted_a.features), std::move(extracted_b.features)));
         }
 

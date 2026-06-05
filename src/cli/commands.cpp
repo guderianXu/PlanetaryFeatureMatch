@@ -337,6 +337,14 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Maximum sparse matches emitted by python-raw-mutual matching")
         ->check(CLI::PositiveNumber);
     match
+        ->add_option("--graph-width-prune-min-score", options.graph_width_prune_min_score,
+                     "Graph matcher width pruning threshold; -1 disables LightGlue-style pruning")
+        ->check(CLI::Range(-1.0, 1.0));
+    match
+        ->add_option("--graph-early-stop-min-confidence", options.graph_early_stop_min_confidence,
+                     "Graph matcher early-stop confidence threshold; -1 disables LightGlue-style early stopping")
+        ->check(CLI::Range(-1.0, 1.0));
+    match
         ->add_option("--sparse-geometry-filter", options.sparse_geometry_filter,
                      "Sparse geometric post-filter: adaptive, projective, local, or rotation-only")
         ->check(CLI::IsMember({"adaptive", "projective", "local", "rotation-only"}));
@@ -391,6 +399,14 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         ->add_option("--max-matches", options.max_matches,
                      "Maximum sparse matches emitted by python-raw-mutual evaluation")
         ->check(CLI::PositiveNumber);
+    eval
+        ->add_option("--graph-width-prune-min-score", options.graph_width_prune_min_score,
+                     "Graph matcher width pruning threshold; -1 disables LightGlue-style pruning")
+        ->check(CLI::Range(-1.0, 1.0));
+    eval
+        ->add_option("--graph-early-stop-min-confidence", options.graph_early_stop_min_confidence,
+                     "Graph matcher early-stop confidence threshold; -1 disables LightGlue-style early stopping")
+        ->check(CLI::Range(-1.0, 1.0));
     eval->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     eval->add_option("--min-keypoints", options.min_keypoints, "Soft minimum sparse keypoints")
         ->check(CLI::NonNegativeNumber);

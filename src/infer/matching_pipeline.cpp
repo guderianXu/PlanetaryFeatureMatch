@@ -117,6 +117,46 @@ bool shouldUseGraphMatcherForSparseCount(int64_t keypoint_count_a, int64_t keypo
            keypoint_count_b <= GRAPH_MATCHER_MAX_SPARSE_KEYPOINTS;
 }
 
+void validateGraphMatcherInferenceOptions(const GraphMatcherInferenceOptions& graph_options)
+{
+    if (!std::isfinite(graph_options.width_prune_min_score) || graph_options.width_prune_min_score < -1.0 ||
+        graph_options.width_prune_min_score > 1.0)
+    {
+        throw std::invalid_argument("graph width prune min score must be in [-1, 1]");
+    }
+    if (!std::isfinite(graph_options.early_stop_min_confidence) ||
+        graph_options.early_stop_min_confidence < -1.0 || graph_options.early_stop_min_confidence > 1.0)
+    {
+        throw std::invalid_argument("graph early stop min confidence must be in [-1, 1]");
+    }
+}
+
+bool hasLightGlueGraphOptions(const GraphMatcherInferenceOptions& graph_options)
+{
+    return graph_options.width_prune_min_score > -1.0 || graph_options.early_stop_min_confidence > -1.0;
+}
+
+PlanetaryGraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
+                                            const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
+                                            PlanetaryGraphMatcherImpl& matcher,
+                                            const GraphMatcherInferenceOptions& graph_options)
+{
+    if (hasLightGlueGraphOptions(graph_options))
+    {
+        throw std::invalid_argument("LightGlue graph inference options require the v2.1 graph matcher");
+    }
+    return matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b);
+}
+
+v21::PfmV21GraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
+                                              const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
+                                              v21::PfmV21GraphMatcherImpl& matcher,
+                                              const GraphMatcherInferenceOptions& graph_options)
+{
+    return matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b, true,
+                           graph_options.width_prune_min_score, graph_options.early_stop_min_confidence);
+}
+
 bool shouldUseWideTopKFallback(int64_t base_matches, int64_t wide_matches, double wide_mean_score)
 {
     return base_matches <= DESCRIPTOR_WIDE_TOPK_FALLBACK_MAX_BASE_MATCHES &&
@@ -1363,7 +1403,8 @@ std::pair<torch::Tensor, torch::Tensor> relaxedGraphLogitMatches(const torch::Te
 
 template <typename GraphMatcherT>
 std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& features_a, const FeatureSet& features_b,
-                                                            GraphMatcherT& matcher)
+                                                            GraphMatcherT& matcher,
+                                                            const GraphMatcherInferenceOptions& graph_options)
 {
     // 稀疏匹配流程：
     // 1. 计算互为最近邻描述子匹配，作为低成本基线和最终兜底。
@@ -1402,10 +1443,11 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
     if (shouldUseGraphMatcherForSparseCount(features_a.descriptors.size(0), features_b.descriptors.size(0)))
     {
         // 先使用互匹配图 logits；数量不足时逐步放宽为贪心/宽松模式，以保留可被几何过滤验证的候选。
-        const auto output = matcher.forward(features_a.descriptors.to(matcher_device, torch::kFloat32),
+        const auto output = runGraphMatcher(features_a.descriptors.to(matcher_device, torch::kFloat32),
                                             features_a.keypoints.to(matcher_device, torch::kFloat32),
                                             features_b.descriptors.to(matcher_device, torch::kFloat32),
-                                            features_b.keypoints.to(matcher_device, torch::kFloat32));
+                                            features_b.keypoints.to(matcher_device, torch::kFloat32), matcher,
+                                            graph_options);
         greedy = mutualGraphLogitMatches(output.logits, features_a.descriptors.size(0), features_b.descriptors.size(0));
         if (greedy.first.size(0) < GEOMETRIC_CONSISTENCY_MIN_MATCHES)
         {
@@ -1695,14 +1737,16 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
 }
 
 template <typename GraphMatcherT>
-MatchSet matchFeatureSetsWithMatcher(const FeatureSet& features_a, const FeatureSet& features_b, GraphMatcherT& matcher)
+MatchSet matchFeatureSetsWithMatcher(const FeatureSet& features_a, const FeatureSet& features_b, GraphMatcherT& matcher,
+                                     const GraphMatcherInferenceOptions& graph_options)
 {
+    validateGraphMatcherInferenceOptions(graph_options);
     if (!features_a.dense_points.defined() || !features_b.dense_points.defined() ||
         !features_a.dense_confidence.defined() || !features_b.dense_confidence.defined())
     {
         throw std::invalid_argument("dense features must be defined");
     }
-    const auto sparse = matchSparseFeatures(features_a, features_b, matcher);
+    const auto sparse = matchSparseFeatures(features_a, features_b, matcher, graph_options);
     const int64_t dense_count = std::min(features_a.dense_points.size(0), features_b.dense_points.size(0));
     const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
     if (dense_count == 0)
@@ -1724,13 +1768,26 @@ MatchSet matchFeatureSetsWithMatcher(const FeatureSet& features_a, const Feature
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           PlanetaryGraphMatcherImpl& matcher)
 {
-    return matchFeatureSetsWithMatcher(features_a, features_b, matcher);
+    return matchFeatureSetsWithMatcher(features_a, features_b, matcher, GraphMatcherInferenceOptions{});
+}
+
+MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
+                          PlanetaryGraphMatcherImpl& matcher, const GraphMatcherInferenceOptions& graph_options)
+{
+    return matchFeatureSetsWithMatcher(features_a, features_b, matcher, graph_options);
 }
 
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           v21::PfmV21GraphMatcherImpl& matcher)
 {
-    return matchFeatureSetsWithMatcher(features_a, features_b, matcher);
+    return matchFeatureSetsWithMatcher(features_a, features_b, matcher, GraphMatcherInferenceOptions{});
+}
+
+MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
+                          v21::PfmV21GraphMatcherImpl& matcher,
+                          const GraphMatcherInferenceOptions& graph_options)
+{
+    return matchFeatureSetsWithMatcher(features_a, features_b, matcher, graph_options);
 }
 
 MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const FeatureSet& features_b, int64_t max_matches)

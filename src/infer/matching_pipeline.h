@@ -8,6 +8,14 @@
 namespace pfm
 {
 
+struct GraphMatcherInferenceOptions
+{
+    /// LightGlue 风格宽度剪枝阈值；-1 表示关闭，0..1 表示保留 raw 相似度达到阈值的点。
+    double width_prune_min_score = -1.0;
+    /// LightGlue 风格深度提前停止阈值；-1 表示关闭，0..1 表示达到 assignment 置信度后提前结束。
+    double early_stop_min_confidence = -1.0;
+};
+
 /// 使用已学习的行星图匹配器匹配两组已解码特征。
 /// @param features_a 第一幅影像的特征集合。
 /// @param features_b 第二幅影像的特征集合。
@@ -17,6 +25,16 @@ namespace pfm
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           PlanetaryGraphMatcherImpl& matcher);
 
+/// 使用已学习的行星图匹配器和显式推理选项匹配两组已解码特征。
+/// @param features_a 第一幅影像的特征集合。
+/// @param features_b 第二幅影像的特征集合。
+/// @param matcher 已学习的图匹配模块。
+/// @param graph_options 图匹配推理选项；旧版 matcher 不支持 LightGlue 风格剪枝/提前停止。
+/// @return MatchSet，包含稀疏与半稠密匹配。
+/// @throws std::invalid_argument 当选项非法，或旧版 matcher 收到 LightGlue 选项时抛出。
+MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
+                          PlanetaryGraphMatcherImpl& matcher, const GraphMatcherInferenceOptions& graph_options);
+
 /// 使用 v2.1 行星图匹配器匹配两组已解码特征。
 /// @param features_a 第一幅影像的特征集合。
 /// @param features_b 第二幅影像的特征集合。
@@ -25,6 +43,17 @@ MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& featur
 /// @throws std::invalid_argument 当必需稀疏或稠密张量未定义，或维度非法时抛出。
 MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
                           v21::PfmV21GraphMatcherImpl& matcher);
+
+/// 使用 v2.1 行星图匹配器和显式推理选项匹配两组已解码特征。
+/// @param features_a 第一幅影像的特征集合。
+/// @param features_b 第二幅影像的特征集合。
+/// @param matcher v2.1 已学习图匹配模块。
+/// @param graph_options 图匹配推理选项。
+/// @return MatchSet，包含稀疏与半稠密匹配。
+/// @throws std::invalid_argument 当选项非法或特征维度非法时抛出。
+MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& features_b,
+                          v21::PfmV21GraphMatcherImpl& matcher,
+                          const GraphMatcherInferenceOptions& graph_options);
 
 /// 使用与 Python `pytorch_cache_match_eval.py` raw mutual 模式一致的描述子互最近邻匹配。
 /// @param features_a 第一幅影像的特征集合。
