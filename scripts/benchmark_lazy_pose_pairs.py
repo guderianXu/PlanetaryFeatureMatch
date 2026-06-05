@@ -13,12 +13,13 @@ import random
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from collections import OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -737,6 +738,96 @@ def _gpu_snapshot() -> dict[str, str]:
     }
 
 
+class GpuUsageMonitor:
+    """后台采样 GPU 状态，避免训练 step 内同步调用 nvidia-smi。"""
+
+    _FIELDS = ["elapsed_s", "gpu_util_percent", "gpu_mem_used_mib", "gpu_mem_total_mib"]
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        sample_interval_s: float,
+        snapshot_fn: Callable[[], dict[str, str]] = _gpu_snapshot,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        if sample_interval_s <= 0.0:
+            raise ValueError("sample_interval_s must be positive")
+        self._path = path
+        self._sample_interval_s = float(sample_interval_s)
+        self._snapshot_fn = snapshot_fn
+        self._clock = clock
+        self._start_time = self._clock()
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._latest: dict[str, str] = {}
+        self._handle = None
+        self._writer: csv.DictWriter | None = None
+
+    def _ensure_writer(self) -> None:
+        if self._writer is not None:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._path.open("w", encoding="utf-8", newline="")
+        self._writer = csv.DictWriter(self._handle, fieldnames=self._FIELDS)
+        self._writer.writeheader()
+        self._handle.flush()
+
+    def sample_once(self) -> None:
+        snapshot = self._snapshot_fn()
+        if not snapshot:
+            return
+        elapsed_s = max(0.0, self._clock() - self._start_time)
+        row = {
+            "elapsed_s": f"{elapsed_s:.3f}",
+            "gpu_util_percent": snapshot.get("gpu_util_percent", ""),
+            "gpu_mem_used_mib": snapshot.get("gpu_mem_used_mib", ""),
+            "gpu_mem_total_mib": snapshot.get("gpu_mem_total_mib", ""),
+        }
+        with self._lock:
+            self._latest = {
+                "gpu_util_percent": row["gpu_util_percent"],
+                "gpu_mem_used_mib": row["gpu_mem_used_mib"],
+                "gpu_mem_total_mib": row["gpu_mem_total_mib"],
+            }
+        self._ensure_writer()
+        assert self._writer is not None and self._handle is not None
+        self._writer.writerow(row)
+        self._handle.flush()
+
+    def latest(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._latest)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self.sample_once()
+        self._thread = threading.Thread(target=self._run, name="gpu-usage-monitor", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._sample_interval_s):
+            try:
+                self.sample_once()
+            except Exception as exc:  # pragma: no cover - 后台监控失败不能中断训练。
+                print(f"gpu_monitor_warning={exc}", flush=True)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self._sample_interval_s * 2.0))
+            self._thread = None
+        self.close()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+            self._writer = None
+
+
 def _should_collect_gpu_snapshot(step: int, interval: int) -> bool:
     if interval <= 0:
         raise ValueError("GPU snapshot interval must be positive")
@@ -1262,6 +1353,14 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         )
         false_match_writer.writeheader()
 
+    gpu_monitor: GpuUsageMonitor | None = None
+    if device.type == "cuda" and args.gpu_monitor:
+        gpu_monitor = GpuUsageMonitor(
+            args.output_dir / "gpu_metrics.csv",
+            sample_interval_s=args.gpu_sample_interval_s,
+        )
+        gpu_monitor.start()
+
     start = time.perf_counter()
     try:
         for step in range(1, args.steps + 1):
@@ -1390,7 +1489,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 torch.cuda.synchronize(device)
             train_ms = (time.perf_counter() - train_start) * 1000.0
             gpu_snapshot_start = time.perf_counter()
-            gpu = _gpu_snapshot() if _should_collect_gpu_snapshot(step, args.gpu_snapshot_every) else {}
+            if gpu_monitor is not None:
+                gpu = gpu_monitor.latest()
+            else:
+                gpu = _gpu_snapshot() if _should_collect_gpu_snapshot(step, args.gpu_snapshot_every) else {}
             gpu_snapshot_ms = (time.perf_counter() - gpu_snapshot_start) * 1000.0
             hard_lazy_pairs = sum(
                 1
@@ -1445,6 +1547,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         metrics_writer.close()
         if false_match_handle is not None:
             false_match_handle.close()
+        if gpu_monitor is not None:
+            gpu_monitor.stop()
     elapsed = time.perf_counter() - start
     data_wait_values = [float(row["data_wait_ms"]) for row in rows]
     augment_values = [float(row["augment_ms"]) for row in rows]
@@ -1467,7 +1571,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "last_loss": rows[-1]["loss"] if rows else "-",
         "last_top1_accuracy": rows[-1]["top1_accuracy"] if rows else "-",
         "photometric_augmentation": photometric_config,
-        "last_gpu": _gpu_snapshot(),
+        "gpu_monitor_enabled": bool(gpu_monitor is not None),
+        "gpu_sample_interval_s": float(args.gpu_sample_interval_s),
+        "last_gpu": gpu_monitor.latest() if gpu_monitor is not None else _gpu_snapshot(),
     }
     _write_rows(
         args.output_dir / "train_metrics.csv",
@@ -1576,6 +1682,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-every", type=int, default=5)
     parser.add_argument("--save-every-steps", type=int, default=0)
     parser.add_argument("--gpu-snapshot-every", type=int, default=25)
+    parser.add_argument("--gpu-monitor", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gpu-sample-interval-s", type=float, default=1.0)
     parser.add_argument("--skip-bad-pairs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-bad-pairs", type=int, default=0)
 
@@ -1700,6 +1808,8 @@ def main() -> int:
         raise ValueError("--steps must be positive in train mode")
     if args.gpu_snapshot_every <= 0:
         raise ValueError("--gpu-snapshot-every must be positive")
+    if args.gpu_sample_interval_s <= 0.0:
+        raise ValueError("--gpu-sample-interval-s must be positive")
     if not 0.0 <= args.photometric_probability <= 1.0:
         raise ValueError("--photometric-probability must be in [0, 1]")
     if args.visual_max_matches < 0:

@@ -1,3 +1,4 @@
+import csv
 import unittest
 import tempfile
 from unittest import mock
@@ -143,6 +144,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "4",
             "--gpu-snapshot-every",
             "25",
+            "--no-gpu-monitor",
+            "--gpu-sample-interval-s",
+            "0.5",
             "--hard-variant",
             "extreme",
             "--hard-valid-fraction-max",
@@ -162,6 +166,8 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.false_match_csv, [Path("false.csv")])
         self.assertEqual(args.false_match_mine_every, 4)
         self.assertEqual(args.gpu_snapshot_every, 25)
+        self.assertFalse(args.gpu_monitor)
+        self.assertAlmostEqual(args.gpu_sample_interval_s, 0.5)
         self.assertEqual(args.hard_variant, ["extreme"])
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
@@ -172,6 +178,40 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertFalse(lazy_bench._should_collect_gpu_snapshot(24, 25))
         self.assertTrue(lazy_bench._should_collect_gpu_snapshot(25, 25))
         self.assertTrue(lazy_bench._should_collect_gpu_snapshot(50, 25))
+
+    def test_gpu_usage_monitor_writes_latest_snapshot_without_step_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            samples = iter(
+                [
+                    {
+                        "gpu_util_percent": "34",
+                        "gpu_mem_used_mib": "1024",
+                        "gpu_mem_total_mib": "16303",
+                    },
+                    {
+                        "gpu_util_percent": "91",
+                        "gpu_mem_used_mib": "12000",
+                        "gpu_mem_total_mib": "16303",
+                    },
+                ]
+            )
+
+            monitor = lazy_bench.GpuUsageMonitor(
+                Path(temp) / "gpu_metrics.csv",
+                sample_interval_s=1.0,
+                snapshot_fn=lambda: next(samples),
+                clock=lambda: 10.0,
+            )
+            monitor.sample_once()
+            monitor.sample_once()
+            monitor.close()
+
+            self.assertEqual(monitor.latest()["gpu_util_percent"], "91")
+            with (Path(temp) / "gpu_metrics.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["elapsed_s"], "0.000")
+            self.assertEqual(rows[1]["gpu_mem_used_mib"], "12000")
 
     def test_render_manifest_uses_image_path_as_uint8_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
