@@ -249,6 +249,13 @@ static void pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance()
     PFM_REQUIRE((output.accept_logits.index({Slice(0, 4), Slice(0, 4)}) > -100.0F).any().item<bool>());
     PFM_REQUIRE((output.accept_logits.index({4, Slice()}) < -9000.0F).all().item<bool>());
     PFM_REQUIRE((output.accept_logits.index({Slice(), 4}) < -9000.0F).all().item<bool>());
+    PFM_REQUIRE(output.executed_layers == 3);
+    PFM_REQUIRE(output.input_keypoints_a == 5);
+    PFM_REQUIRE(output.input_keypoints_b == 5);
+    PFM_REQUIRE(output.kept_keypoints_a == 4);
+    PFM_REQUIRE(output.kept_keypoints_b == 4);
+    PFM_REQUIRE(output.pruned_keypoints_a == 1);
+    PFM_REQUIRE(output.pruned_keypoints_b == 1);
 }
 
 static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()

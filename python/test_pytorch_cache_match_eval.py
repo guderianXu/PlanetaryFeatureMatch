@@ -13,6 +13,11 @@ from patch_descriptor_training import SyntheticPair
 
 
 class PyTorchCacheMatchEvalTest(unittest.TestCase):
+    def test_eval_csv_fieldnames_include_graph_adaptive_stats(self):
+        self.assertIn("graph_executed_layers", eval_py.EVAL_CSV_FIELDNAMES)
+        self.assertIn("graph_kept_keypoints_a", eval_py.EVAL_CSV_FIELDNAMES)
+        self.assertIn("graph_pruned_keypoints_b", eval_py.EVAL_CSV_FIELDNAMES)
+
     def test_select_descriptor_keypoints_filters_dark_pixels_and_caps(self):
         image = torch.ones(1, 8, 8)
         image[:, :4, :4] = 0.0
@@ -651,6 +656,46 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertEqual(matches.tolist(), [[0, 0]])
         self.assertTrue(torch.allclose(scores.cpu(), torch.tensor([0.9], dtype=torch.float32), atol=1.0e-6))
+
+    def test_graph_matcher_matches_reports_adaptive_stats(self):
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=torch.empty(3, 3),
+                    matches=torch.tensor([[0, 0]], dtype=torch.long),
+                    scores=torch.tensor([0.9], dtype=torch.float32),
+                    executed_layers=2,
+                    input_keypoints_a=2,
+                    input_keypoints_b=2,
+                    kept_keypoints_a=1,
+                    kept_keypoints_b=1,
+                    pruned_keypoints_a=1,
+                    pruned_keypoints_b=1,
+                )
+
+        graph_stats = {}
+        matches, _ = eval_py.graph_matcher_matches(
+            DummyModel(),
+            desc_a,
+            keypoints,
+            desc_b,
+            keypoints,
+            max_matches=8,
+            graph_stats=graph_stats,
+        )
+
+        self.assertEqual(matches.tolist(), [[0, 0]])
+        self.assertEqual(graph_stats["graph_executed_layers"], 2)
+        self.assertEqual(graph_stats["graph_pruned_keypoints_a"], 1)
+        self.assertEqual(graph_stats["graph_kept_keypoints_b"], 1)
 
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])

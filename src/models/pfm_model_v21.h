@@ -62,6 +62,20 @@ struct PfmV21GraphMatcherOutput
     torch::Tensor scores;
     /// 每个候选匹配的接受 logits。
     torch::Tensor accept_logits;
+    /// 实际执行的图注意力层数。
+    int64_t executed_layers = 0;
+    /// 输入 A 视图关键点数。
+    int64_t input_keypoints_a = 0;
+    /// 输入 B 视图关键点数。
+    int64_t input_keypoints_b = 0;
+    /// 自适应剪枝后保留的 A 视图关键点数。
+    int64_t kept_keypoints_a = 0;
+    /// 自适应剪枝后保留的 B 视图关键点数。
+    int64_t kept_keypoints_b = 0;
+    /// 自适应剪枝移除的 A 视图关键点数。
+    int64_t pruned_keypoints_a = 0;
+    /// 自适应剪枝移除的 B 视图关键点数。
+    int64_t pruned_keypoints_b = 0;
 };
 
 struct PfmV21SemiDenseCandidateOutput

@@ -46,6 +46,13 @@ class GraphMatcherOutput:
     matches: torch.Tensor
     scores: torch.Tensor
     accept_logits: torch.Tensor | None = None
+    executed_layers: int = 0
+    input_keypoints_a: int = 0
+    input_keypoints_b: int = 0
+    kept_keypoints_a: int = 0
+    kept_keypoints_b: int = 0
+    pruned_keypoints_a: int = 0
+    pruned_keypoints_b: int = 0
 
 
 @dataclass(frozen=True)
@@ -1006,7 +1013,23 @@ class PlanetaryGraphMatcher(nn.Module):
         probabilities = best_values[inlier_mask]
         matches = torch.stack([source_indices, target_indices], dim=1).to(device="cpu", dtype=torch.long).contiguous()
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
-        return GraphMatcherOutput(logits.contiguous(), matches, scores, accept_logits.contiguous())
+        kept_keypoints_a = int(indices_a.numel())
+        kept_keypoints_b = int(indices_b.numel())
+        input_keypoints_a = int(descriptors_a.size(0))
+        input_keypoints_b = int(descriptors_b.size(0))
+        return GraphMatcherOutput(
+            logits.contiguous(),
+            matches,
+            scores,
+            accept_logits.contiguous(),
+            executed_layers=int(self.last_executed_attention_layers),
+            input_keypoints_a=input_keypoints_a,
+            input_keypoints_b=input_keypoints_b,
+            kept_keypoints_a=kept_keypoints_a,
+            kept_keypoints_b=kept_keypoints_b,
+            pruned_keypoints_a=max(0, input_keypoints_a - kept_keypoints_a),
+            pruned_keypoints_b=max(0, input_keypoints_b - kept_keypoints_b),
+        )
 
 
 def make_rotation_invariant_texture_descriptor(

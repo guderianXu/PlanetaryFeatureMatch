@@ -1130,7 +1130,23 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     auto probabilities = best_values.index({inlier_mask});
     auto matches = torch::stack({source_indices, target_indices}, 1).to(torch::kCPU, torch::kInt64).contiguous();
     auto scores = probabilities.to(torch::kCPU, torch::kFloat32).contiguous();
-    return PfmV21GraphMatcherOutput{logits.contiguous(), matches, scores, accept_logits.contiguous()};
+    const int64_t input_keypoints_a = descriptors_a.size(0);
+    const int64_t input_keypoints_b = descriptors_b.size(0);
+    const int64_t kept_keypoints_a = indices_a.size(0);
+    const int64_t kept_keypoints_b = indices_b.size(0);
+    return PfmV21GraphMatcherOutput{
+        logits.contiguous(),
+        matches,
+        scores,
+        accept_logits.contiguous(),
+        _last_executed_attention_layers,
+        input_keypoints_a,
+        input_keypoints_b,
+        kept_keypoints_a,
+        kept_keypoints_b,
+        std::max<int64_t>(0, input_keypoints_a - kept_keypoints_a),
+        std::max<int64_t>(0, input_keypoints_b - kept_keypoints_b),
+    };
 }
 
 torch::Tensor makeRotationInvariantTextureDescriptor(const torch::Tensor& image, int64_t descriptor_height,

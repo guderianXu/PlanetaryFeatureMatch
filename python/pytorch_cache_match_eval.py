@@ -56,6 +56,53 @@ class MatchEvalResult:
     correct: int
     wrong: int
     precision: float
+    graph_executed_layers: int = 0
+    graph_input_keypoints_a: int = 0
+    graph_input_keypoints_b: int = 0
+    graph_kept_keypoints_a: int = 0
+    graph_kept_keypoints_b: int = 0
+    graph_pruned_keypoints_a: int = 0
+    graph_pruned_keypoints_b: int = 0
+
+
+EVAL_CSV_FIELDNAMES = [
+    "pair_pt",
+    "matches",
+    "correct",
+    "wrong",
+    "precision",
+    "graph_executed_layers",
+    "graph_input_keypoints_a",
+    "graph_input_keypoints_b",
+    "graph_kept_keypoints_a",
+    "graph_kept_keypoints_b",
+    "graph_pruned_keypoints_a",
+    "graph_pruned_keypoints_b",
+]
+
+
+def match_eval_result(
+    *,
+    matches: int,
+    correct: int,
+    wrong: int,
+    precision: float,
+    graph_stats: dict[str, int] | None = None,
+) -> MatchEvalResult:
+    stats = graph_stats or {}
+    return MatchEvalResult(
+        matches=matches,
+        correct=correct,
+        wrong=wrong,
+        precision=precision,
+        graph_executed_layers=int(stats.get("graph_executed_layers", 0)),
+        graph_input_keypoints_a=int(stats.get("graph_input_keypoints_a", 0)),
+        graph_input_keypoints_b=int(stats.get("graph_input_keypoints_b", 0)),
+        graph_kept_keypoints_a=int(stats.get("graph_kept_keypoints_a", 0)),
+        graph_kept_keypoints_b=int(stats.get("graph_kept_keypoints_b", 0)),
+        graph_pruned_keypoints_a=int(stats.get("graph_pruned_keypoints_a", 0)),
+        graph_pruned_keypoints_b=int(stats.get("graph_pruned_keypoints_b", 0)),
+    )
 
 
 def _feature_to_image_points(
@@ -535,6 +582,7 @@ def graph_matcher_matches(
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
     metadata_b: torch.Tensor | None = None,
+    graph_stats: dict[str, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if max_matches < 0:
         raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
@@ -585,6 +633,19 @@ def graph_matcher_matches(
         meta_b,
         **graph_kwargs,
     )
+    if graph_stats is not None:
+        graph_stats.clear()
+        graph_stats.update(
+            {
+                "graph_executed_layers": int(getattr(output, "executed_layers", 0)),
+                "graph_input_keypoints_a": int(getattr(output, "input_keypoints_a", desc_a.size(0))),
+                "graph_input_keypoints_b": int(getattr(output, "input_keypoints_b", desc_b.size(0))),
+                "graph_kept_keypoints_a": int(getattr(output, "kept_keypoints_a", desc_a.size(0))),
+                "graph_kept_keypoints_b": int(getattr(output, "kept_keypoints_b", desc_b.size(0))),
+                "graph_pruned_keypoints_a": int(getattr(output, "pruned_keypoints_a", 0)),
+                "graph_pruned_keypoints_b": int(getattr(output, "pruned_keypoints_b", 0)),
+            }
+        )
     use_calibrated_logits = (
         abs(float(graph_dustbin_delta)) > 0.0
         or float(graph_acceptance_margin) > 0.0
@@ -901,6 +962,7 @@ def match_pair_descriptor_maps(
 ) -> MatchEvalResult:
     if graph_fallback_mode not in {"mutual", "none"}:
         raise ValueError("graph_fallback_mode must be mutual or none")
+    graph_stats: dict[str, int] = {}
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
         descriptors_a,
@@ -989,6 +1051,7 @@ def match_pair_descriptor_maps(
             scores_b=row_scores_b,
             metadata_a=metadata_a,
             metadata_b=metadata_b,
+            graph_stats=graph_stats,
         )
         if (
             graph_fallback_mode == "mutual"
@@ -1038,7 +1101,7 @@ def match_pair_descriptor_maps(
     else:
         raise ValueError(f"unsupported matcher_mode: {matcher_mode}")
     if matches.numel() == 0:
-        return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
+        return match_eval_result(matches=0, correct=0, wrong=0, precision=0.0, graph_stats=graph_stats)
 
     _, image_height_a, image_width_a = pair.view_a.shape
     _, image_height_b, image_width_b = pair.view_b.shape
@@ -1069,7 +1132,7 @@ def match_pair_descriptor_maps(
             min_inliers=4,
         )
         if kept_local.numel() == 0:
-            return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
+            return match_eval_result(matches=0, correct=0, wrong=0, precision=0.0, graph_stats=graph_stats)
         keep = kept_local[:, 0].to(points_a.device)
         matches = matches.index_select(0, keep.to(matches.device))
         points_a = points_a.index_select(0, keep)
@@ -1087,7 +1150,7 @@ def match_pair_descriptor_maps(
             min_inliers=4,
         )
         if kept_local.numel() == 0:
-            return MatchEvalResult(matches=0, correct=0, wrong=0, precision=0.0)
+            return match_eval_result(matches=0, correct=0, wrong=0, precision=0.0, graph_stats=graph_stats)
         keep = kept_local[:, 0].to(points_a.device)
         matches = matches.index_select(0, keep.to(matches.device))
         points_a = points_a.index_select(0, keep)
@@ -1100,7 +1163,7 @@ def match_pair_descriptor_maps(
     total = int(matches.size(0))
     wrong = total - correct
     precision = 0.0 if total == 0 else correct / total
-    return MatchEvalResult(matches=total, correct=correct, wrong=wrong, precision=precision)
+    return match_eval_result(matches=total, correct=correct, wrong=wrong, precision=precision, graph_stats=graph_stats)
 
 
 def descriptor_maps_for_pair(
@@ -1411,7 +1474,7 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, str]] = []
     with args.output.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["pair_pt", "matches", "correct", "wrong", "precision"])
+        writer = csv.DictWriter(handle, fieldnames=EVAL_CSV_FIELDNAMES)
         writer.writeheader()
         for index, pair_path in enumerate(pairs, 1):
             result = evaluate_pair_path(
@@ -1452,6 +1515,13 @@ def main() -> int:
                 "correct": str(result.correct),
                 "wrong": str(result.wrong),
                 "precision": f"{result.precision:.6f}",
+                "graph_executed_layers": str(result.graph_executed_layers),
+                "graph_input_keypoints_a": str(result.graph_input_keypoints_a),
+                "graph_input_keypoints_b": str(result.graph_input_keypoints_b),
+                "graph_kept_keypoints_a": str(result.graph_kept_keypoints_a),
+                "graph_kept_keypoints_b": str(result.graph_kept_keypoints_b),
+                "graph_pruned_keypoints_a": str(result.graph_pruned_keypoints_a),
+                "graph_pruned_keypoints_b": str(result.graph_pruned_keypoints_b),
             }
             rows.append(row)
             writer.writerow(row)
