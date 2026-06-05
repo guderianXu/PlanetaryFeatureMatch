@@ -873,6 +873,7 @@ def match_pair_descriptor_maps(
     *,
     model: pfm_model.PlanetaryFeatureMatcher | None = None,
     matcher_mode: str = "raw_descriptor",
+    graph_fallback_mode: str = "mutual",
     max_keypoints: int,
     min_intensity: float,
     threshold_px: float,
@@ -898,6 +899,8 @@ def match_pair_descriptor_maps(
     raw_features_a: pfm_model.RawFeatureMaps | None = None,
     raw_features_b: pfm_model.RawFeatureMaps | None = None,
 ) -> MatchEvalResult:
+    if graph_fallback_mode not in {"mutual", "none"}:
+        raise ValueError("graph_fallback_mode must be mutual or none")
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
         descriptors_a,
@@ -987,7 +990,12 @@ def match_pair_descriptor_maps(
             metadata_a=metadata_a,
             metadata_b=metadata_b,
         )
-        if matches.size(0) < max_matches and rows_a.size(0) > 0 and rows_b.size(0) > 0:
+        if (
+            graph_fallback_mode == "mutual"
+            and matches.size(0) < max_matches
+            and rows_a.size(0) > 0
+            and rows_b.size(0) > 0
+        ):
             fallback_matches, fallback_scores = mutual_nearest_matches(
                 rows_a,
                 rows_b,
@@ -1221,6 +1229,7 @@ def evaluate_pair_path(
     keypoint_cell_cap: int = 0,
     keypoint_score_mode: str = "texture",
     matcher_mode: str = "raw_descriptor",
+    graph_fallback_mode: str = "mutual",
     graph_dustbin_delta: float = 0.0,
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
@@ -1259,6 +1268,7 @@ def evaluate_pair_path(
             descriptors_b,
             model=model,
             matcher_mode=matcher_mode,
+            graph_fallback_mode=graph_fallback_mode,
             max_keypoints=max_keypoints,
             min_intensity=min_intensity,
             texture_fraction=texture_fraction,
@@ -1323,6 +1333,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keypoint-cell-cap", type=int, default=0)
     parser.add_argument("--keypoint-score-mode", choices=["texture", "learned"], default="texture")
     parser.add_argument("--matcher-mode", choices=["raw_descriptor", "graph_matcher"], default="raw_descriptor")
+    parser.add_argument("--graph-fallback-mode", choices=["mutual", "none"], default="mutual")
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--mutual", action="store_true")
@@ -1426,6 +1437,7 @@ def main() -> int:
                 keypoint_cell_cap=args.keypoint_cell_cap,
                 keypoint_score_mode=args.keypoint_score_mode,
                 matcher_mode=args.matcher_mode,
+                graph_fallback_mode=args.graph_fallback_mode,
                 graph_dustbin_delta=args.graph_dustbin_delta,
                 graph_acceptance_margin=args.graph_acceptance_margin,
                 graph_min_raw_score=args.graph_min_raw_score,

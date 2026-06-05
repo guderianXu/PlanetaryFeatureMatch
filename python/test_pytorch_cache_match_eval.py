@@ -210,6 +210,8 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "summary.csv",
             "--matcher-mode",
             "graph_matcher",
+            "--graph-fallback-mode",
+            "none",
             "--graph-dustbin-delta",
             "-0.5",
             "--graph-acceptance-margin",
@@ -232,6 +234,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             args = eval_py.parse_args()
 
         self.assertEqual(args.matcher_mode, "graph_matcher")
+        self.assertEqual(args.graph_fallback_mode, "none")
         self.assertEqual(args.graph_dustbin_delta, -0.5)
         self.assertEqual(args.graph_acceptance_margin, 0.02)
         self.assertEqual(args.graph_min_raw_score, 0.4)
@@ -459,6 +462,59 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertEqual(result.matches, 2)
         self.assertEqual(result.correct, 2)
+
+    def test_match_pair_descriptor_maps_can_disable_graph_fallback(self):
+        image = torch.ones(1, 4, 4)
+        warp = torch.zeros(4, 4, 2)
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        warp[..., 0] = xx
+        warp[..., 1] = yy
+        pair = SyntheticPair(
+            view_a=image,
+            view_b=image,
+            warp_a_to_b=warp,
+            valid_mask=torch.ones(4, 4, dtype=torch.bool),
+        )
+        descriptors = torch.eye(4).T.reshape(1, 4, 2, 2)
+
+        class RejectingGraphModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=torch.empty(5, 5),
+                    matches=torch.empty(0, 2, dtype=torch.long),
+                    scores=torch.empty(0, dtype=torch.float32),
+                )
+
+        fallback_result = eval_py.match_pair_descriptor_maps(
+            pair,
+            descriptors,
+            descriptors,
+            model=RejectingGraphModel(),
+            matcher_mode="graph_matcher",
+            max_keypoints=4,
+            max_matches=4,
+            min_intensity=0.0,
+            threshold_px=0.01,
+        )
+        strict_result = eval_py.match_pair_descriptor_maps(
+            pair,
+            descriptors,
+            descriptors,
+            model=RejectingGraphModel(),
+            matcher_mode="graph_matcher",
+            graph_fallback_mode="none",
+            max_keypoints=4,
+            max_matches=4,
+            min_intensity=0.0,
+            threshold_px=0.01,
+        )
+
+        self.assertGreater(fallback_result.matches, 0)
+        self.assertEqual(strict_result.matches, 0)
 
     def test_calibrated_graph_matches_can_lower_dustbin_rejection(self):
         logits = torch.tensor(
