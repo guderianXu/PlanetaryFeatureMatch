@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_EVAL = PROJECT_ROOT / "python" / "pytorch_cache_match_eval.py"
 GRAPH_PRESETS = {"off", "fast", "high_precision"}
 PYTHON_FALLBACK_MODES = {"mutual", "none"}
+RECOMMEND_PRECISION_TOLERANCE = 0.002
 
 
 @dataclass(frozen=True)
@@ -310,7 +311,19 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
 def _best_summary(summaries: list[EvalSummary]) -> EvalSummary | None:
     if not summaries:
         return None
-    return max(summaries, key=lambda item: (item.precision, item.correct, item.matches))
+    best_precision = max(item.precision for item in summaries)
+    candidates = [
+        item for item in summaries if item.precision >= best_precision - RECOMMEND_PRECISION_TOLERANCE
+    ]
+    return min(
+        candidates,
+        key=lambda item: (
+            item.attention_work_fraction if item.attention_work_fraction > 0.0 else 1.0,
+            -item.precision,
+            -item.correct,
+            -item.matches,
+        ),
+    )
 
 
 def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
@@ -414,7 +427,7 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
 <body>
 <main>
   <h1>Graph 推理配置 Sweep 报告</h1>
-  <div class="meta">生成时间：{html.escape(generated_at)}。本报告用于比较严格图匹配、置信门控、早停、宽度剪枝和 fallback 策略。</div>
+  <div class="meta">生成时间：{html.escape(generated_at)}。本报告用于比较严格图匹配、置信门控、早停、宽度剪枝和 fallback 策略；推荐配置会在接近最高 precision 的候选中优先选择计算量更低的配置。</div>
   <section class="summary">
     <strong>推荐配置：</strong>{html.escape(best_text)}
   </section>

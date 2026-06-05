@@ -72,6 +72,45 @@ class GraphInferenceSweepTest(unittest.TestCase):
         self.assertIn("123", command)
         self.assertIn("--exclude-self-pairs", command)
 
+    def test_best_summary_prefers_lower_attention_work_when_precision_is_close(self):
+        high_precision = sweep.EvalSummary(
+            config=sweep.GraphSweepConfig("high_precision", 0.85, "none"),
+            output_csv=Path("/out/high_precision.csv"),
+            pairs=10,
+            matches=100,
+            correct=100,
+            wrong=0,
+            precision=1.0,
+            low_precision_pairs=0,
+            attention_work_fraction=1.0,
+        )
+        fast = sweep.EvalSummary(
+            config=sweep.GraphSweepConfig("fast", 0.7, "none"),
+            output_csv=Path("/out/fast.csv"),
+            pairs=10,
+            matches=96,
+            correct=95,
+            wrong=1,
+            precision=0.999,
+            low_precision_pairs=0,
+            attention_work_fraction=0.35,
+        )
+        low_quality = sweep.EvalSummary(
+            config=sweep.GraphSweepConfig("fast", 0.5, "mutual"),
+            output_csv=Path("/out/low_quality.csv"),
+            pairs=10,
+            matches=120,
+            correct=114,
+            wrong=6,
+            precision=0.95,
+            low_precision_pairs=2,
+            attention_work_fraction=0.2,
+        )
+
+        best = sweep._best_summary([high_precision, fast, low_quality])
+
+        self.assertIs(best, fast)
+
     def test_summarize_eval_csv_and_write_reports(self):
         config = sweep.GraphSweepConfig("high_precision", 0.7, "none")
         with tempfile.TemporaryDirectory() as tmp:
