@@ -78,9 +78,12 @@ class GraphInferenceSweepTest(unittest.TestCase):
             tmp_path = Path(tmp)
             eval_csv = tmp_path / "eval.csv"
             eval_csv.write_text(
-                "pair_pt,matches,correct,wrong,precision\n"
-                "a.pt,10,8,2,0.8\n"
-                "b.pt,5,5,0,1.0\n",
+                "pair_pt,matches,correct,wrong,precision,"
+                "graph_executed_layers,graph_input_keypoints_a,graph_input_keypoints_b,"
+                "graph_kept_keypoints_a,graph_kept_keypoints_b,"
+                "graph_pruned_keypoints_a,graph_pruned_keypoints_b\n"
+                "a.pt,10,8,2,0.8,2,10,8,7,6,3,2\n"
+                "b.pt,5,5,0,1.0,4,20,18,16,15,4,3\n",
                 encoding="utf-8",
             )
 
@@ -92,6 +95,12 @@ class GraphInferenceSweepTest(unittest.TestCase):
             self.assertEqual(summary.wrong, 2)
             self.assertAlmostEqual(summary.precision, 13 / 15)
             self.assertEqual(summary.low_precision_pairs, 1)
+            self.assertAlmostEqual(summary.avg_executed_layers, 3.0)
+            self.assertAlmostEqual(summary.avg_input_keypoints_a, 15.0)
+            self.assertAlmostEqual(summary.avg_input_keypoints_b, 13.0)
+            self.assertAlmostEqual(summary.avg_kept_keypoints_a, 11.5)
+            self.assertAlmostEqual(summary.avg_kept_keypoints_b, 10.5)
+            self.assertAlmostEqual(summary.pruned_keypoint_fraction, 12 / 56)
 
             summary_csv = tmp_path / "summary.csv"
             report_html = tmp_path / "report.html"
@@ -100,10 +109,15 @@ class GraphInferenceSweepTest(unittest.TestCase):
 
             self.assertIn("high_precision", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("0.866667", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("avg_executed_layers", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("3.000", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("0.214286", summary_csv.read_text(encoding="utf-8"))
             html = report_html.read_text(encoding="utf-8")
             self.assertIn("<html", html)
             self.assertIn("high_precision", html)
             self.assertIn("严格图匹配", html)
+            self.assertIn("平均执行层数", html)
+            self.assertIn("剪枝比例", html)
 
 
 if __name__ == "__main__":
