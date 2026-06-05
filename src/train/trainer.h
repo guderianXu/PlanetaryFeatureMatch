@@ -44,6 +44,10 @@ struct TrainConfig
     double graph_matcher_accept_weight = 0.2;
     /// Python 对齐训练中 accept loss 采样的每行困难负样本数量。
     int graph_matcher_accept_negative_topk = 8;
+    /// Python 对齐训练中 LightGlue 式剪枝排序 loss 权重。
+    double graph_matcher_prune_ranking_weight = 0.1;
+    /// Python 对齐训练中剪枝排序 loss 的 logit 间隔。
+    double graph_matcher_prune_ranking_margin = 0.25;
     /// Python 对齐训练时是否训练 backbone。
     bool train_backbone = false;
     /// Python 对齐训练时是否训练 dual FPN。

@@ -558,7 +558,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>正样本排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      <div class="live-chart-card"><div><strong>显存</strong><span data-live-chart-meta="memory">最近 300 batch</span></div><svg data-live-chart="memory" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>图剪枝</strong><span data-live-chart-meta="graph_prune">最近 300 batch</span></div><svg data-live-chart="graph_prune" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
     </div>
   </div>
 </section>
@@ -1776,7 +1776,7 @@ const LIVE_CHART_METRICS = {
   loss: ['loss', 'loss_total', 'total_loss', 'train_loss'],
   top1: ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'],
   rank: ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank'],
-  memory: ['gpu_memory_used_mb', 'gpu_mem_used_mb', 'gpu_mem_used_mib', 'memory_used_mb']
+  graph_prune: ['graph_matcher_prune_ranking_loss', 'prune_ranking_loss']
 };
 
 function visibleMetricRows(rows) {
@@ -1981,7 +1981,7 @@ async function refreshLiveTraining() {
   renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.loss));
   renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.top1));
   renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.rank));
-  renderLiveChart(document.querySelector('[data-live-chart="memory"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.memory));
+  renderLiveChart(document.querySelector('[data-live-chart="graph_prune"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.graph_prune));
 }
 
 function installLiveTraining() {

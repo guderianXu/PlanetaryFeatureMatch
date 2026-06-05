@@ -202,6 +202,11 @@ torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatch
                                                       const torch::Tensor& desc_a, const torch::Tensor& desc_b,
                                                       const torch::Tensor& points_a, const torch::Tensor& points_b,
                                                       int64_t meta_dim, double accept_weight);
+torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatcherImpl& graph_matcher,
+                                                      const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+                                                      const torch::Tensor& points_a, const torch::Tensor& points_b,
+                                                      int64_t meta_dim, double accept_weight,
+                                                      double prune_ranking_weight, double prune_ranking_margin);
 
 } // namespace pfm::testing
 
@@ -406,6 +411,8 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE(config.graph_keypoint_meta_dim == 16);
     PFM_REQUIRE(config.training_profile == "full");
     PFM_REQUIRE_CLOSE(config.graph_matcher_accept_weight, 0.2, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_weight, 0.1, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.learning_rate, 3.0e-4, 1.0e-9);
     PFM_REQUIRE(config.lr_warmup_steps == 0);
     PFM_REQUIRE_CLOSE(config.min_learning_rate_ratio, 0.01, 1.0e-12);
@@ -1756,6 +1763,32 @@ static void trainer_python_compare_graph_loss_can_train_accept_head()
 
     const auto loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a, descriptors_b,
                                                                             points, points, 16, 0.5);
+    loss.backward();
+
+    bool saw_accept_grad = false;
+    for (const auto& parameter : matcher->named_parameters())
+    {
+        if (parameter.key() == "accept_head.2.weight")
+        {
+            saw_accept_grad = true;
+            PFM_REQUIRE(parameter.value().grad().defined());
+            PFM_REQUIRE(parameter.value().grad().abs().sum().item<float>() > 0.0F);
+        }
+    }
+    PFM_REQUIRE(saw_accept_grad);
+}
+
+static void trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->train();
+
+    auto descriptors_a = torch::eye(4, 8, torch::kFloat32);
+    auto descriptors_b = descriptors_a.clone();
+    auto points = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, torch::kFloat32);
+
+    const auto loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a, descriptors_b,
+                                                                            points, points, 16, 0.0, 0.5, 0.25);
     loss.backward();
 
     bool saw_accept_grad = false;
@@ -3244,6 +3277,8 @@ void register_trainer_tests()
                   trainer_python_compare_graph_loss_disables_candidate_mask_for_supervision);
     register_test("trainer python compare graph loss can train accept head",
                   trainer_python_compare_graph_loss_can_train_accept_head);
+    register_test("trainer python compare graph loss can train prune ranking accept head",
+                  trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",

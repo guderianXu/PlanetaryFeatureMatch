@@ -37,6 +37,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_ce_loss",
     "graph_matcher_no_match_loss",
     "graph_matcher_accept_loss",
+    "graph_matcher_prune_ranking_loss",
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
 )
@@ -1369,6 +1370,8 @@ def graph_matcher_correspondence_loss(
     no_match_min_distance: float = 4.0,
     accept_weight: float = 0.0,
     accept_negative_topk: int = 8,
+    prune_ranking_weight: float = 0.0,
+    prune_ranking_margin: float = 0.25,
     raw_preservation_weight: float = 0.0,
     raw_preservation_margin: float = 1.0,
     raw_preservation_raw_margin: float = 0.05,
@@ -1386,6 +1389,7 @@ def graph_matcher_correspondence_loss(
         ce_loss: torch.Tensor,
         no_match_loss: torch.Tensor,
         accept_loss: torch.Tensor,
+        prune_ranking_loss: torch.Tensor,
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
@@ -1394,6 +1398,7 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_ce_loss": ce_loss,
             "graph_matcher_no_match_loss": no_match_loss,
             "graph_matcher_accept_loss": accept_loss,
+            "graph_matcher_prune_ranking_loss": prune_ranking_loss,
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
         }
@@ -1401,7 +1406,7 @@ def graph_matcher_correspondence_loss(
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1484,6 +1489,7 @@ def graph_matcher_correspondence_loss(
     match_ce_loss = 0.5 * (row_loss + col_loss)
     no_match_loss = output.logits.new_zeros(())
     accept_loss = output.logits.new_zeros(())
+    prune_ranking_loss = output.logits.new_zeros(())
     raw_preservation_loss = output.logits.new_zeros(())
     hard_negative_dustbin_loss = output.logits.new_zeros(())
     loss = match_ce_loss
@@ -1509,6 +1515,13 @@ def graph_matcher_correspondence_loss(
             negative_topk=accept_negative_topk,
         )
         loss = loss + float(accept_weight) * accept_loss
+    if prune_ranking_weight > 0.0:
+        prune_ranking_loss = graph_matcher_prune_ranking_loss(
+            output,
+            positive_count=count,
+            margin=prune_ranking_margin,
+        )
+        loss = loss + float(prune_ranking_weight) * prune_ranking_loss
     if raw_preservation_weight > 0.0:
         raw_preservation_loss = graph_matcher_raw_preservation_loss(
             output.logits,
@@ -1536,6 +1549,7 @@ def graph_matcher_correspondence_loss(
             match_ce_loss,
             no_match_loss,
             accept_loss,
+            prune_ranking_loss,
             raw_preservation_loss,
             hard_negative_dustbin_loss,
         )
@@ -1577,6 +1591,41 @@ def graph_matcher_acceptance_loss(
         no_match_ba = accept_logits[count:, :count]
         if no_match_ba.numel() > 0:
             terms.append(F.binary_cross_entropy_with_logits(no_match_ba, torch.zeros_like(no_match_ba)))
+    return torch.stack(terms).mean()
+
+
+def graph_matcher_prune_ranking_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    margin: float = 0.25,
+) -> torch.Tensor:
+    if output.accept_logits is None:
+        return output.logits.new_zeros(())
+    accept_logits = output.accept_logits
+    count = min(int(positive_count), accept_logits.size(0), accept_logits.size(1))
+    if count <= 0:
+        return output.logits.new_zeros(())
+    positive_logits = accept_logits[:count, :count].diagonal()
+    terms: list[torch.Tensor] = []
+    if count > 1:
+        positive_square = accept_logits[:count, :count]
+        off_diagonal = ~torch.eye(count, dtype=torch.bool, device=accept_logits.device)
+        row_hard = positive_square.masked_fill(~off_diagonal, -float("inf")).max(dim=1).values
+        col_hard = positive_square.masked_fill(~off_diagonal, -float("inf")).max(dim=0).values
+        terms.append(F.relu(float(margin) - positive_logits + row_hard).mean())
+        terms.append(F.relu(float(margin) - positive_logits + col_hard).mean())
+    positive_anchor = positive_logits.mean()
+    if accept_logits.size(0) > count:
+        negative_row_scores = accept_logits[count:, :count].max(dim=1).values
+        if negative_row_scores.numel() > 0:
+            terms.append(F.relu(float(margin) - positive_anchor + negative_row_scores).mean())
+    if accept_logits.size(1) > count:
+        negative_col_scores = accept_logits[:count, count:].max(dim=0).values
+        if negative_col_scores.numel() > 0:
+            terms.append(F.relu(float(margin) - positive_anchor + negative_col_scores).mean())
+    if not terms:
+        return output.logits.new_zeros(())
     return torch.stack(terms).mean()
 
 
@@ -2045,6 +2094,8 @@ def train_step(
     graph_matcher_no_match_min_distance: float = 4.0,
     graph_matcher_accept_weight: float = 0.0,
     graph_matcher_accept_negative_topk: int = 8,
+    graph_matcher_prune_ranking_weight: float = 0.0,
+    graph_matcher_prune_ranking_margin: float = 0.25,
     graph_matcher_raw_preservation_weight: float = 0.0,
     graph_matcher_raw_preservation_margin: float = 1.0,
     graph_matcher_raw_preservation_raw_margin: float = 0.05,
@@ -2189,6 +2240,8 @@ def train_step(
                             no_match_min_distance=graph_matcher_no_match_min_distance,
                             accept_weight=graph_matcher_accept_weight,
                             accept_negative_topk=graph_matcher_accept_negative_topk,
+                            prune_ranking_weight=graph_matcher_prune_ranking_weight,
+                            prune_ranking_margin=graph_matcher_prune_ranking_margin,
                             raw_preservation_weight=graph_matcher_raw_preservation_weight,
                             raw_preservation_margin=graph_matcher_raw_preservation_margin,
                             raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
@@ -3096,6 +3149,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
+    parser.add_argument("--graph-matcher-prune-ranking-margin", type=float, default=0.25)
     parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
     parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
@@ -3195,6 +3250,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-accept-weight must be nonnegative")
     if args.graph_matcher_accept_negative_topk < 0:
         parser.error("--graph-matcher-accept-negative-topk must be nonnegative")
+    if args.graph_matcher_prune_ranking_weight < 0.0:
+        parser.error("--graph-matcher-prune-ranking-weight must be nonnegative")
+    if args.graph_matcher_prune_ranking_margin < 0.0:
+        parser.error("--graph-matcher-prune-ranking-margin must be nonnegative")
     if args.graph_matcher_raw_preservation_weight < 0.0:
         parser.error("--graph-matcher-raw-preservation-weight must be nonnegative")
     if args.graph_matcher_raw_preservation_margin < 0.0:
@@ -3559,6 +3618,7 @@ def main() -> int:
                 "abstention_weight",
                 "graph_matcher_loss_weight",
                 "graph_matcher_accept_weight",
+                "graph_matcher_prune_ranking_weight",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -3569,6 +3629,7 @@ def main() -> int:
                 "graph_matcher_ce_loss",
                 "graph_matcher_no_match_loss",
                 "graph_matcher_accept_loss",
+                "graph_matcher_prune_ranking_loss",
                 "graph_matcher_raw_preservation_loss",
                 "graph_matcher_hard_negative_dustbin_loss",
                 "points",
@@ -3693,6 +3754,8 @@ def main() -> int:
                 graph_matcher_no_match_min_distance=args.graph_matcher_no_match_min_distance,
                 graph_matcher_accept_weight=args.graph_matcher_accept_weight,
                 graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
+                graph_matcher_prune_ranking_weight=args.graph_matcher_prune_ranking_weight,
+                graph_matcher_prune_ranking_margin=args.graph_matcher_prune_ranking_margin,
                 graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
                 graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
                 graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
@@ -3725,6 +3788,9 @@ def main() -> int:
                     "abstention_weight": args.abstention_weight,
                     "graph_matcher_loss_weight": args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0,
                     "graph_matcher_accept_weight": args.graph_matcher_accept_weight if args.train_graph_matcher else 0.0,
+                    "graph_matcher_prune_ranking_weight": args.graph_matcher_prune_ranking_weight
+                    if args.train_graph_matcher
+                    else 0.0,
                     **metrics,
                 }
             )
@@ -3744,6 +3810,7 @@ def main() -> int:
                     f"abst={args.abstention_weight:.3f} "
                     f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
                     f"gacc={metrics.get('graph_matcher_accept_loss', 0.0):.6f} "
+                    f"gprune={metrics.get('graph_matcher_prune_ranking_loss', 0.0):.6f} "
                     f"skip={int(metrics['skipped'])} "
                     f"top1={metrics['top1_accuracy']:.4f} top5={metrics['top5_accuracy']:.4f} "
                     f"rank={metrics['mean_positive_rank']:.2f} "

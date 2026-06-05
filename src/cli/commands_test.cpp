@@ -171,6 +171,10 @@ static void parse_train_command()
         "0.35",
         "--graph-matcher-accept-negative-topk",
         "6",
+        "--graph-matcher-prune-ranking-weight",
+        "0.15",
+        "--graph-matcher-prune-ranking-margin",
+        "0.4",
         "--training-texture-blend-weight",
         "0.75",
         "--synthetic-pair-cache-dir",
@@ -263,6 +267,8 @@ static void parse_train_command()
     PFM_REQUIRE(parsed.train_graph_matcher);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_accept_weight, 0.35, 1.0e-12);
     PFM_REQUIRE(parsed.graph_matcher_accept_negative_topk == 6);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_weight, 0.15, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.4, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.training_texture_blend_weight, 0.75, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
@@ -347,6 +353,8 @@ static void parse_train_python_compare_profile_options()
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_loss_weight, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_accept_weight, 0.2, 1.0e-12);
     PFM_REQUIRE(parsed.graph_matcher_accept_negative_topk == 8);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_weight, 0.1, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.temperature, 0.07, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE(parsed.seed == 20260603);

@@ -150,6 +150,12 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--graph-matcher-accept-negative-topk", options.graph_matcher_accept_negative_topk,
                       "Python-compatible graph accept hard negative count")
         ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-prune-ranking-weight", options.graph_matcher_prune_ranking_weight,
+                      "Python-compatible LightGlue-style graph pruning ranking loss weight")
+        ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-prune-ranking-margin", options.graph_matcher_prune_ranking_margin,
+                      "Python-compatible graph pruning ranking logit margin")
+        ->check(CLI::NonNegativeNumber);
     train->add_flag("--train-backbone", options.train_backbone, "Python-compatible: train backbone parameters");
     train->add_flag("--train-dual-fpn", options.train_dual_fpn, "Python-compatible: train dual FPN parameters");
     train->add_flag("--freeze-descriptor-head", options.freeze_descriptor_head,

@@ -389,6 +389,16 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_accept_negative_topk must be non-negative");
     }
+    if (!std::isfinite(config.graph_matcher_prune_ranking_weight) ||
+        config.graph_matcher_prune_ranking_weight < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_prune_ranking_weight must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_prune_ranking_margin) ||
+        config.graph_matcher_prune_ranking_margin < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_prune_ranking_margin must be non-negative and finite");
+    }
     if (!std::isfinite(config.training_texture_blend_weight) || config.training_texture_blend_weight < 0.0)
     {
         throw std::invalid_argument("training_texture_blend_weight must be non-negative and finite");
@@ -4464,11 +4474,67 @@ torch::Tensor make_python_compare_graph_acceptance_loss(const v21::PfmV21GraphMa
     return torch::stack(terms).mean();
 }
 
+torch::Tensor make_python_compare_graph_prune_ranking_loss(const v21::PfmV21GraphMatcherOutput& output,
+                                                           int64_t positive_count, double margin)
+{
+    if (!output.accept_logits.defined() || positive_count <= 0)
+    {
+        return output.logits.new_zeros({});
+    }
+    const auto count = std::min<int64_t>({positive_count, output.accept_logits.size(0), output.accept_logits.size(1)});
+    if (count <= 0)
+    {
+        return output.logits.new_zeros({});
+    }
+
+    std::vector<torch::Tensor> terms;
+    const auto margin_tensor = torch::full({}, static_cast<float>(margin), output.accept_logits.options());
+    auto positive_square = output.accept_logits.narrow(0, 0, count).narrow(1, 0, count);
+    auto positive_logits = positive_square.diagonal();
+    if (count > 1)
+    {
+        auto diagonal_mask =
+            torch::eye(count, torch::TensorOptions().dtype(torch::kBool).device(positive_square.device()));
+        auto masked = positive_square.masked_fill(diagonal_mask, -std::numeric_limits<float>::infinity());
+        auto row_hard = std::get<0>(masked.max(1));
+        auto col_hard = std::get<0>(masked.max(0));
+        terms.push_back(torch::relu(margin_tensor - positive_logits + row_hard).mean());
+        terms.push_back(torch::relu(margin_tensor - positive_logits + col_hard).mean());
+    }
+    auto positive_anchor = positive_logits.mean();
+    if (output.accept_logits.size(0) > count)
+    {
+        auto negative_rows =
+            output.accept_logits.narrow(0, count, output.accept_logits.size(0) - count).narrow(1, 0, count);
+        if (negative_rows.numel() > 0)
+        {
+            auto negative_scores = std::get<0>(negative_rows.max(1));
+            terms.push_back(torch::relu(margin_tensor - positive_anchor + negative_scores).mean());
+        }
+    }
+    if (output.accept_logits.size(1) > count)
+    {
+        auto negative_cols =
+            output.accept_logits.narrow(0, 0, count).narrow(1, count, output.accept_logits.size(1) - count);
+        if (negative_cols.numel() > 0)
+        {
+            auto negative_scores = std::get<0>(negative_cols.max(0));
+            terms.push_back(torch::relu(margin_tensor - positive_anchor + negative_scores).mean());
+        }
+    }
+    if (terms.empty())
+    {
+        return output.logits.new_zeros({});
+    }
+    return torch::stack(terms).mean();
+}
+
 template <typename GraphMatcherT>
 torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const torch::Tensor& desc_a,
                                              const torch::Tensor& desc_b, const torch::Tensor& points_a,
                                              const torch::Tensor& points_b, int64_t meta_dim,
-                                             double accept_weight = 0.0, int64_t accept_negative_topk = 8)
+                                             double accept_weight = 0.0, int64_t accept_negative_topk = 8,
+                                             double prune_ranking_weight = 0.0, double prune_ranking_margin = 0.25)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4493,6 +4559,11 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
         loss = loss + static_cast<float>(accept_weight) *
                           make_python_compare_graph_acceptance_loss(output, limited_desc_a, limited_desc_b, count,
                                                                     accept_negative_topk);
+    }
+    if (prune_ranking_weight > 0.0)
+    {
+        loss = loss + static_cast<float>(prune_ranking_weight) *
+                          make_python_compare_graph_prune_ranking_loss(output, count, prune_ranking_margin);
     }
     return loss;
 }
@@ -4544,7 +4615,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 *modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
                 normalize_python_descriptor_rows(desc_b), sample.points_a, sample.points_b,
                 config.graph_keypoint_meta_dim, config.graph_matcher_accept_weight,
-                config.graph_matcher_accept_negative_topk));
+                config.graph_matcher_accept_negative_topk, config.graph_matcher_prune_ranking_weight,
+                config.graph_matcher_prune_ranking_margin));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6506,6 +6578,16 @@ torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImp
                                                       int64_t meta_dim, double accept_weight)
 {
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight);
+}
+
+torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImpl& graph_matcher,
+                                                      const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+                                                      const torch::Tensor& points_a, const torch::Tensor& points_b,
+                                                      int64_t meta_dim, double accept_weight,
+                                                      double prune_ranking_weight, double prune_ranking_margin)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight,
+                                          8, prune_ranking_weight, prune_ranking_margin);
 }
 
 } // namespace testing
