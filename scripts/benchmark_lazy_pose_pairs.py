@@ -390,6 +390,25 @@ def apply_local_contrast_normalization(
     )
 
 
+def apply_training_transforms(
+    pair: SyntheticPair,
+    *,
+    photometric_config: PhotometricAugmentConfig,
+    seed: int,
+    input_local_contrast: bool,
+    local_contrast_strength: float,
+    local_contrast_kernel: int,
+) -> SyntheticPair:
+    transformed = apply_photometric_augmentation(pair, photometric_config, seed=seed)
+    if input_local_contrast:
+        transformed = apply_local_contrast_normalization(
+            transformed,
+            strength=local_contrast_strength,
+            kernel_size=local_contrast_kernel,
+        )
+    return transformed
+
+
 def _project_crop_pair(
     view_a: torch.Tensor,
     view_b: torch.Tensor,
@@ -501,6 +520,11 @@ def generate_lazy_pair(
     absolute_depth_tolerance_m: float,
     relative_depth_tolerance: float,
     seed: int,
+    photometric_config: PhotometricAugmentConfig | None = None,
+    transform_seed: int = 0,
+    input_local_contrast: bool = False,
+    local_contrast_strength: float = 0.0,
+    local_contrast_kernel: int = 31,
 ) -> LazyPairResult:
     start = time.perf_counter()
     view_a = _cached_view(_selected_image_path(spec.reference, image_source))
@@ -532,10 +556,21 @@ def generate_lazy_pair(
             break
     if best is None:
         raise RuntimeError("failed to generate lazy pair")
+    pair = best[0]
+    transform_config = photometric_config if photometric_config is not None else PhotometricAugmentConfig()
+    if transform_config.enabled or input_local_contrast:
+        pair = apply_training_transforms(
+            pair,
+            photometric_config=transform_config,
+            seed=transform_seed,
+            input_local_contrast=input_local_contrast,
+            local_contrast_strength=local_contrast_strength,
+            local_contrast_kernel=local_contrast_kernel,
+        )
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return LazyPairResult(
         spec=spec,
-        pair=best[0],
+        pair=pair,
         valid_fraction=best[1],
         valid_pixels=best[2],
         attempt_count=attempt + 1,
@@ -559,6 +594,10 @@ def iter_lazy_pairs(
     seed: int,
     skip_bad_pairs: bool,
     max_bad_pairs: int,
+    photometric_config: PhotometricAugmentConfig | None = None,
+    input_local_contrast: bool = False,
+    local_contrast_strength: float = 0.0,
+    local_contrast_kernel: int = 31,
 ) -> Iterator[LazyPairResult]:
     if not specs:
         raise RuntimeError("no lazy pair specs available")
@@ -580,6 +619,11 @@ def iter_lazy_pairs(
             absolute_depth_tolerance_m=absolute_depth_tolerance_m,
             relative_depth_tolerance=relative_depth_tolerance,
             seed=seed + cursor * 31,
+            photometric_config=photometric_config,
+            transform_seed=seed + cursor * 1000003,
+            input_local_contrast=input_local_contrast,
+            local_contrast_strength=local_contrast_strength,
+            local_contrast_kernel=local_contrast_kernel,
         )
         future_map[future] = time.perf_counter()
         cursor += 1
@@ -691,6 +735,12 @@ def _gpu_snapshot() -> dict[str, str]:
         "gpu_mem_used_mib": first[1].strip(),
         "gpu_mem_total_mib": first[2].strip(),
     }
+
+
+def _should_collect_gpu_snapshot(step: int, interval: int) -> bool:
+    if interval <= 0:
+        raise ValueError("GPU snapshot interval must be positive")
+    return step == 1 or step % interval == 0
 
 
 def _photometric_config_from_args(args: argparse.Namespace) -> PhotometricAugmentConfig:
@@ -1135,8 +1185,11 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "false_match_pairs",
         "hard_lazy_pairs",
         "data_wait_ms",
+        "augment_ms",
         "false_mine_ms",
         "train_ms",
+        "gpu_snapshot_ms",
+        "step_ms",
         "valid_fraction_mean",
         "worker_elapsed_ms_mean",
         "photometric_augment",
@@ -1165,6 +1218,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         seed=args.seed,
         skip_bad_pairs=args.skip_bad_pairs,
         max_bad_pairs=args.max_bad_pairs,
+        photometric_config=photometric_config,
+        input_local_contrast=args.input_local_contrast,
+        local_contrast_strength=args.input_local_contrast_strength,
+        local_contrast_kernel=args.input_local_contrast_kernel,
     )
     hard_iterator: Iterator[LazyPairResult] | None = None
     if hard_specs:
@@ -1183,6 +1240,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             seed=args.seed + 91013,
             skip_bad_pairs=args.skip_bad_pairs,
             max_bad_pairs=args.max_bad_pairs,
+            photometric_config=photometric_config,
+            input_local_contrast=args.input_local_contrast,
+            local_contrast_strength=args.input_local_contrast_strength,
+            local_contrast_kernel=args.input_local_contrast_kernel,
         )
         print(f"hard_lazy_specs={len(hard_specs)} hard_variants={','.join(args.hard_variant)}", flush=True)
     static_false_matches = read_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
@@ -1201,6 +1262,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     start = time.perf_counter()
     try:
         for step in range(1, args.steps + 1):
+            step_start = time.perf_counter()
             fetch_start = time.perf_counter()
             hard_probability = hard_pair_probability(
                 step,
@@ -1212,20 +1274,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             results = [next(active_iterator) for _ in range(args.batch_pairs)]
             data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
             fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
-            augmented_pairs = []
-            for pair_index, result in enumerate(results):
-                pair = apply_photometric_augmentation(
-                    result.pair,
-                    photometric_config,
-                    seed=args.seed + step * 1000003 + pair_index * 9176,
-                )
-                if args.input_local_contrast:
-                    pair = apply_local_contrast_normalization(
-                        pair,
-                        strength=args.input_local_contrast_strength,
-                        kernel_size=args.input_local_contrast_kernel,
-                    )
-                augmented_pairs.append(pair)
+            augment_start = time.perf_counter()
+            augmented_pairs = [result.pair for result in results]
+            augment_ms = (time.perf_counter() - augment_start) * 1000.0
             prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
             mined_false_matches = dict(static_false_matches)
             mined_false_rows: list[dict[str, object]] = []
@@ -1327,7 +1378,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             train_ms = (time.perf_counter() - train_start) * 1000.0
-            gpu = _gpu_snapshot()
+            gpu_snapshot_start = time.perf_counter()
+            gpu = _gpu_snapshot() if _should_collect_gpu_snapshot(step, args.gpu_snapshot_every) else {}
+            gpu_snapshot_ms = (time.perf_counter() - gpu_snapshot_start) * 1000.0
             hard_lazy_pairs = sum(
                 1
                 for result in results
@@ -1347,8 +1400,11 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "false_match_pairs": f"{metrics.get('false_match_pairs', 0.0):.0f}",
                 "hard_lazy_pairs": hard_lazy_pairs,
                 "data_wait_ms": f"{data_wait_ms:.2f}",
+                "augment_ms": f"{augment_ms:.2f}",
                 "false_mine_ms": f"{false_mine_ms:.2f}",
                 "train_ms": f"{train_ms:.2f}",
+                "gpu_snapshot_ms": f"{gpu_snapshot_ms:.2f}",
+                "step_ms": f"{(time.perf_counter() - step_start) * 1000.0:.2f}",
                 "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
                 "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
                 "photometric_augment": int(photometric_config.enabled),
@@ -1377,14 +1433,22 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             false_match_handle.close()
     elapsed = time.perf_counter() - start
     data_wait_values = [float(row["data_wait_ms"]) for row in rows]
+    augment_values = [float(row["augment_ms"]) for row in rows]
+    false_mine_values = [float(row["false_mine_ms"]) for row in rows]
     train_values = [float(row["train_ms"]) for row in rows]
+    gpu_snapshot_values = [float(row["gpu_snapshot_ms"]) for row in rows]
+    step_values = [float(row["step_ms"]) for row in rows]
     summary = {
         "mode": "train",
         "steps": len(rows),
         "elapsed_s": elapsed,
         "steps_per_second": len(rows) / max(elapsed, 1.0e-6),
         "data_wait_ms": _summarize_float(data_wait_values),
+        "augment_ms": _summarize_float(augment_values),
+        "false_mine_ms": _summarize_float(false_mine_values),
         "train_ms": _summarize_float(train_values),
+        "gpu_snapshot_ms": _summarize_float(gpu_snapshot_values),
+        "step_ms": _summarize_float(step_values),
         "data_wait_to_train_ratio_mean": statistics.fmean(data_wait_values) / max(statistics.fmean(train_values), 1.0e-6),
         "last_loss": rows[-1]["loss"] if rows else "-",
         "last_top1_accuracy": rows[-1]["top1_accuracy"] if rows else "-",
@@ -1453,6 +1517,7 @@ def _save_training_state(
                 "photometric_noise": float(args.photometric_noise),
                 "input_local_contrast": bool(args.input_local_contrast),
                 "input_local_contrast_strength": float(args.input_local_contrast_strength),
+                "gpu_snapshot_every": int(args.gpu_snapshot_every),
                 "hard_variant": list(args.hard_variant),
                 "hard_curriculum_max_probability": float(args.hard_curriculum_max_probability),
                 "false_match_csv": [str(path) for path in args.false_match_csv],
@@ -1496,6 +1561,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--progress-every", type=int, default=5)
     parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument("--gpu-snapshot-every", type=int, default=25)
     parser.add_argument("--skip-bad-pairs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-bad-pairs", type=int, default=0)
 
@@ -1617,6 +1683,8 @@ def main() -> int:
         raise ValueError("--pairs must be positive in preprocess mode")
     if args.mode == "train" and args.steps <= 0:
         raise ValueError("--steps must be positive in train mode")
+    if args.gpu_snapshot_every <= 0:
+        raise ValueError("--gpu-snapshot-every must be positive")
     if not 0.0 <= args.photometric_probability <= 1.0:
         raise ValueError("--photometric-probability must be in [0, 1]")
     if args.visual_max_matches < 0:

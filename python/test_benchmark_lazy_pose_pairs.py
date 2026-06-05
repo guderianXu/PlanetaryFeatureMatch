@@ -77,6 +77,42 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertGreaterEqual(float(normalized.view_a.min()), 0.0)
         self.assertLessEqual(float(normalized.view_a.max()), 1.0)
 
+    def test_training_transforms_are_deterministic_and_preserve_geometry(self) -> None:
+        pair = self.make_pair()
+        config = PhotometricAugmentConfig(
+            enabled=True,
+            probability=1.0,
+            brightness=0.12,
+            contrast=0.25,
+            gamma=0.30,
+            shadow=0.20,
+            noise=0.01,
+        )
+
+        first = lazy_bench.apply_training_transforms(
+            pair,
+            photometric_config=config,
+            seed=789,
+            input_local_contrast=True,
+            local_contrast_strength=0.5,
+            local_contrast_kernel=3,
+        )
+        second = lazy_bench.apply_training_transforms(
+            pair,
+            photometric_config=config,
+            seed=789,
+            input_local_contrast=True,
+            local_contrast_strength=0.5,
+            local_contrast_kernel=3,
+        )
+
+        self.assertTrue(torch.allclose(first.view_a, second.view_a))
+        self.assertTrue(torch.allclose(first.view_b, second.view_b))
+        self.assertFalse(torch.allclose(first.view_a, pair.view_a))
+        self.assertFalse(torch.allclose(first.view_b, pair.view_b))
+        self.assertTrue(torch.equal(first.valid_mask, pair.valid_mask))
+        self.assertTrue(torch.allclose(first.warp_a_to_b, pair.warp_a_to_b))
+
     def test_parse_args_accepts_rejection_and_hard_negative_options(self) -> None:
         argv = [
             "benchmark_lazy_pose_pairs.py",
@@ -105,6 +141,8 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.75",
             "--false-match-mine-every",
             "4",
+            "--gpu-snapshot-every",
+            "25",
             "--hard-variant",
             "extreme",
             "--hard-valid-fraction-max",
@@ -123,9 +161,17 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_no_match_points, 64)
         self.assertEqual(args.false_match_csv, [Path("false.csv")])
         self.assertEqual(args.false_match_mine_every, 4)
+        self.assertEqual(args.gpu_snapshot_every, 25)
         self.assertEqual(args.hard_variant, ["extreme"])
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
+
+    def test_gpu_snapshot_interval_collects_first_and_interval_steps(self) -> None:
+        self.assertTrue(lazy_bench._should_collect_gpu_snapshot(1, 25))
+        self.assertFalse(lazy_bench._should_collect_gpu_snapshot(2, 25))
+        self.assertFalse(lazy_bench._should_collect_gpu_snapshot(24, 25))
+        self.assertTrue(lazy_bench._should_collect_gpu_snapshot(25, 25))
+        self.assertTrue(lazy_bench._should_collect_gpu_snapshot(50, 25))
 
     def test_render_manifest_uses_image_path_as_uint8_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
