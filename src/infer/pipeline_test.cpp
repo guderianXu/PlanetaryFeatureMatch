@@ -1109,6 +1109,9 @@ static void pipeline_match_eval_and_export_print_timing()
     PFM_REQUIRE(pfm::run_eval_command(eval_options) == 0);
     const auto eval_output = eval_capture.str();
     PFM_REQUIRE(eval_output.find("pairs=1") != std::string::npos);
+    PFM_REQUIRE(eval_output.find("graph_layers=") != std::string::npos);
+    PFM_REQUIRE(eval_output.find("graph_pruned=") != std::string::npos);
+    PFM_REQUIRE(eval_output.find("graph_work=") != std::string::npos);
     PFM_REQUIRE(has_formatted_seconds_after_label(eval_output, "elapsed="));
     PFM_REQUIRE(has_formatted_seconds_after_label(eval_output, "avg_pair_time="));
 

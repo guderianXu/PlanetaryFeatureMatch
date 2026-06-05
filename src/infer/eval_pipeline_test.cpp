@@ -122,10 +122,30 @@ static void eval_pipeline_aggregates_known_metrics()
 {
     const std::vector<std::pair<pfm::FeatureSet, pfm::FeatureSet>> feature_sets = {
         {makeEvalFeatureSet(4), makeEvalFeatureSet(9)}, {makeEvalFeatureSet(5), makeEvalFeatureSet(2)}};
-    const std::vector<pfm::MatchSet> match_sets = {
+    auto match_a =
         makeEvalMatchSet(torch::tensor({0.5F, 1.0F}, torch::kFloat32), torch::tensor({0.25F, 0.75F}, torch::kFloat32),
-                         2),
-        makeEvalMatchSet(torch::tensor({0.25F}, torch::kFloat32), torch::tensor({1.0F}, torch::kFloat32), 1)};
+                         2);
+    match_a.graph_executed_layers = 2;
+    match_a.graph_input_keypoints_a = 10;
+    match_a.graph_input_keypoints_b = 8;
+    match_a.graph_kept_keypoints_a = 7;
+    match_a.graph_kept_keypoints_b = 6;
+    match_a.graph_pruned_keypoints_a = 3;
+    match_a.graph_pruned_keypoints_b = 2;
+    match_a.graph_attention_work_units = 10;
+    match_a.graph_full_attention_work_units = 20;
+    auto match_b =
+        makeEvalMatchSet(torch::tensor({0.25F}, torch::kFloat32), torch::tensor({1.0F}, torch::kFloat32), 1);
+    match_b.graph_executed_layers = 4;
+    match_b.graph_input_keypoints_a = 20;
+    match_b.graph_input_keypoints_b = 18;
+    match_b.graph_kept_keypoints_a = 16;
+    match_b.graph_kept_keypoints_b = 15;
+    match_b.graph_pruned_keypoints_a = 4;
+    match_b.graph_pruned_keypoints_b = 3;
+    match_b.graph_attention_work_units = 8;
+    match_b.graph_full_attention_work_units = 32;
+    const std::vector<pfm::MatchSet> match_sets = {match_a, match_b};
 
     const auto report = pfm::aggregateEvalReport(feature_sets, match_sets);
 
@@ -133,6 +153,13 @@ static void eval_pipeline_aggregates_known_metrics()
     PFM_REQUIRE_CLOSE(report.average_sparse_score, 0.5, 1.0e-6);
     PFM_REQUIRE_CLOSE(report.average_dense_confidence, 0.75, 1.0e-6);
     PFM_REQUIRE_CLOSE(report.semi_dense_coverage, 0.35, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.average_graph_executed_layers, 3.0, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.average_graph_input_keypoints_a, 15.0, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.average_graph_input_keypoints_b, 13.0, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.average_graph_kept_keypoints_a, 11.5, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.average_graph_kept_keypoints_b, 10.5, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.graph_pruned_keypoint_fraction, 12.0 / 56.0, 1.0e-6);
+    PFM_REQUIRE_CLOSE(report.graph_attention_work_fraction, 18.0 / 52.0, 1.0e-6);
 }
 
 static void eval_pipeline_aggregates_half_turn_metrics()
@@ -180,6 +207,13 @@ static void eval_pipeline_saves_report_archive_fields()
     report.semi_dense_coverage = 0.25;
     report.half_turn_consistency = 0.5;
     report.half_turn_mean_error = 12.0;
+    report.average_graph_executed_layers = 3.0;
+    report.average_graph_input_keypoints_a = 15.0;
+    report.average_graph_input_keypoints_b = 13.0;
+    report.average_graph_kept_keypoints_a = 11.5;
+    report.average_graph_kept_keypoints_b = 10.5;
+    report.graph_pruned_keypoint_fraction = 12.0 / 56.0;
+    report.graph_attention_work_fraction = 18.0 / 52.0;
 
     pfm::saveEvalReport(output.string(), report);
 
@@ -189,6 +223,15 @@ static void eval_pipeline_saves_report_archive_fields()
     PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "semi_dense_coverage"), 0.25F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "half_turn_consistency"), 0.5F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "half_turn_mean_error"), 12.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "average_graph_executed_layers"), 3.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "average_graph_input_keypoints_a"), 15.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "average_graph_input_keypoints_b"), 13.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "average_graph_kept_keypoints_a"), 11.5F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "average_graph_kept_keypoints_b"), 10.5F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "graph_pruned_keypoint_fraction"), 12.0F / 56.0F,
+                      1.0e-6F);
+    PFM_REQUIRE_CLOSE(readReportScalar(output.string(), "graph_attention_work_fraction"), 18.0F / 52.0F,
+                      1.0e-6F);
 }
 
 } // namespace

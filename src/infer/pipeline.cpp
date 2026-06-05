@@ -1254,7 +1254,13 @@ int run_eval_command(const CliOptions& options)
         const auto avg_pair_time = pairs.empty() ? 0.0 : elapsed / static_cast<double>(pairs.size());
         std::cout << "evaluation complete: report=" << options.output << " pairs=" << pairs.size()
                   << " half_turn_consistency=" << report.half_turn_consistency
-                  << " half_turn_mean_error=" << report.half_turn_mean_error << " elapsed=" << formatSeconds(elapsed)
+                  << " half_turn_mean_error=" << report.half_turn_mean_error
+                  << " graph_layers=" << report.average_graph_executed_layers
+                  << " graph_keypoints=" << report.average_graph_kept_keypoints_a << "/"
+                  << report.average_graph_input_keypoints_a << "," << report.average_graph_kept_keypoints_b << "/"
+                  << report.average_graph_input_keypoints_b
+                  << " graph_pruned=" << report.graph_pruned_keypoint_fraction
+                  << " graph_work=" << report.graph_attention_work_fraction << " elapsed=" << formatSeconds(elapsed)
                   << "s"
                   << " avg_pair_time=" << formatSeconds(avg_pair_time) << "s\n";
         return 0;

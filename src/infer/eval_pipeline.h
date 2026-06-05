@@ -24,6 +24,20 @@ struct EvalReport
     double half_turn_consistency = 0.0;
     /// 半周旋转后的平均几何误差。
     double half_turn_mean_error = 0.0;
+    /// 图匹配器平均实际执行层数。
+    double average_graph_executed_layers = 0.0;
+    /// 图匹配器平均输入 A 视图关键点数。
+    double average_graph_input_keypoints_a = 0.0;
+    /// 图匹配器平均输入 B 视图关键点数。
+    double average_graph_input_keypoints_b = 0.0;
+    /// 图匹配器平均保留 A 视图关键点数。
+    double average_graph_kept_keypoints_a = 0.0;
+    /// 图匹配器平均保留 B 视图关键点数。
+    double average_graph_kept_keypoints_b = 0.0;
+    /// 图匹配器自适应剪枝移除的关键点比例。
+    double graph_pruned_keypoint_fraction = 0.0;
+    /// 图匹配器实际注意力计算量占满计算量的比例。
+    double graph_attention_work_fraction = 0.0;
 };
 
 /// 从文本文件读取以空白字符分隔的影像对。
