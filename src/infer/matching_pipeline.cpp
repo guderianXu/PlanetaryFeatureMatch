@@ -95,6 +95,12 @@ enum class SparseGeometryFilter
 struct GraphInferenceTelemetry
 {
     int64_t executed_layers = 0;
+    int64_t input_keypoints_a = 0;
+    int64_t input_keypoints_b = 0;
+    int64_t kept_keypoints_a = 0;
+    int64_t kept_keypoints_b = 0;
+    int64_t pruned_keypoints_a = 0;
+    int64_t pruned_keypoints_b = 0;
     int64_t attention_work_units = 0;
     int64_t full_attention_work_units = 0;
     double attention_work_fraction = 0.0;
@@ -185,8 +191,16 @@ GraphInferenceTelemetry graphTelemetry(const PlanetaryGraphMatcherOutput&)
 
 GraphInferenceTelemetry graphTelemetry(const v21::PfmV21GraphMatcherOutput& output)
 {
-    return GraphInferenceTelemetry{output.executed_layers, output.attention_work_units,
-                                   output.full_attention_work_units, output.attention_work_fraction};
+    return GraphInferenceTelemetry{output.executed_layers,
+                                   output.input_keypoints_a,
+                                   output.input_keypoints_b,
+                                   output.kept_keypoints_a,
+                                   output.kept_keypoints_b,
+                                   output.pruned_keypoints_a,
+                                   output.pruned_keypoints_b,
+                                   output.attention_work_units,
+                                   output.full_attention_work_units,
+                                   output.attention_work_fraction};
 }
 
 SparseMatchOutput makeSparseMatchOutput(const std::pair<torch::Tensor, torch::Tensor>& sparse,
@@ -1860,6 +1874,12 @@ MatchSet matchFeatureSetsWithMatcher(const FeatureSet& features_a, const Feature
     {
         MatchSet result{sparse.matches, sparse.scores, points_a, points_b, confidence};
         result.graph_executed_layers = sparse.graph.executed_layers;
+        result.graph_input_keypoints_a = sparse.graph.input_keypoints_a;
+        result.graph_input_keypoints_b = sparse.graph.input_keypoints_b;
+        result.graph_kept_keypoints_a = sparse.graph.kept_keypoints_a;
+        result.graph_kept_keypoints_b = sparse.graph.kept_keypoints_b;
+        result.graph_pruned_keypoints_a = sparse.graph.pruned_keypoints_a;
+        result.graph_pruned_keypoints_b = sparse.graph.pruned_keypoints_b;
         result.graph_attention_work_units = sparse.graph.attention_work_units;
         result.graph_full_attention_work_units = sparse.graph.full_attention_work_units;
         result.graph_attention_work_fraction = sparse.graph.attention_work_fraction;

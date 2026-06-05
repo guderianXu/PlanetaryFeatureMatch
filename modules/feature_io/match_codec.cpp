@@ -90,6 +90,12 @@ void save_match_set(const MatchSet& match_set, const std::string& path)
     writeTensor(archive, match_set.points_b, "points_b");
     writeTensor(archive, match_set.confidence, "confidence");
     writeInt64(archive, match_set.graph_executed_layers, "graph_executed_layers");
+    writeInt64(archive, match_set.graph_input_keypoints_a, "graph_input_keypoints_a");
+    writeInt64(archive, match_set.graph_input_keypoints_b, "graph_input_keypoints_b");
+    writeInt64(archive, match_set.graph_kept_keypoints_a, "graph_kept_keypoints_a");
+    writeInt64(archive, match_set.graph_kept_keypoints_b, "graph_kept_keypoints_b");
+    writeInt64(archive, match_set.graph_pruned_keypoints_a, "graph_pruned_keypoints_a");
+    writeInt64(archive, match_set.graph_pruned_keypoints_b, "graph_pruned_keypoints_b");
     writeInt64(archive, match_set.graph_attention_work_units, "graph_attention_work_units");
     writeInt64(archive, match_set.graph_full_attention_work_units, "graph_full_attention_work_units");
     writeDouble(archive, match_set.graph_attention_work_fraction, "graph_attention_work_fraction");
@@ -113,6 +119,12 @@ MatchSet load_match_set(const std::string& path)
                                   readTensor(archive, "points_a"), readTensor(archive, "points_b"),
                                   readTensor(archive, "confidence")};
         match_set.graph_executed_layers = readOptionalInt64(archive, "graph_executed_layers", 0);
+        match_set.graph_input_keypoints_a = readOptionalInt64(archive, "graph_input_keypoints_a", 0);
+        match_set.graph_input_keypoints_b = readOptionalInt64(archive, "graph_input_keypoints_b", 0);
+        match_set.graph_kept_keypoints_a = readOptionalInt64(archive, "graph_kept_keypoints_a", 0);
+        match_set.graph_kept_keypoints_b = readOptionalInt64(archive, "graph_kept_keypoints_b", 0);
+        match_set.graph_pruned_keypoints_a = readOptionalInt64(archive, "graph_pruned_keypoints_a", 0);
+        match_set.graph_pruned_keypoints_b = readOptionalInt64(archive, "graph_pruned_keypoints_b", 0);
         match_set.graph_attention_work_units = readOptionalInt64(archive, "graph_attention_work_units", 0);
         match_set.graph_full_attention_work_units = readOptionalInt64(archive, "graph_full_attention_work_units", 0);
         match_set.graph_attention_work_fraction = readOptionalDouble(archive, "graph_attention_work_fraction", 0.0);

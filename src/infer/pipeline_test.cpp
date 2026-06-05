@@ -1092,6 +1092,8 @@ static void pipeline_match_eval_and_export_print_timing()
     PFM_REQUIRE(match_output.find("sparse_matches=") != std::string::npos);
     PFM_REQUIRE(match_output.find("dense_matches=") != std::string::npos);
     PFM_REQUIRE(match_output.find("graph_layers=") != std::string::npos);
+    PFM_REQUIRE(match_output.find("graph_keypoints=") != std::string::npos);
+    PFM_REQUIRE(match_output.find("graph_pruned=") != std::string::npos);
     PFM_REQUIRE(match_output.find("graph_work=") != std::string::npos);
 
     const auto pairs_path = temp_dir.file("pairs.txt");

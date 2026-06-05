@@ -21,6 +21,18 @@ struct MatchSet
     torch::Tensor confidence;
     /// v2.1 图匹配器实际执行的图注意力层数；非图匹配路径为 0。
     int64_t graph_executed_layers = 0;
+    /// v2.1 图匹配器输入 A 视图关键点数。
+    int64_t graph_input_keypoints_a = 0;
+    /// v2.1 图匹配器输入 B 视图关键点数。
+    int64_t graph_input_keypoints_b = 0;
+    /// v2.1 图匹配器自适应剪枝后保留的 A 视图关键点数。
+    int64_t graph_kept_keypoints_a = 0;
+    /// v2.1 图匹配器自适应剪枝后保留的 B 视图关键点数。
+    int64_t graph_kept_keypoints_b = 0;
+    /// v2.1 图匹配器自适应剪枝移除的 A 视图关键点数。
+    int64_t graph_pruned_keypoints_a = 0;
+    /// v2.1 图匹配器自适应剪枝移除的 B 视图关键点数。
+    int64_t graph_pruned_keypoints_b = 0;
     /// v2.1 图匹配器实际执行的注意力点对计算量代理。
     int64_t graph_attention_work_units = 0;
     /// v2.1 图匹配器满层注意力点对计算量代理。

@@ -127,6 +127,12 @@ static void matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher()
     PFM_REQUIRE(matches.sparse_matches.dim() == 2);
     PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
     PFM_REQUIRE(matches.graph_executed_layers == 1);
+    PFM_REQUIRE(matches.graph_input_keypoints_a == 2);
+    PFM_REQUIRE(matches.graph_input_keypoints_b == 2);
+    PFM_REQUIRE(matches.graph_kept_keypoints_a == 2);
+    PFM_REQUIRE(matches.graph_kept_keypoints_b == 2);
+    PFM_REQUIRE(matches.graph_pruned_keypoints_a == 0);
+    PFM_REQUIRE(matches.graph_pruned_keypoints_b == 0);
     PFM_REQUIRE(matches.graph_attention_work_units == 4);
     PFM_REQUIRE(matches.graph_full_attention_work_units == 12);
     PFM_REQUIRE_CLOSE(matches.graph_attention_work_fraction, 1.0 / 3.0, 1.0e-6);

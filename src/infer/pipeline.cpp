@@ -1177,6 +1177,10 @@ int run_match_command(const CliOptions& options)
                   << " sparse_matches=" << match_set.sparse_matches.size(0)
                   << " dense_matches=" << match_set.points_a.size(0)
                   << " graph_layers=" << match_set.graph_executed_layers
+                  << " graph_keypoints=" << match_set.graph_kept_keypoints_a << "/" << match_set.graph_input_keypoints_a
+                  << "," << match_set.graph_kept_keypoints_b << "/" << match_set.graph_input_keypoints_b
+                  << " graph_pruned=" << match_set.graph_pruned_keypoints_a << "/"
+                  << match_set.graph_pruned_keypoints_b
                   << " graph_work=" << match_set.graph_attention_work_fraction
                   << " graph_work_units=" << match_set.graph_attention_work_units << "/"
                   << match_set.graph_full_attention_work_units
