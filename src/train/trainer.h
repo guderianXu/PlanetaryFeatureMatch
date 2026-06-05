@@ -50,6 +50,8 @@ struct TrainConfig
     double graph_matcher_no_match_min_distance = 4.0;
     /// Python 对齐训练中 GraphMatcher 最多执行的注意力层数；0 表示满层训练。
     int graph_matcher_train_max_attention_layers = 0;
+    /// Python 对齐训练中是否随机采样 GraphMatcher 注意力层数，增强中间层监督。
+    bool graph_matcher_train_random_attention_layers = false;
     /// Python 对齐训练中 LightGlue 式剪枝排序 loss 权重。
     double graph_matcher_prune_ranking_weight = 0.1;
     /// Python 对齐训练中剪枝排序 loss 的 logit 间隔。

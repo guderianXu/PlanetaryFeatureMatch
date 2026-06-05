@@ -41,6 +41,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_stop_confidence_loss",
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
+    "graph_matcher_executed_attention_layers",
 )
 
 
@@ -1385,6 +1386,7 @@ def graph_matcher_correspondence_loss(
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
     max_attention_layers: int = 0,
+    random_attention_layers: bool = False,
     generator: torch.Generator | None = None,
     return_components: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1397,6 +1399,7 @@ def graph_matcher_correspondence_loss(
         stop_confidence_loss: torch.Tensor,
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
+        executed_attention_layers: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {
             "graph_matcher_total_loss": total_loss,
@@ -1407,12 +1410,13 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_stop_confidence_loss": stop_confidence_loss,
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
+            "graph_matcher_executed_attention_layers": executed_attention_layers,
         }
 
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1488,13 +1492,26 @@ def graph_matcher_correspondence_loss(
     ).to(desc_b.device)
     meta_a = apply_graph_metadata_mode(meta_a, metadata_mode)
     meta_b = apply_graph_metadata_mode(meta_b, metadata_mode)
+    attention_layer_budget = int(max_attention_layers)
+    if random_attention_layers:
+        layer_limit = attention_layer_budget if attention_layer_budget > 0 else len(model.graph_matcher.attention_layers)
+        layer_limit = max(1, int(layer_limit))
+        attention_layer_budget = int(
+            torch.randint(
+                1,
+                layer_limit + 1,
+                (1,),
+                device=desc_a.device,
+                generator=generator,
+            ).item()
+        )
     output = model.graph_matcher(
         desc_a,
         meta_a,
         desc_b,
         meta_b,
         apply_candidate_mask=False,
-        max_attention_layers=max_attention_layers,
+        max_attention_layers=attention_layer_budget,
     )
     targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
@@ -1565,6 +1582,7 @@ def graph_matcher_correspondence_loss(
         )
         loss = loss + float(hard_negative_dustbin_weight) * hard_negative_dustbin_loss
     if return_components:
+        executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
         return loss, components(
             loss,
             match_ce_loss,
@@ -1574,6 +1592,7 @@ def graph_matcher_correspondence_loss(
             stop_confidence_loss,
             raw_preservation_loss,
             hard_negative_dustbin_loss,
+            executed_attention_layers,
         )
     return loss
 
@@ -2154,6 +2173,7 @@ def train_step(
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
     graph_matcher_train_max_attention_layers: int = 0,
+    graph_matcher_train_random_attention_layers: bool = False,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
@@ -2303,6 +2323,7 @@ def train_step(
                             semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
                             max_attention_layers=graph_matcher_train_max_attention_layers,
+                            random_attention_layers=graph_matcher_train_random_attention_layers,
                             generator=generator,
                             return_components=True,
                         )
@@ -3200,6 +3221,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
     parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
+    parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
@@ -3831,6 +3853,7 @@ def main() -> int:
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
                 graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
+                graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
@@ -3863,6 +3886,9 @@ def main() -> int:
                     "graph_matcher_train_max_attention_layers": args.graph_matcher_train_max_attention_layers
                     if args.train_graph_matcher
                     else 0,
+                    "graph_matcher_train_random_attention_layers": int(
+                        bool(args.graph_matcher_train_random_attention_layers and args.train_graph_matcher)
+                    ),
                     **metrics,
                 }
             )

@@ -733,6 +733,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>不可匹配权重 <input type="number" name="graph_matcher_no_match_weight" value="0" min="0" step="0.01"></label>
       <label>不可匹配最小距离 <input type="number" name="graph_matcher_no_match_min_distance" value="4" min="0" step="0.5"></label>
       <label>训练注意力层上限 <input type="number" name="graph_matcher_train_max_attention_layers" value="0" min="0"></label>
+      <label><input type="checkbox" name="graph_matcher_train_random_attention_layers"> 随机训练注意力层</label>
       <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
       <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
     </div>
@@ -927,6 +928,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         fields = parse_qs(self.rfile.read(length).decode("utf-8"))
         value = lambda name, default="": fields.get(name, [default])[0]
         lines = lambda name: [line.strip() for line in value(name).splitlines() if line.strip()]
+        random_attention_layers = value("graph_matcher_train_random_attention_layers", "") in {"on", "1", "true", "True"}
         request = TrainingRequest(
             experiment_name=value("experiment_name", "dashboard_run"),
             backend=value("backend", "cpp"),
@@ -955,6 +957,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_matcher_no_match_weight=float(value("graph_matcher_no_match_weight", "0")),
             graph_matcher_no_match_min_distance=float(value("graph_matcher_no_match_min_distance", "4")),
             graph_matcher_train_max_attention_layers=int(value("graph_matcher_train_max_attention_layers", "0")),
+            graph_matcher_train_random_attention_layers=random_attention_layers,
             graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
             graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
         )

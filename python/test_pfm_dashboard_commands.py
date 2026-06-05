@@ -23,6 +23,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_no_match_weight=0.1,
                 graph_matcher_no_match_min_distance=5.0,
                 graph_matcher_train_max_attention_layers=2,
+                graph_matcher_train_random_attention_layers=True,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
                 graph_min_accept_probability=0.7,
@@ -45,6 +46,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-no-match-weight 0.1", script)
         self.assertIn("--graph-matcher-no-match-min-distance 5.0", script)
         self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
+        self.assertIn("--graph-matcher-train-random-attention-layers", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--generate-training-report", script)
@@ -60,6 +62,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("graph_matcher_no_match_points=32", run_html)
         self.assertIn("graph_matcher_no_match_weight=0.1", run_html)
         self.assertIn("graph_matcher_train_max_attention_layers=2", run_html)
+        self.assertIn("graph_matcher_train_random_attention_layers=True", run_html)
         self.assertIn("graph_matcher_stop_confidence_weight=0.07", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
@@ -93,6 +96,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_no_match_points=24,
                 graph_matcher_no_match_min_distance=6.0,
                 graph_matcher_train_max_attention_layers=2,
+                graph_matcher_train_random_attention_layers=True,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
             )
@@ -111,6 +115,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-no-match-points 24", script)
         self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
         self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
+        self.assertIn("--graph-matcher-train-random-attention-layers", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--train-backbone", script)

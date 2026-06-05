@@ -4648,6 +4648,21 @@ torch::Tensor make_python_compare_graph_stop_confidence_loss(const v21::PfmV21Gr
     return binary_cross_entropy_probability_mean(confidence, target);
 }
 
+int64_t resolve_python_compare_graph_attention_budget(int64_t max_attention_layers, bool random_attention_layers,
+                                                      const torch::Device& device,
+                                                      std::optional<at::Generator>* generator)
+{
+    if (!random_attention_layers)
+    {
+        return max_attention_layers;
+    }
+    const auto layer_limit = std::max<int64_t>(1, max_attention_layers);
+    auto options = torch::TensorOptions().dtype(torch::kLong).device(device);
+    std::optional<at::Generator> fallback_generator;
+    auto& active_generator = generator == nullptr ? fallback_generator : *generator;
+    return randint_with_training_generator(layer_limit, {1}, options, active_generator).item<int64_t>() + 1;
+}
+
 template <typename GraphMatcherT>
 torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const torch::Tensor& desc_a,
                                              const torch::Tensor& desc_b, const torch::Tensor& points_a,
@@ -4656,7 +4671,9 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
                                              double prune_ranking_weight = 0.0, double prune_ranking_margin = 0.25,
                                              double stop_confidence_weight = 0.0,
                                              double stop_confidence_margin = 0.5,
-                                             int64_t max_attention_layers = 0)
+                                             int64_t max_attention_layers = 0,
+                                             bool random_attention_layers = false,
+                                             std::optional<at::Generator>* generator = nullptr)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4671,7 +4688,9 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
         make_python_compare_graph_metadata(points_a.narrow(0, 0, desc_a.size(0)), meta_dim).to(desc_a.device());
     auto meta_b =
         make_python_compare_graph_metadata(points_b.narrow(0, 0, desc_b.size(0)), meta_dim).to(desc_b.device());
-    auto output = graph_matcher.forward(desc_a, meta_a, desc_b, meta_b, false, -1.0, -1.0, max_attention_layers);
+    const auto attention_budget = resolve_python_compare_graph_attention_budget(
+        max_attention_layers, random_attention_layers, desc_a.device(), generator);
+    auto output = graph_matcher.forward(desc_a, meta_a, desc_b, meta_b, false, -1.0, -1.0, attention_budget);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -4766,12 +4785,17 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                     graph_points_b = torch::cat({graph_points_b, no_match_b.to(sample.points_b.device())}, 0);
                 }
             }
+            const auto train_max_attention_layers =
+                config.graph_matcher_train_random_attention_layers && config.graph_matcher_train_max_attention_layers <= 0
+                    ? config.graph_attention_layers
+                    : config.graph_matcher_train_max_attention_layers;
             graph_losses.push_back(make_python_compare_graph_loss(
                 *modules.graph_matcher, graph_desc_a, graph_desc_b, graph_points_a, graph_points_b,
                 config.graph_keypoint_meta_dim, config.graph_matcher_accept_weight,
                 config.graph_matcher_accept_negative_topk, config.graph_matcher_prune_ranking_weight,
                 config.graph_matcher_prune_ranking_margin, config.graph_matcher_stop_confidence_weight,
-                config.graph_matcher_stop_confidence_margin, config.graph_matcher_train_max_attention_layers));
+                config.graph_matcher_stop_confidence_margin, train_max_attention_layers,
+                config.graph_matcher_train_random_attention_layers, &generator));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6762,6 +6786,16 @@ torch::Tensor make_python_compare_graph_loss_with_attention_budget_for_test(
 {
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
                                           0.25, 0.0, 0.5, max_attention_layers);
+}
+
+torch::Tensor make_python_compare_graph_loss_with_random_attention_budget_for_test(
+    v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, int64_t max_attention_layers,
+    uint64_t seed)
+{
+    auto generator = make_training_random_generator(desc_a.device(), seed);
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
+                                          0.25, 0.0, 0.5, max_attention_layers, true, &generator);
 }
 
 } // namespace testing

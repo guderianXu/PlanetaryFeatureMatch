@@ -46,6 +46,7 @@ class TrainingRequest:
     graph_matcher_no_match_weight: float = 0.0
     graph_matcher_no_match_min_distance: float = 4.0
     graph_matcher_train_max_attention_layers: int = 0
+    graph_matcher_train_random_attention_layers: bool = False
     graph_matcher_stop_confidence_weight: float = 0.05
     graph_matcher_stop_confidence_margin: float = 0.5
     temperature: float = 0.07
@@ -107,6 +108,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_matcher_no_match_weight={request.graph_matcher_no_match_weight}</li>
 <li>graph_matcher_no_match_min_distance={request.graph_matcher_no_match_min_distance}</li>
 <li>graph_matcher_train_max_attention_layers={request.graph_matcher_train_max_attention_layers}</li>
+<li>graph_matcher_train_random_attention_layers={request.graph_matcher_train_random_attention_layers}</li>
 <li>graph_matcher_stop_confidence_weight={request.graph_matcher_stop_confidence_weight}</li>
 <li>graph_matcher_stop_confidence_margin={request.graph_matcher_stop_confidence_margin}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
@@ -196,6 +198,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         parts.extend(["--init-pytorch-state", _quote(request.init_checkpoint)])
     else:
         parts.append("--init-random")
+    if request.graph_matcher_train_random_attention_layers:
+        parts.append("--graph-matcher-train-random-attention-layers")
     for cache_dir in request.cache_dirs:
         parts.extend(["--cache-dir", _quote(cache_dir)])
     for cache_dir in request.validation_cache_dirs:
@@ -300,6 +304,8 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
     ]
     if request.profile == "python-compare":
         parts.extend(["--min-learning-rate-ratio", "1.0"])
+    if request.graph_matcher_train_random_attention_layers:
+        parts.append("--graph-matcher-train-random-attention-layers")
     if request.full_v21:
         parts.append("--full-v21")
     if request.init_checkpoint:
