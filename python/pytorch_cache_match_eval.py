@@ -528,6 +528,7 @@ def graph_matcher_matches(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
     scores_a: torch.Tensor | None = None,
@@ -541,6 +542,8 @@ def graph_matcher_matches(
         raise ValueError("graph_acceptance_margin must be non-negative")
     if graph_min_raw_margin < 0.0:
         raise ValueError("graph_min_raw_margin must be non-negative")
+    if graph_min_accept_probability < -1.0 or graph_min_accept_probability > 1.0:
+        raise ValueError("graph_min_accept_probability must be in [-1, 1]")
     if graph_width_prune_min_score < -1.0:
         raise ValueError("graph_width_prune_min_score must be at least -1.0; -1 disables pruning")
     if graph_early_stop_min_confidence < -1.0:
@@ -623,6 +626,12 @@ def graph_matcher_matches(
             keep = keep & raw_margins.index_select(0, matches[:, 0].to(raw_similarity.device)).to(keep.device).ge(
                 float(graph_min_raw_margin)
             )
+    if graph_min_accept_probability > -1.0:
+        if output.accept_logits is None:
+            raise ValueError("graph_min_accept_probability requires graph matcher accept_logits")
+        accept_logits = output.accept_logits.to(device=matches.device, dtype=torch.float32)
+        accept_prob = torch.sigmoid(accept_logits[matches[:, 0], matches[:, 1]])
+        keep = keep & accept_prob.ge(float(graph_min_accept_probability))
     matches = matches[keep]
     scores = scores[keep]
     limit = scores.numel() if max_matches == 0 else max_matches
@@ -875,6 +884,7 @@ def match_pair_descriptor_maps(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
     mutual: bool = False,
@@ -969,6 +979,7 @@ def match_pair_descriptor_maps(
             graph_acceptance_margin=graph_acceptance_margin,
             graph_min_raw_score=graph_min_raw_score,
             graph_min_raw_margin=graph_min_raw_margin,
+            graph_min_accept_probability=graph_min_accept_probability,
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
             scores_a=row_scores_a,
@@ -1214,6 +1225,7 @@ def evaluate_pair_path(
     graph_acceptance_margin: float = 0.0,
     graph_min_raw_score: float = -1.0,
     graph_min_raw_margin: float = 0.0,
+    graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
 ) -> MatchEvalResult:
@@ -1260,6 +1272,7 @@ def evaluate_pair_path(
             graph_acceptance_margin=graph_acceptance_margin,
             graph_min_raw_score=graph_min_raw_score,
             graph_min_raw_margin=graph_min_raw_margin,
+            graph_min_accept_probability=graph_min_accept_probability,
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
             mutual=mutual,
@@ -1320,6 +1333,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-min-accept-probability", type=float, default=-1.0)
     parser.add_argument("--graph-inference-preset", choices=sorted(GRAPH_INFERENCE_PRESETS), default="off")
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
@@ -1332,7 +1346,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-limit", type=int, default=64)
     parser.add_argument("--hard-min-matches", type=int, default=4)
     parser.add_argument("--hard-max-precision", type=float, default=0.9)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.graph_min_accept_probability < -1.0 or args.graph_min_accept_probability > 1.0:
+        parser.error("--graph-min-accept-probability must be in [-1, 1]")
+    return args
 
 
 def load_model(args: argparse.Namespace) -> pfm_model.PlanetaryFeatureMatcher:
@@ -1413,6 +1430,7 @@ def main() -> int:
                 graph_acceptance_margin=args.graph_acceptance_margin,
                 graph_min_raw_score=args.graph_min_raw_score,
                 graph_min_raw_margin=args.graph_min_raw_margin,
+                graph_min_accept_probability=args.graph_min_accept_probability,
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
                 graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
             )

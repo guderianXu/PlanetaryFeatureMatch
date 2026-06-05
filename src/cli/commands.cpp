@@ -349,6 +349,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Graph matcher early-stop confidence threshold; -1 disables LightGlue-style early stopping")
         ->check(CLI::Range(-1.0, 1.0));
     match
+        ->add_option("--graph-min-accept-probability", options.graph_min_accept_probability,
+                     "Graph matcher accept probability threshold; -1 disables matchability gating")
+        ->check(CLI::Range(-1.0, 1.0));
+    match
         ->add_option("--sparse-geometry-filter", options.sparse_geometry_filter,
                      "Sparse geometric post-filter: adaptive, projective, local, or rotation-only")
         ->check(CLI::IsMember({"adaptive", "projective", "local", "rotation-only"}));
@@ -414,6 +418,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     eval
         ->add_option("--graph-early-stop-min-confidence", options.graph_early_stop_min_confidence,
                      "Graph matcher early-stop confidence threshold; -1 disables LightGlue-style early stopping")
+        ->check(CLI::Range(-1.0, 1.0));
+    eval
+        ->add_option("--graph-min-accept-probability", options.graph_min_accept_probability,
+                     "Graph matcher accept probability threshold; -1 disables matchability gating")
         ->check(CLI::Range(-1.0, 1.0));
     eval->add_option("--max-keypoints", options.max_keypoints, "Maximum sparse keypoints");
     eval->add_option("--min-keypoints", options.min_keypoints, "Soft minimum sparse keypoints")

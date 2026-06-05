@@ -3043,6 +3043,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-graph-inference-preset", choices=GRAPH_INFERENCE_PRESET_CHOICES, default="off")
     parser.add_argument("--report-graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--report-graph-early-stop-min-confidence", type=float, default=-1.0)
+    parser.add_argument("--report-graph-min-accept-probability", type=float, default=-1.0)
     parser.add_argument("--report-texture-keypoint-fraction", type=float, default=1.0)
     parser.add_argument("--report-weak-texture-keypoint-fraction", type=float, default=0.0)
     parser.add_argument("--report-keypoint-spatial-bins", type=int, default=8)
@@ -3159,6 +3160,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--report-graph-width-prune-min-score must be in [-1, 1]")
     if args.report_graph_early_stop_min_confidence < -1.0 or args.report_graph_early_stop_min_confidence > 1.0:
         parser.error("--report-graph-early-stop-min-confidence must be in [-1, 1]")
+    if args.report_graph_min_accept_probability < -1.0 or args.report_graph_min_accept_probability > 1.0:
+        parser.error("--report-graph-min-accept-probability must be in [-1, 1]")
     if args.report_texture_keypoint_fraction < 0.0 or args.report_texture_keypoint_fraction > 1.0:
         parser.error("--report-texture-keypoint-fraction must be in [0, 1]")
     if args.report_weak_texture_keypoint_fraction < 0.0 or args.report_weak_texture_keypoint_fraction > 1.0:
@@ -3241,6 +3244,8 @@ def run_training_report(args: argparse.Namespace, *, pytorch_state: Path) -> Non
             str(args.report_graph_width_prune_min_score),
             "--graph-early-stop-min-confidence",
             str(args.report_graph_early_stop_min_confidence),
+            "--graph-min-accept-probability",
+            str(args.report_graph_min_accept_probability),
         ]
         for pattern in args.report_required_sample_glob:
             command.extend(["--required-sample-glob", pattern])

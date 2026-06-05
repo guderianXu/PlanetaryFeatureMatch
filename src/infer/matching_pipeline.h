@@ -14,6 +14,8 @@ struct GraphMatcherInferenceOptions
     double width_prune_min_score = -1.0;
     /// LightGlue 风格深度提前停止阈值；-1 表示关闭，0..1 表示达到 assignment 置信度后提前结束。
     double early_stop_min_confidence = -1.0;
+    /// LightGlue 风格 matchability/accept 概率阈值；-1 表示关闭，0..1 表示低于阈值的匹配被丢弃。
+    double min_accept_probability = -1.0;
 };
 
 /// 使用已学习的行星图匹配器匹配两组已解码特征。

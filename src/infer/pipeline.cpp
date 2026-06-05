@@ -679,6 +679,10 @@ GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& 
     {
         graph_options.early_stop_min_confidence = options.graph_early_stop_min_confidence;
     }
+    if (options.graph_min_accept_probability > -1.0)
+    {
+        graph_options.min_accept_probability = options.graph_min_accept_probability;
+    }
     return graph_options;
 }
 

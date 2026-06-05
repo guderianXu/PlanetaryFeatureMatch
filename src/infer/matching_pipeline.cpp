@@ -129,11 +129,17 @@ void validateGraphMatcherInferenceOptions(const GraphMatcherInferenceOptions& gr
     {
         throw std::invalid_argument("graph early stop min confidence must be in [-1, 1]");
     }
+    if (!std::isfinite(graph_options.min_accept_probability) || graph_options.min_accept_probability < -1.0 ||
+        graph_options.min_accept_probability > 1.0)
+    {
+        throw std::invalid_argument("graph min accept probability must be in [-1, 1]");
+    }
 }
 
 bool hasLightGlueGraphOptions(const GraphMatcherInferenceOptions& graph_options)
 {
-    return graph_options.width_prune_min_score > -1.0 || graph_options.early_stop_min_confidence > -1.0;
+    return graph_options.width_prune_min_score > -1.0 || graph_options.early_stop_min_confidence > -1.0 ||
+           graph_options.min_accept_probability > -1.0;
 }
 
 PlanetaryGraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
@@ -1401,6 +1407,66 @@ std::pair<torch::Tensor, torch::Tensor> relaxedGraphLogitMatches(const torch::Te
         torch::from_blob(scores.data(), {static_cast<int64_t>(scores.size())}, float_options).clone().contiguous()};
 }
 
+std::pair<torch::Tensor, torch::Tensor>
+filterGraphMatchesByAcceptProbability(const std::pair<torch::Tensor, torch::Tensor>& matches,
+                                      const torch::Tensor& accept_logits, double min_accept_probability)
+{
+    const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+    const auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    if (min_accept_probability <= -1.0 || !accept_logits.defined() || matches.first.size(0) == 0)
+    {
+        return matches;
+    }
+    if (accept_logits.dim() != 2)
+    {
+        throw std::invalid_argument("graph accept logits must be 2D");
+    }
+
+    const auto cpu_matches = matches.first.to(torch::kCPU, torch::kInt64).contiguous();
+    const auto cpu_scores = matches.second.to(torch::kCPU, torch::kFloat32).contiguous();
+    const auto source_indices = cpu_matches.index({torch::indexing::Slice(), 0});
+    const auto target_indices = cpu_matches.index({torch::indexing::Slice(), 1});
+    if (source_indices.max().item<int64_t>() >= accept_logits.size(0) ||
+        target_indices.max().item<int64_t>() >= accept_logits.size(1))
+    {
+        throw std::invalid_argument("graph accept logits shape is smaller than selected matches");
+    }
+
+    const auto graph_device = accept_logits.device();
+    const auto source_on_graph = source_indices.to(graph_device, torch::kInt64);
+    const auto target_on_graph = target_indices.to(graph_device, torch::kInt64);
+    const auto accept_prob =
+        torch::sigmoid(accept_logits.to(torch::kFloat32).index({source_on_graph, target_on_graph}));
+    const auto keep_mask = accept_prob.ge(min_accept_probability)
+                               .to(torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU))
+                               .contiguous();
+    const auto keep_indices = torch::nonzero(keep_mask).reshape({-1}).to(torch::kCPU, torch::kInt64).contiguous();
+    if (keep_indices.size(0) == 0)
+    {
+        return {torch::empty({0, 2}, long_options), torch::empty({0}, float_options)};
+    }
+    return {cpu_matches.index_select(0, keep_indices).contiguous(),
+            cpu_scores.index_select(0, keep_indices).contiguous()};
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+applyGraphAcceptProbability(const std::pair<torch::Tensor, torch::Tensor>& matches,
+                            const PlanetaryGraphMatcherOutput& output,
+                            const GraphMatcherInferenceOptions& graph_options)
+{
+    (void)output;
+    (void)graph_options;
+    return matches;
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+applyGraphAcceptProbability(const std::pair<torch::Tensor, torch::Tensor>& matches,
+                            const v21::PfmV21GraphMatcherOutput& output,
+                            const GraphMatcherInferenceOptions& graph_options)
+{
+    return filterGraphMatchesByAcceptProbability(matches, output.accept_logits, graph_options.min_accept_probability);
+}
+
 template <typename GraphMatcherT>
 std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& features_a, const FeatureSet& features_b,
                                                             GraphMatcherT& matcher,
@@ -1449,15 +1515,18 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                                             features_b.keypoints.to(matcher_device, torch::kFloat32), matcher,
                                             graph_options);
         greedy = mutualGraphLogitMatches(output.logits, features_a.descriptors.size(0), features_b.descriptors.size(0));
+        greedy = applyGraphAcceptProbability(greedy, output, graph_options);
         if (greedy.first.size(0) < GEOMETRIC_CONSISTENCY_MIN_MATCHES)
         {
             greedy =
                 greedyGraphLogitMatches(output.logits, features_a.descriptors.size(0), features_b.descriptors.size(0));
+            greedy = applyGraphAcceptProbability(greedy, output, graph_options);
         }
         if (greedy.first.size(0) < GEOMETRIC_CONSISTENCY_MIN_MATCHES)
         {
             greedy =
                 relaxedGraphLogitMatches(output.logits, features_a.descriptors.size(0), features_b.descriptors.size(0));
+            greedy = applyGraphAcceptProbability(greedy, output, graph_options);
         }
     }
     else if (debug)

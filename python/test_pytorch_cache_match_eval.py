@@ -224,6 +224,8 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "0.8",
             "--graph-inference-preset",
             "high_precision",
+            "--graph-min-accept-probability",
+            "0.75",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -237,6 +239,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(args.graph_width_prune_min_score, 0.35)
         self.assertEqual(args.graph_early_stop_min_confidence, 0.8)
         self.assertEqual(args.graph_inference_preset, "high_precision")
+        self.assertEqual(args.graph_min_accept_probability, 0.75)
 
     def test_graph_inference_thresholds_resolve_lightglue_presets(self):
         self.assertEqual(eval_py.graph_inference_thresholds("off", -1.0, -1.0), (-1.0, -1.0))
@@ -561,6 +564,37 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(model.width_prune_min_score, 0.25)
         self.assertEqual(model.early_stop_min_confidence, 0.75)
         self.assertEqual(matches.tolist(), [[0, 0], [1, 1]])
+
+    def test_graph_matcher_matches_filters_low_accept_probability(self):
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=torch.empty(3, 3),
+                    matches=torch.tensor([[0, 0], [1, 1]], dtype=torch.long),
+                    scores=torch.tensor([0.9, 0.8], dtype=torch.float32),
+                    accept_logits=torch.tensor([[4.0, -4.0], [-4.0, 0.0]], dtype=torch.float32),
+                )
+
+        matches, scores = eval_py.graph_matcher_matches(
+            DummyModel(),
+            desc_a,
+            keypoints,
+            desc_b,
+            keypoints,
+            max_matches=8,
+            graph_min_accept_probability=0.75,
+        )
+
+        self.assertEqual(matches.tolist(), [[0, 0]])
+        self.assertTrue(torch.allclose(scores.cpu(), torch.tensor([0.9], dtype=torch.float32), atol=1.0e-6))
 
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])

@@ -46,6 +46,7 @@ class TrainingRequest:
     min_intensity: float = 0.01
     seed: int = 20260603
     graph_inference_preset: str = "fast"
+    graph_min_accept_probability: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>samples_per_pair={request.samples_per_pair}</li>
 <li>learning_rate={request.learning_rate}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
+<li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
 </ul>
 </body>
 </html>
@@ -182,6 +184,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
                 str(width_prune_min_score),
                 "--report-graph-early-stop-min-confidence",
                 str(early_stop_min_confidence),
+                "--report-graph-min-accept-probability",
+                str(request.graph_min_accept_probability),
             ]
         )
     if request.max_train_batches > 0:
@@ -290,6 +294,8 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
     if not request.cache_dirs:
         raise ValueError("at least one cache dir is required")
     _graph_inference_thresholds(request.graph_inference_preset)
+    if request.graph_min_accept_probability < -1.0 or request.graph_min_accept_probability > 1.0:
+        raise ValueError("graph_min_accept_probability must be in [-1, 1]")
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

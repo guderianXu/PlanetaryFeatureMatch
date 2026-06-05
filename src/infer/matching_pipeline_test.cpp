@@ -128,6 +128,26 @@ static void matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher()
     PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
 }
 
+static void matching_pipeline_filters_graph_matches_by_accept_probability()
+{
+    const auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
+    const auto descriptors = torch::tensor({{1.0F, 0.0F}, {0.0F, 1.0F}}, torch::kFloat32);
+    const auto features_a =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    const auto features_b =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    pfm::v21::PfmV21GraphMatcher matcher(2, 8, 1, 2);
+    pfm::GraphMatcherInferenceOptions graph_options;
+    graph_options.min_accept_probability = 1.0;
+
+    setenv("PFM_MATCH_DEBUG_RETURN_GRAPH", "1", 1);
+    const auto matches = pfm::matchFeatureSets(features_a, features_b, *matcher, graph_options);
+    unsetenv("PFM_MATCH_DEBUG_RETURN_GRAPH");
+
+    PFM_REQUIRE(matches.sparse_matches.size(0) == 0);
+    PFM_REQUIRE(matches.sparse_scores.size(0) == 0);
+}
+
 static void matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores()
 {
     const auto features_a = makeFeatureSet(torch::zeros({2, 3}, torch::kFloat32), torch::empty({0, 2}, torch::kFloat32),
@@ -1063,6 +1083,8 @@ void register_matching_pipeline_tests()
                   matchingPipelineUsesPlanetaryGraphMatcherOutput);
     register_test("matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher",
                   matching_pipeline_forwards_lightglue_options_to_v21_graph_matcher);
+    register_test("matching_pipeline_filters_graph_matches_by_accept_probability",
+                  matching_pipeline_filters_graph_matches_by_accept_probability);
     register_test("matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores",
                   matching_pipeline_handles_zero_sparse_descriptors_without_nan_scores);
     register_test("matching_pipeline_handles_empty_sparse_descriptors",

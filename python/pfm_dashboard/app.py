@@ -582,6 +582,7 @@ def render_train(project_root: Path, message: str = "") -> str:
           <option value="off">关闭自适应剪枝</option>
         </select>
       </label>
+      <label>匹配接受概率 <input type="number" name="graph_min_accept_probability" value="-1" min="-1" max="1" step="0.01"></label>
     </div>
     <div class="quick-presets">
       <button type="button" data-preset="smoke">冒烟测试</button>
@@ -795,6 +796,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             dataloader_workers=int(value("dataloader_workers", "2")),
             max_train_batches=int(value("max_train_batches", "0")),
             graph_inference_preset=value("graph_inference_preset", "fast"),
+            graph_min_accept_probability=float(value("graph_min_accept_probability", "-1")),
         )
         try:
             generated = create_training_runs(request)
