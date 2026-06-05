@@ -1,9 +1,8 @@
 #include "checkpoint_gate/checkpoint_gate.h"
 
+#include <regex>
 #include <sstream>
 #include <stdexcept>
-
-#include <regex>
 
 namespace pfm
 {
@@ -38,13 +37,25 @@ double parseDoubleField(const std::string& text, const char* name)
     return std::stod(match[1].str());
 }
 
+double parseOptionalDoubleField(const std::string& text, const char* name, double fallback)
+{
+    const std::regex pattern(std::string(name) + "=([-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)");
+    std::smatch match;
+    if (!std::regex_search(text, match, pattern))
+    {
+        return fallback;
+    }
+    return std::stod(match[1].str());
+}
+
 } // namespace
 
 CheckpointGateMetrics parse_checkpoint_gate_metrics(const std::string& match_output)
 {
     return CheckpointGateMetrics{parseIntField(match_output, "correct_matches"),
                                  parseIntField(match_output, "wrong_matches"),
-                                 parseDoubleField(match_output, "match_precision")};
+                                 parseDoubleField(match_output, "match_precision"),
+                                 parseOptionalDoubleField(match_output, "graph_work", 0.0)};
 }
 
 CheckpointGateDecision evaluate_checkpoint_gate_metrics(const CheckpointGateMetrics& metrics,
@@ -60,6 +71,13 @@ CheckpointGateDecision evaluate_checkpoint_gate_metrics(const CheckpointGateMetr
     {
         std::ostringstream reason;
         reason << "match_precision " << metrics.precision << " below required " << threshold.min_precision;
+        return CheckpointGateDecision{false, reason.str()};
+    }
+    if (metrics.graph_attention_work_fraction > threshold.max_graph_attention_work_fraction)
+    {
+        std::ostringstream reason;
+        reason << "graph_work " << metrics.graph_attention_work_fraction << " above required "
+               << threshold.max_graph_attention_work_fraction;
         return CheckpointGateDecision{false, reason.str()};
     }
     return CheckpointGateDecision{true, "passed"};

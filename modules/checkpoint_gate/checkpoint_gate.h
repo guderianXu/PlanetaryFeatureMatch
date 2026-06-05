@@ -14,6 +14,8 @@ struct CheckpointGateMetrics
     int64_t wrong_matches = 0;
     /// 匹配精度，通常为 correct_matches / total_matches。
     double precision = 0.0;
+    /// 图匹配注意力实际工作量相对满量注意力的比例，缺失时按 0 处理以兼容旧输出。
+    double graph_attention_work_fraction = 0.0;
 
     /// @return 正确匹配与错误匹配的总数。
     int64_t total_matches() const;
@@ -25,6 +27,8 @@ struct CheckpointGateThreshold
     int64_t min_correct_matches = 0;
     /// 通过质量门控所需的最小匹配精度。
     double min_precision = 0.0;
+    /// 允许通过质量门控的最大图匹配注意力工作量比例。
+    double max_graph_attention_work_fraction = 1.0;
 };
 
 struct CheckpointGateDecision
