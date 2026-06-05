@@ -1701,6 +1701,36 @@ def learned_descriptor_and_heatmap_single(
     return descriptors, sparse.heatmap
 
 
+def compute_training_descriptor_map(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    image: torch.Tensor,
+    *,
+    train_blended_descriptors: bool = False,
+    texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+) -> torch.Tensor:
+    if image.dim() != 4:
+        raise ValueError("image must have shape BxCxHxW")
+    if train_blended_descriptors:
+        if hasattr(model, "descriptor_map_single"):
+            return model.descriptor_map_single(image, texture_blend_weight=texture_blend_weight)
+        descriptors, _ = learned_descriptor_and_heatmap_single(
+            model,
+            image,
+            train_blended_descriptors=True,
+            texture_blend_weight=texture_blend_weight,
+        )
+        return descriptors
+    if hasattr(model, "learned_descriptor_map_single"):
+        return model.learned_descriptor_map_single(image)
+    descriptors, _ = learned_descriptor_and_heatmap_single(
+        model,
+        image,
+        train_blended_descriptors=False,
+        texture_blend_weight=texture_blend_weight,
+    )
+    return descriptors
+
+
 def compute_student_teacher_descriptor_maps(
     model: pfm_model.PlanetaryFeatureMatcher,
     pair: SyntheticPair,
@@ -2231,15 +2261,18 @@ def train_step(
                     changed_pair = illumination_consistency_pairs.get(pair_key)
                     if changed_pair is not None:
                         changed_pair = move_pair_to_device(changed_pair, device=device)
-                        changed_maps = compute_student_teacher_descriptor_maps(
+                        changed_descriptors_a = compute_training_descriptor_map(
                             model,
-                            changed_pair,
+                            changed_pair.view_a.unsqueeze(0),
                             train_blended_descriptors=train_blended_descriptors,
                             texture_blend_weight=texture_blend_weight,
-                            include_heatmaps=False,
                         )
-                        changed_descriptors_a = changed_maps[0]
-                        changed_descriptors_b = changed_maps[1]
+                        changed_descriptors_b = compute_training_descriptor_map(
+                            model,
+                            changed_pair.view_b.unsqueeze(0),
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                        )
                         consistency_loss_a = descriptor_consistency_loss(
                             descriptors_a,
                             changed_descriptors_a,
