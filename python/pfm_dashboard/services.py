@@ -37,6 +37,21 @@ def read_metrics_csv(path: Path) -> MetricSeries:
     return MetricSeries(path=path, columns=columns, rows=rows, latest=latest)
 
 
+def run_metrics_path(run_path: Path) -> Path:
+    """Return the metric CSV used by a run.
+
+    训练脚本历史上写 `metrics.csv`，新懒加载训练写 `train_metrics.csv`。
+    Dashboard 统一在这里兼容两种文件名，避免 UI 和训练脚本各自硬编码。
+    """
+    metrics_path = run_path / "metrics.csv"
+    if metrics_path.exists():
+        return metrics_path
+    train_metrics_path = run_path / "train_metrics.csv"
+    if train_metrics_path.exists():
+        return train_metrics_path
+    return metrics_path
+
+
 def infer_backend(run_name: str, run_path: Path) -> str:
     lowered = run_name.lower()
     if "cpp" in lowered or (run_path / "model_final.pt").exists():
@@ -60,6 +75,28 @@ def _script_option(script_path: Path, *names: str) -> float | None:
         match = re.search(rf"{re.escape(name)}\s+([0-9]+(?:\.[0-9]+)?)", text)
         if match:
             return float(match.group(1))
+    return None
+
+
+def _cache_generation_progress(run_path: Path) -> tuple[float, str] | None:
+    log_path = run_path / "train.log"
+    if not log_path.exists():
+        return None
+    text = tail_text(log_path, lines=80)
+    matches = list(re.finditer(r"kept=(\d+)\s+done=(\d+)/(\d+)", text))
+    if matches:
+        match = matches[-1]
+        kept = int(match.group(1))
+        done = int(match.group(2))
+        total = int(match.group(3))
+        if total > 0:
+            percent = min(99.0, max(0.0, done / float(total) * 100.0))
+            return percent, f"cache {done}/{total} pair，保留 {kept}"
+    candidate_match = re.search(r"candidate_tasks=(\d+)", text)
+    if candidate_match:
+        return 1.0, f"cache 0/{candidate_match.group(1)} pair"
+    if "stage=cache_verify" in text:
+        return 99.0, "cache 校验中"
     return None
 
 
@@ -89,6 +126,9 @@ def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoin
         return percent, f"{int(current_epoch)}/{int(target_epochs)} 轮"
 
     if status == "running":
+        cache_progress = _cache_generation_progress(run_path)
+        if cache_progress is not None:
+            return cache_progress
         metric_rows = len(metrics.rows)
         return min(95.0, max(6.0, float(metric_rows % 20) * 4.5)), f"{metric_rows} 条指标"
     if checkpoint_count > 0:
@@ -138,6 +178,7 @@ def run_created_at(run_path: Path) -> float:
         run_path / "run.html",
         run_path / "train.sh",
         run_path / "metrics.csv",
+        run_path / "train_metrics.csv",
         run_path / "train.log",
     ]
     mtimes = _file_mtimes(candidates)
@@ -151,6 +192,7 @@ def run_completed_at(run_path: Path, status: str, checkpoint_count: int) -> floa
         return None
     candidates = [
         run_path / "metrics.csv",
+        run_path / "train_metrics.csv",
         run_path / "train.log",
         run_path / "model_final.pt",
         run_path / "pytorch_pfm_state.pt",
@@ -171,7 +213,7 @@ def discover_runs(root: Path) -> list[RunSummary]:
         return []
     summaries: list[RunSummary] = []
     for run_path in sorted((path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")), key=lambda path: path.stat().st_mtime, reverse=True):
-        metrics = read_metrics_csv(run_path / "metrics.csv")
+        metrics = read_metrics_csv(run_metrics_path(run_path))
         checkpoints = list(run_path.glob("*.pt")) + list((run_path / "checkpoints").glob("*.pt"))
         status = pid_status(run_path / "train.pid")
         if status == "missing" and (run_path / "train.log").exists():

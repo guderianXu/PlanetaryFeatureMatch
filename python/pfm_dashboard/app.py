@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import html
 import json
+import math
 import os
 import shutil
 import time
@@ -17,6 +19,7 @@ from .services import (
     active_training_processes,
     discover_runs,
     read_metrics_csv,
+    run_metrics_path,
     delete_run,
     start_run_script,
     stop_run,
@@ -118,6 +121,7 @@ def _layout(title: str, body: str, active: str = "/") -> str:
         [
             _nav_item("/", "总览", active),
             _nav_item("/train", "训练", active),
+            _nav_item("/history", "历史训练", active),
             _nav_item("/runs", "任务", active),
             _nav_item("/compare", "对比", active),
             _nav_item("/datasets", "数据集", active),
@@ -175,7 +179,7 @@ def _runs_table(runs: list[RunSummary]) -> str:
         report = f'<a href="/runs/{encoded_name}/report">报告</a>' if run.has_report else "-"
         log = f'<a href="/runs/{encoded_name}/log">日志</a>' if run.has_log else "-"
         loss = _metric_number(run, "loss", "total_loss")
-        top1 = _metric_number(run, "descriptor_accuracy", "top1", "mean_top1")
+        top1 = _metric_number(run, "descriptor_accuracy", "top1_accuracy", "top1", "mean_top1")
         quality = top1 if top1 is not None else loss
         quality_width = 0
         if quality is not None:
@@ -213,8 +217,8 @@ def _runs_table(runs: list[RunSummary]) -> str:
             f"<td><div class=\"progress-cell\"><div class=\"progress-track\"><span style=\"width:{run.progress_percent:.1f}%\"></span></div>"
             f"<small>{html.escape(run.progress_label)}</small></div></td>"
             f"<td>{_metric(run, 'loss', 'total_loss')}</td>"
-            f"<td>{_metric(run, 'descriptor_accuracy', 'top1', 'mean_top1')}</td>"
-            f"<td>{_metric(run, 'descriptor_positive_rank', 'mean_rank')}</td>"
+            f"<td>{_metric(run, 'descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1')}</td>"
+            f"<td>{_metric(run, 'descriptor_positive_rank', 'mean_positive_rank', 'mean_rank')}</td>"
             f"<td><div class=\"quality-bar\"><span style=\"width:{quality_width}%\"></span></div></td>"
             f"<td>{run.checkpoint_count}</td>"
             f"<td class=\"row-actions\">{log} {report}</td>"
@@ -228,6 +232,252 @@ def _runs_table(runs: list[RunSummary]) -> str:
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
+
+
+def _visual_report_path(run_path: Path) -> Path | None:
+    for candidate in (run_path / "visual_report" / "index.html", run_path / "visual_report" / "run.html"):
+        if candidate.exists():
+            return candidate
+    report_dirs = sorted(
+        (path for path in run_path.glob("*_visual_report") if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for report_dir in report_dirs:
+        for candidate in (report_dir / "index.html", report_dir / "run.html"):
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _duration_label(run: RunSummary) -> str:
+    if run.completed_at is None:
+        return "未完成" if run.status != "running" else "运行中"
+    seconds = max(0.0, run.completed_at - run.created_at)
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}小时 {minutes}分"
+    if minutes:
+        return f"{minutes}分 {sec}秒"
+    return f"{sec}秒"
+
+
+def _row_number(row: dict[str, object], *names: str) -> float | None:
+    for name in names:
+        value = row.get(name)
+        if isinstance(value, (float, int)):
+            number = float(value)
+            if math.isfinite(number):
+                return number
+    return None
+
+
+def _metric_points(metrics, names: tuple[str, ...]) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for index, row in enumerate(metrics.rows):
+        x = _row_number(row, "step", "global_step", "iteration", "batch")
+        y = _row_number(row, *names)
+        if y is None:
+            continue
+        points.append((float(index + 1 if x is None else x), y))
+    return points
+
+
+def _smooth_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if len(points) < 5:
+        return points
+    radius = max(2, min(16, len(points) // 36))
+    smoothed: list[tuple[float, float]] = []
+    for index, point in enumerate(points):
+        start = max(0, index - radius)
+        end = min(len(points), index + radius + 1)
+        avg = sum(item[1] for item in points[start:end]) / max(1, end - start)
+        smoothed.append((point[0], avg))
+    return smoothed
+
+
+def _svg_path(points: list[tuple[float, float]], x_min: float, x_max: float, y_min: float, y_max: float) -> str:
+    width = 520.0
+    height = 190.0
+    left = 48.0
+    right = 16.0
+    top = 16.0
+    bottom = 30.0
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    def x_scale(value: float) -> float:
+        return left + ((value - x_min) / max(1.0e-9, x_max - x_min)) * plot_w
+
+    def y_scale(value: float) -> float:
+        return top + (1.0 - ((value - y_min) / max(1.0e-9, y_max - y_min))) * plot_h
+
+    commands = []
+    for index, (x_value, y_value) in enumerate(points):
+        command = "M" if index == 0 else "L"
+        commands.append(f"{command}{x_scale(x_value):.1f},{y_scale(y_value):.1f}")
+    return " ".join(commands)
+
+
+def _line_chart_svg(metrics, title: str, names: tuple[str, ...]) -> str:
+    points = _metric_points(metrics, names)
+    if not points:
+        return f'<div class="history-chart empty"><strong>{html.escape(title)}</strong><span>暂无指标</span></div>'
+    max_points = 420
+    if len(points) > max_points:
+        stride = max(1, len(points) // max_points)
+        points = points[::stride] + ([points[-1]] if points[-1] != points[::stride][-1] else [])
+    y_values = [point[1] for point in points]
+    x_values = [point[0] for point in points]
+    y_min = min(y_values)
+    y_max = max(y_values)
+    pad = max(1.0e-9, (y_max - y_min) * 0.08)
+    y_min -= pad
+    y_max += pad
+    raw_path = _svg_path(points, min(x_values), max(x_values), y_min, y_max)
+    smooth_path = _svg_path(_smooth_points(points), min(x_values), max(x_values), y_min, y_max)
+    latest = points[-1]
+    return f"""
+<div class="history-chart">
+  <div><strong>{html.escape(title)}</strong><span>当前 {latest[1]:.6g}</span></div>
+  <svg viewBox="0 0 520 190" preserveAspectRatio="none">
+    <line class="chart-guide" x1="48" y1="52" x2="504" y2="52"></line>
+    <line class="chart-guide" x1="48" y1="98" x2="504" y2="98"></line>
+    <line class="chart-guide" x1="48" y1="144" x2="504" y2="144"></line>
+    <path class="chart-raw" d="{raw_path}"></path>
+    <path class="chart-smooth" d="{smooth_path}"></path>
+    <text class="chart-label" x="4" y="20">{y_max:.4g}</text>
+    <text class="chart-label" x="4" y="158">{y_min:.4g}</text>
+    <text class="chart-label" x="48" y="182">step {min(x_values):.0f}</text>
+    <text class="chart-label" x="430" y="182">step {max(x_values):.0f}</text>
+  </svg>
+</div>
+"""
+
+
+def _histogram_svg(metrics, title: str, names: tuple[str, ...]) -> str:
+    values = [point[1] for point in _metric_points(metrics, names)]
+    if not values:
+        return f'<div class="history-chart empty"><strong>{html.escape(title)}</strong><span>暂无指标</span></div>'
+    bins = 28
+    low = min(values)
+    high = max(values)
+    if high <= low:
+        high = low + 1.0
+    counts = [0 for _ in range(bins)]
+    for value in values:
+        index = min(bins - 1, max(0, int((value - low) / (high - low) * bins)))
+        counts[index] += 1
+    max_count = max(counts) or 1
+    bars = []
+    for index, count in enumerate(counts):
+        x = 48 + index * (456 / bins)
+        height = (count / max_count) * 130
+        y = 154 - height
+        bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{max(2.0, 456 / bins - 2):.1f}" height="{height:.1f}"></rect>')
+    return f"""
+<div class="history-chart">
+  <div><strong>{html.escape(title)}</strong><span>{len(values)} 个 batch</span></div>
+  <svg class="histogram" viewBox="0 0 520 190" preserveAspectRatio="none">
+    <line class="chart-guide" x1="48" y1="154" x2="504" y2="154"></line>
+    {''.join(bars)}
+    <text class="chart-label" x="4" y="20">{max_count}</text>
+    <text class="chart-label" x="48" y="182">{low:.4g}</text>
+    <text class="chart-label" x="430" y="182">{high:.4g}</text>
+  </svg>
+</div>
+"""
+
+
+def _read_visual_summary(run_path: Path) -> list[dict[str, str]]:
+    report_path = _visual_report_path(run_path)
+    summary = report_path.parent / "summary.csv" if report_path is not None else run_path / "visual_report" / "summary.csv"
+    if not summary.exists():
+        return []
+    with summary.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def render_history(project_root: Path, query: dict[str, list[str]]) -> str:
+    runs = discover_runs(project_root / "runs")
+    selected_name = query.get("run", [runs[0].name if runs else ""])[0]
+    selected = next((run for run in runs if run.name == selected_name), runs[0] if runs else None)
+    run_links = []
+    for run in runs[:120]:
+        active = " active" if selected and run.name == selected.name else ""
+        visual_badge = "有图" if _visual_report_path(run.path) is not None else "无图"
+        run_links.append(
+            f'<a class="history-run{active}" href="/history?run={quote(run.name)}">'
+            f'<strong>{html.escape(run.name)}</strong><span>{_format_time(run.created_at)} · {visual_badge}</span></a>'
+        )
+    if selected is None:
+        detail = '<section class="panel"><h2>暂无历史训练</h2><p class="muted">runs/ 下还没有可展示的训练。</p></section>'
+    else:
+        metrics = read_metrics_csv(run_metrics_path(selected.path))
+        visual_report = _visual_report_path(selected.path)
+        summary_rows = _read_visual_summary(selected.path)
+        summary_table = "".join(
+            "<tr>"
+            f"<td>{html.escape(row.get('label', '-'))}</td>"
+            f"<td>{html.escape(row.get('target_variant', '-'))}</td>"
+            f"<td>{html.escape(row.get('matches', '-'))}</td>"
+            f"<td>{html.escape(row.get('correct', '-'))}</td>"
+            f"<td>{html.escape(row.get('wrong', '-'))}</td>"
+            f"<td>{html.escape(row.get('precision', '-'))}</td>"
+            "</tr>"
+            for row in summary_rows[:12]
+        )
+        visual_block = (
+            f'<iframe class="history-report-frame" src="/runs/{quote(selected.name)}/visual-report"></iframe>'
+            if visual_report is not None
+            else '<div class="history-empty-report">这次训练还没有 visual_report。新训练结束后会自动生成；旧 run 可以手动补跑可视化脚本。</div>'
+        )
+        detail = f"""
+<section class="history-detail">
+  <div class="history-head panel">
+    <div>
+      <h2>{html.escape(selected.name)}</h2>
+      <p>创建 {_format_time(selected.created_at)} · 完成 {_format_optional_time(selected.completed_at)} · 用时 {_duration_label(selected)}</p>
+    </div>
+    <div class="history-actions">
+      <a class="button secondary" href="/runs/{quote(selected.name)}/log">日志</a>
+      <a class="button secondary" href="/runs/{quote(selected.name)}/report">训练报告</a>
+      {f'<a class="button primary" href="/runs/{quote(selected.name)}/visual-report">匹配报告</a>' if visual_report is not None else ''}
+    </div>
+  </div>
+  <div class="metric-grid history-metrics">
+    <article class="metric-card"><span>训练用时</span><strong>{_duration_label(selected)}</strong><small>{selected.progress_label}</small></article>
+    <article class="metric-card"><span>最新 Loss</span><strong>{_metric(selected, 'loss', 'total_loss', 'train_loss')}</strong><small>{len(metrics.rows)} 行指标</small></article>
+    <article class="metric-card"><span>最新 Top1</span><strong>{_metric(selected, 'descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1')}</strong><small>训练 batch 指标</small></article>
+    <article class="metric-card"><span>检查点</span><strong>{selected.checkpoint_count}</strong><small>模型产物数量</small></article>
+  </div>
+  <section class="panel history-charts">
+    <div class="panel-head"><div><h2>训练指标</h2><p>每个 batch 的原始指标和趋势，来自 metrics.csv / train_metrics.csv。</p></div></div>
+    <div class="history-chart-grid">
+      {_line_chart_svg(metrics, 'Loss', ('loss', 'loss_total', 'total_loss', 'train_loss'))}
+      {_line_chart_svg(metrics, 'Top1', ('descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'))}
+      {_line_chart_svg(metrics, '正样本排名', ('descriptor_positive_rank', 'mean_positive_rank', 'mean_rank'))}
+      {_histogram_svg(metrics, 'Loss 直方图', ('loss', 'loss_total', 'total_loss', 'train_loss'))}
+    </div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><div><h2>匹配样本摘要</h2><p>绿色正确、红色错误；下方完整报告内含连线图和误差直方图。</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>类型</th><th>扰动</th><th>匹配</th><th>正确</th><th>错误</th><th>正确率</th></tr></thead><tbody>{summary_table}</tbody></table></div>
+    {visual_block}
+  </section>
+</section>
+"""
+    body = f"""
+<section class="history-layout">
+  <aside class="panel history-list">
+    <div class="panel-head"><div><h2>历史训练</h2><p>按 runs/ 目录更新时间排序。</p></div></div>
+    <div class="history-run-list">{''.join(run_links) or '<p class="muted">暂无 run</p>'}</div>
+  </aside>
+  {detail}
+</section>
+"""
+    return _layout("历史训练", body, active="/history")
 
 
 def render_index(project_root: Path) -> str:
@@ -307,7 +557,7 @@ def render_train(project_root: Path, message: str = "") -> str:
     <div class="live-chart-grid">
       <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      <div class="live-chart-card"><div><strong>图匹配</strong><span data-live-chart-meta="graph">最近 300 batch</span></div><svg data-live-chart="graph" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>正样本排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>显存</strong><span data-live-chart-meta="memory">最近 300 batch</span></div><svg data-live-chart="memory" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
     </div>
   </div>
@@ -395,7 +645,7 @@ def render_compare(project_root: Path, query: dict[str, list[str]]) -> str:
     <button class="button primary" type="submit">加载曲线</button>
   </form>
   <div class="panel chart-panel">
-    <div class="panel-head"><div><h2>指标曲线</h2><p>损失曲线来自各任务的 metrics.csv。</p></div></div>
+    <div class="panel-head"><div><h2>指标曲线</h2><p>损失曲线来自各任务的 metrics.csv 或 train_metrics.csv。</p></div></div>
     <canvas id="metricChart" data-runs="{html.escape(','.join(selected))}"></canvas>
   </div>
 </section>
@@ -466,6 +716,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_html(render_index(root))
         elif parsed.path == "/train":
             self._send_html(render_train(root))
+        elif parsed.path == "/history":
+            self._send_html(render_history(root, query))
         elif parsed.path == "/runs":
             self._send_html(render_runs(root))
         elif parsed.path == "/compare":
@@ -477,18 +729,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/metrics":
             names = query.get("runs", [])
             metrics = {
-                name: read_metrics_csv(root / "runs" / name / "metrics.csv").__dict__
+                name: read_metrics_csv(run_metrics_path(root / "runs" / name)).__dict__
                 for name in names
                 if (root / "runs" / name).exists()
             }
             self._send_json({"metrics": metrics})
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/log"):
-            name = parsed.path.split("/")[2]
+            name = unquote(parsed.path.split("/")[2])
             self._send_text(tail_text(root / "runs" / name / "train.log", lines=200))
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/report"):
-            name = parsed.path.split("/")[2]
+            name = unquote(parsed.path.split("/")[2])
             report = root / "runs" / name / "run.html"
             self._send_html(report.read_text(encoding="utf-8") if report.exists() else "报告缺失")
+        elif parsed.path.startswith("/runs/") and parsed.path.endswith("/visual-report"):
+            name = unquote(parsed.path.split("/")[2])
+            run_path = root / "runs" / name
+            report = _visual_report_path(run_path)
+            self._send_html(report.read_text(encoding="utf-8") if report is not None else "匹配可视化报告缺失")
         elif parsed.path == "/static/dashboard.css":
             self._send_payload(STYLE, "text/css; charset=utf-8")
         elif parsed.path == "/static/dashboard.js":
@@ -1130,6 +1387,167 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   background: #48bfc1;
   box-shadow: 0 0 0 2px rgba(72, 191, 193, 0.18);
 }
+.history-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.28fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.history-list {
+  position: sticky;
+  top: 126px;
+  max-height: calc(100vh - 154px);
+  overflow: hidden;
+}
+.history-run-list {
+  display: grid;
+  gap: 8px;
+  max-height: calc(100vh - 244px);
+  overflow: auto;
+  padding-right: 4px;
+}
+.history-run {
+  display: block;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(5, 10, 16, 0.42);
+}
+.history-run:hover {
+  border-color: rgba(123, 214, 212, 0.34);
+  text-decoration: none;
+}
+.history-run.active {
+  background: rgba(72, 191, 193, 0.10);
+  border-color: rgba(123, 214, 212, 0.36);
+}
+.history-run strong {
+  display: block;
+  color: #ffffff;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.history-run span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.history-detail {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+.history-head h2 {
+  margin: 0;
+  font-size: 19px;
+  overflow-wrap: anywhere;
+}
+.history-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+.history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.history-metrics {
+  margin: 0;
+}
+.history-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.history-chart {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+.history-chart > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.history-chart strong {
+  color: #ffffff;
+  font-size: 13px;
+}
+.history-chart span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.history-chart svg {
+  display: block;
+  width: 100%;
+  height: 190px;
+  border-radius: 6px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    rgba(4, 8, 13, 0.48);
+  background-size: 100% 38px, 72px 100%, auto;
+}
+.history-chart.empty {
+  min-height: 140px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+.chart-guide {
+  stroke: rgba(168, 181, 194, 0.14);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.chart-raw {
+  fill: none;
+  stroke: rgba(72, 191, 193, 0.30);
+  stroke-width: 1.1;
+  vector-effect: non-scaling-stroke;
+}
+.chart-smooth {
+  fill: none;
+  stroke: #48bfc1;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.chart-label {
+  fill: #9dadbf;
+  font-size: 10px;
+}
+.histogram rect {
+  fill: rgba(72, 191, 193, 0.72);
+}
+.history-report-frame {
+  display: block;
+  width: 100%;
+  height: 860px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #081017;
+}
+.history-empty-report {
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(5, 10, 16, 0.42);
+}
 .train-workbench { display: grid; grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
 .launch-panel, .data-panel { grid-column: auto; }
 .form-grid { display: grid; gap: 12px; }
@@ -1204,7 +1622,11 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(72, 191, 193
 select option { background: #0d141d; color: var(--text); }
 @media (max-width: 1180px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .content-grid, .train-workbench, .compare-layout, .live-grid { grid-template-columns: 1fr; }
+  .content-grid, .train-workbench, .compare-layout, .live-grid, .history-layout { grid-template-columns: 1fr; }
+  .history-list { position: static; max-height: none; }
+  .history-run-list { max-height: 360px; }
+  .history-head { flex-direction: column; }
+  .history-actions { justify-content: flex-start; }
 }
 @media (max-width: 760px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -1213,7 +1635,8 @@ select option { background: #0d141d; color: var(--text); }
   .topbar, .hero-panel, .sticky-submit { align-items: stretch; flex-direction: column; }
   main { padding: 16px; }
   .topbar { position: static; padding: 18px 16px; }
-  .metric-grid, .form-grid.two, .form-grid.three, .live-stat-grid, .live-chart-grid, .live-run-footer { grid-template-columns: 1fr; }
+  .metric-grid, .form-grid.two, .form-grid.three, .live-stat-grid, .live-chart-grid, .history-chart-grid, .live-run-footer { grid-template-columns: 1fr; }
+  .history-report-frame { height: 620px; }
 }
 """
 
@@ -1321,7 +1744,7 @@ function runEpochLabel(run) {
 function runBatchLabel(run) {
   const latest = run.latest_metrics || {};
   const current = integerMetric(latest, ['iteration', 'batch', 'step', 'global_step']);
-  const total = integerMetric(latest, ['total_iterations', 'total_batches']);
+  const total = integerMetric(latest, ['total_batches', 'total_iterations']);
   return formatProgressPart(current, total, '批');
 }
 
@@ -1338,8 +1761,8 @@ const LIVE_CHART_MAX_DOTS = 80;
 const LIVE_CHART_METRICS = {
   loss: ['loss', 'loss_total', 'total_loss', 'train_loss'],
   top1: ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'],
-  graph: ['graph_matching_accuracy', 'graph_accuracy', 'mean_graph_accuracy'],
-  memory: ['gpu_memory_used_mb', 'gpu_mem_used_mb', 'memory_used_mb']
+  rank: ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank'],
+  memory: ['gpu_memory_used_mb', 'gpu_mem_used_mb', 'gpu_mem_used_mib', 'memory_used_mb']
 };
 
 function visibleMetricRows(rows) {
@@ -1543,7 +1966,7 @@ async function refreshLiveTraining() {
   Object.entries(LIVE_CHART_METRICS).forEach(([chartKey, names]) => updateChartMeta(chartKey, chartRun, metricsPayload, names));
   renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.loss));
   renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.top1));
-  renderLiveChart(document.querySelector('[data-live-chart="graph"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.graph));
+  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.rank));
   renderLiveChart(document.querySelector('[data-live-chart="memory"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.memory));
 }
 

@@ -109,6 +109,36 @@ class DashboardAppTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_history_discovers_midstep_visual_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "runs" / "lazy_midstep_run"
+            report = run / "midstep_3000_visual_report"
+            report.mkdir(parents=True)
+            (run / "train_metrics.csv").write_text("step,loss\n3000,1.5\n", encoding="utf-8")
+            (report / "index.html").write_text("<html><body>中期匹配报告</body></html>", encoding="utf-8")
+            (report / "summary.csv").write_text(
+                "label,target_variant,matches,correct,wrong,precision\n"
+                "filtered,extreme_01,20,18,2,0.9\n",
+                encoding="utf-8",
+            )
+            server = make_server("127.0.0.1", 0, project_root=root)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with urllib.request.urlopen(base + "/history?run=lazy_midstep_run", timeout=5) as response:
+                    history_html = response.read().decode("utf-8")
+                self.assertIn("有图", history_html)
+                self.assertIn("filtered", history_html)
+                self.assertIn("extreme_01", history_html)
+                with urllib.request.urlopen(base + "/runs/lazy_midstep_run/visual-report", timeout=5) as response:
+                    report_html = response.read().decode("utf-8")
+                self.assertIn("中期匹配报告", report_html)
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
