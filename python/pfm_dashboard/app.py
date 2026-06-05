@@ -557,7 +557,7 @@ def render_train(project_root: Path, message: str = "") -> str:
     <div class="live-chart-grid">
       <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      <div class="live-chart-card"><div><strong>正样本排名</strong><span data-live-chart-meta="rank">最近 300 batch</span></div><svg data-live-chart="rank" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>早停置信</strong><span data-live-chart-meta="stop_confidence">最近 300 batch</span></div><svg data-live-chart="stop_confidence" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>图剪枝</strong><span data-live-chart-meta="graph_prune">最近 300 batch</span></div><svg data-live-chart="graph_prune" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
     </div>
   </div>
@@ -585,6 +585,8 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>匹配接受概率 <input type="number" name="graph_min_accept_probability" value="-1" min="-1" max="1" step="0.01"></label>
       <label>计算量预算 <input type="number" name="graph_max_attention_work_fraction" value="1" min="0" max="1" step="0.01"></label>
       <label>宽度保留比例 <input type="number" name="graph_width_prune_keep_ratio" value="1" min="0" max="1" step="0.01"></label>
+      <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
+      <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
     </div>
     <div class="quick-presets">
       <button type="button" data-preset="smoke">冒烟测试</button>
@@ -801,6 +803,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_min_accept_probability=float(value("graph_min_accept_probability", "-1")),
             graph_max_attention_work_fraction=float(value("graph_max_attention_work_fraction", "1")),
             graph_width_prune_keep_ratio=float(value("graph_width_prune_keep_ratio", "1")),
+            graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
+            graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
         )
         try:
             generated = create_training_runs(request)
@@ -1775,7 +1779,7 @@ const LIVE_CHART_MAX_DOTS = 80;
 const LIVE_CHART_METRICS = {
   loss: ['loss', 'loss_total', 'total_loss', 'train_loss'],
   top1: ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'],
-  rank: ['descriptor_positive_rank', 'mean_positive_rank', 'mean_rank'],
+  stop_confidence: ['graph_matcher_stop_confidence_loss', 'stop_confidence_loss'],
   graph_prune: ['graph_matcher_prune_ranking_loss', 'prune_ranking_loss']
 };
 
@@ -1980,7 +1984,7 @@ async function refreshLiveTraining() {
   Object.entries(LIVE_CHART_METRICS).forEach(([chartKey, names]) => updateChartMeta(chartKey, chartRun, metricsPayload, names));
   renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.loss));
   renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.top1));
-  renderLiveChart(document.querySelector('[data-live-chart="rank"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.rank));
+  renderLiveChart(document.querySelector('[data-live-chart="stop_confidence"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.stop_confidence));
   renderLiveChart(document.querySelector('[data-live-chart="graph_prune"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.graph_prune));
 }
 

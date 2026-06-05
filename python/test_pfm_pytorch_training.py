@@ -1416,6 +1416,26 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.0)
 
+    def test_graph_matcher_stop_confidence_loss_penalizes_confident_wrong_assignment(self):
+        logits = torch.zeros(4, 4)
+        logits[:3, :3] = torch.tensor(
+            [
+                [0.1, 5.0, -2.0],
+                [4.8, 0.2, -2.0],
+                [-2.0, -2.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+        )
+
+        loss = train.graph_matcher_stop_confidence_loss(output, positive_count=2, safe_margin=0.5)
+
+        self.assertGreater(float(loss), 1.0)
+
     def test_graph_matcher_correspondence_loss_can_return_lightglue_components(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
@@ -1432,6 +1452,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             accept_negative_topk=2,
             prune_ranking_weight=0.25,
             prune_ranking_margin=0.5,
+            stop_confidence_weight=0.1,
+            stop_confidence_margin=0.5,
             return_components=True,
         )
 
@@ -1439,6 +1461,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertGreater(float(components["graph_matcher_ce_loss"].detach()), 0.0)
         self.assertGreater(float(components["graph_matcher_accept_loss"].detach()), 0.0)
         self.assertIn("graph_matcher_prune_ranking_loss", components)
+        self.assertIn("graph_matcher_stop_confidence_loss", components)
         self.assertIn("graph_matcher_total_loss", components)
 
     def test_graph_matcher_raw_preservation_loss_penalizes_degraded_raw_margin(self):
@@ -1595,6 +1618,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.15",
             "--graph-matcher-prune-ranking-margin",
             "0.4",
+            "--graph-matcher-stop-confidence-weight",
+            "0.07",
+            "--graph-matcher-stop-confidence-margin",
+            "0.6",
             "--graph-matcher-raw-preservation-weight",
             "0.1",
             "--graph-matcher-raw-preservation-margin",
@@ -1631,6 +1658,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_accept_negative_topk, 6)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.15)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_margin, 0.4)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.07)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_margin, 0.6)
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_weight, 0.1)
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_margin, 1.5)
         self.assertAlmostEqual(args.graph_matcher_raw_preservation_raw_margin, 0.04)
@@ -1658,6 +1687,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.1)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.05)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_margin, 0.5)
 
     def test_parse_args_accepts_gradient_accumulation_steps(self):
         argv = [

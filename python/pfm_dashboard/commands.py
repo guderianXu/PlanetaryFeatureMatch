@@ -42,6 +42,8 @@ class TrainingRequest:
     pair_cache_limit: int = 0
     synthetic_loss_weight: float = 0.1
     graph_matcher_loss_weight: float = 1.0
+    graph_matcher_stop_confidence_weight: float = 0.05
+    graph_matcher_stop_confidence_margin: float = 0.5
     temperature: float = 0.07
     min_intensity: float = 0.01
     seed: int = 20260603
@@ -97,6 +99,8 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>resize={request.resize}</li>
 <li>samples_per_pair={request.samples_per_pair}</li>
 <li>learning_rate={request.learning_rate}</li>
+<li>graph_matcher_stop_confidence_weight={request.graph_matcher_stop_confidence_weight}</li>
+<li>graph_matcher_stop_confidence_margin={request.graph_matcher_stop_confidence_margin}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 <li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
 <li>graph_max_attention_work_fraction={request.graph_max_attention_work_fraction}</li>
@@ -148,6 +152,10 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         "0.0",
         "--graph-matcher-loss-weight",
         str(request.graph_matcher_loss_weight),
+        "--graph-matcher-stop-confidence-weight",
+        str(request.graph_matcher_stop_confidence_weight),
+        "--graph-matcher-stop-confidence-margin",
+        str(request.graph_matcher_stop_confidence_margin),
         "--graph-matcher-metadata-mode",
         "full",
         "--temperature",
@@ -247,6 +255,10 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.synthetic_loss_weight),
         "--graph-matcher-loss-weight",
         str(request.graph_matcher_loss_weight),
+        "--graph-matcher-stop-confidence-weight",
+        str(request.graph_matcher_stop_confidence_weight),
+        "--graph-matcher-stop-confidence-margin",
+        str(request.graph_matcher_stop_confidence_margin),
         "--temperature",
         str(request.temperature),
         "--learning-rate",
@@ -308,6 +320,10 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_max_attention_work_fraction must be in [0, 1]")
     if request.graph_width_prune_keep_ratio < 0.0 or request.graph_width_prune_keep_ratio > 1.0:
         raise ValueError("graph_width_prune_keep_ratio must be in [0, 1]")
+    if request.graph_matcher_stop_confidence_weight < 0.0:
+        raise ValueError("graph_matcher_stop_confidence_weight must be nonnegative")
+    if request.graph_matcher_stop_confidence_margin < 0.0:
+        raise ValueError("graph_matcher_stop_confidence_margin must be nonnegative")
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

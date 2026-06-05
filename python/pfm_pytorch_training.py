@@ -38,6 +38,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_no_match_loss",
     "graph_matcher_accept_loss",
     "graph_matcher_prune_ranking_loss",
+    "graph_matcher_stop_confidence_loss",
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
 )
@@ -1372,6 +1373,8 @@ def graph_matcher_correspondence_loss(
     accept_negative_topk: int = 8,
     prune_ranking_weight: float = 0.0,
     prune_ranking_margin: float = 0.25,
+    stop_confidence_weight: float = 0.0,
+    stop_confidence_margin: float = 0.5,
     raw_preservation_weight: float = 0.0,
     raw_preservation_margin: float = 1.0,
     raw_preservation_raw_margin: float = 0.05,
@@ -1390,6 +1393,7 @@ def graph_matcher_correspondence_loss(
         no_match_loss: torch.Tensor,
         accept_loss: torch.Tensor,
         prune_ranking_loss: torch.Tensor,
+        stop_confidence_loss: torch.Tensor,
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
@@ -1399,6 +1403,7 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_no_match_loss": no_match_loss,
             "graph_matcher_accept_loss": accept_loss,
             "graph_matcher_prune_ranking_loss": prune_ranking_loss,
+            "graph_matcher_stop_confidence_loss": stop_confidence_loss,
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
         }
@@ -1406,7 +1411,7 @@ def graph_matcher_correspondence_loss(
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1490,6 +1495,7 @@ def graph_matcher_correspondence_loss(
     no_match_loss = output.logits.new_zeros(())
     accept_loss = output.logits.new_zeros(())
     prune_ranking_loss = output.logits.new_zeros(())
+    stop_confidence_loss = output.logits.new_zeros(())
     raw_preservation_loss = output.logits.new_zeros(())
     hard_negative_dustbin_loss = output.logits.new_zeros(())
     loss = match_ce_loss
@@ -1522,6 +1528,13 @@ def graph_matcher_correspondence_loss(
             margin=prune_ranking_margin,
         )
         loss = loss + float(prune_ranking_weight) * prune_ranking_loss
+    if stop_confidence_weight > 0.0:
+        stop_confidence_loss = graph_matcher_stop_confidence_loss(
+            output,
+            positive_count=count,
+            safe_margin=stop_confidence_margin,
+        )
+        loss = loss + float(stop_confidence_weight) * stop_confidence_loss
     if raw_preservation_weight > 0.0:
         raw_preservation_loss = graph_matcher_raw_preservation_loss(
             output.logits,
@@ -1550,6 +1563,7 @@ def graph_matcher_correspondence_loss(
             no_match_loss,
             accept_loss,
             prune_ranking_loss,
+            stop_confidence_loss,
             raw_preservation_loss,
             hard_negative_dustbin_loss,
         )
@@ -1627,6 +1641,30 @@ def graph_matcher_prune_ranking_loss(
     if not terms:
         return output.logits.new_zeros(())
     return torch.stack(terms).mean()
+
+
+def graph_matcher_stop_confidence_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    safe_margin: float = 0.5,
+) -> torch.Tensor:
+    count = min(int(positive_count), output.logits.size(0) - 1, output.logits.size(1) - 1)
+    if count <= 1:
+        return output.logits.new_zeros(())
+    pair_logits = output.logits[:count, :count]
+    diagonal = torch.eye(count, dtype=torch.bool, device=pair_logits.device)
+    positive_logits = pair_logits.diagonal()
+    row_hard = pair_logits.masked_fill(diagonal, -float("inf")).max(dim=1).values
+    col_hard = pair_logits.masked_fill(diagonal, -float("inf")).max(dim=0).values
+    safe_assignments = ((positive_logits - row_hard) >= float(safe_margin)) & (
+        (positive_logits - col_hard) >= float(safe_margin)
+    )
+    target = safe_assignments.to(dtype=pair_logits.dtype).mean().detach()
+    row_confidence = torch.softmax(pair_logits, dim=1).max(dim=1).values.mean()
+    column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values.mean()
+    confidence = torch.minimum(row_confidence, column_confidence).clamp(1.0e-6, 1.0 - 1.0e-6)
+    return F.binary_cross_entropy(confidence, target)
 
 
 def graph_matcher_raw_preservation_loss(
@@ -2096,6 +2134,8 @@ def train_step(
     graph_matcher_accept_negative_topk: int = 8,
     graph_matcher_prune_ranking_weight: float = 0.0,
     graph_matcher_prune_ranking_margin: float = 0.25,
+    graph_matcher_stop_confidence_weight: float = 0.0,
+    graph_matcher_stop_confidence_margin: float = 0.5,
     graph_matcher_raw_preservation_weight: float = 0.0,
     graph_matcher_raw_preservation_margin: float = 1.0,
     graph_matcher_raw_preservation_raw_margin: float = 0.05,
@@ -2242,6 +2282,8 @@ def train_step(
                             accept_negative_topk=graph_matcher_accept_negative_topk,
                             prune_ranking_weight=graph_matcher_prune_ranking_weight,
                             prune_ranking_margin=graph_matcher_prune_ranking_margin,
+                            stop_confidence_weight=graph_matcher_stop_confidence_weight,
+                            stop_confidence_margin=graph_matcher_stop_confidence_margin,
                             raw_preservation_weight=graph_matcher_raw_preservation_weight,
                             raw_preservation_margin=graph_matcher_raw_preservation_margin,
                             raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
@@ -3151,6 +3193,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
     parser.add_argument("--graph-matcher-prune-ranking-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-stop-confidence-weight", type=float, default=0.05)
+    parser.add_argument("--graph-matcher-stop-confidence-margin", type=float, default=0.5)
     parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
     parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
@@ -3254,6 +3298,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-prune-ranking-weight must be nonnegative")
     if args.graph_matcher_prune_ranking_margin < 0.0:
         parser.error("--graph-matcher-prune-ranking-margin must be nonnegative")
+    if args.graph_matcher_stop_confidence_weight < 0.0:
+        parser.error("--graph-matcher-stop-confidence-weight must be nonnegative")
+    if args.graph_matcher_stop_confidence_margin < 0.0:
+        parser.error("--graph-matcher-stop-confidence-margin must be nonnegative")
     if args.graph_matcher_raw_preservation_weight < 0.0:
         parser.error("--graph-matcher-raw-preservation-weight must be nonnegative")
     if args.graph_matcher_raw_preservation_margin < 0.0:
@@ -3619,6 +3667,7 @@ def main() -> int:
                 "graph_matcher_loss_weight",
                 "graph_matcher_accept_weight",
                 "graph_matcher_prune_ranking_weight",
+                "graph_matcher_stop_confidence_weight",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -3630,6 +3679,7 @@ def main() -> int:
                 "graph_matcher_no_match_loss",
                 "graph_matcher_accept_loss",
                 "graph_matcher_prune_ranking_loss",
+                "graph_matcher_stop_confidence_loss",
                 "graph_matcher_raw_preservation_loss",
                 "graph_matcher_hard_negative_dustbin_loss",
                 "points",
@@ -3756,6 +3806,8 @@ def main() -> int:
                 graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
                 graph_matcher_prune_ranking_weight=args.graph_matcher_prune_ranking_weight,
                 graph_matcher_prune_ranking_margin=args.graph_matcher_prune_ranking_margin,
+                graph_matcher_stop_confidence_weight=args.graph_matcher_stop_confidence_weight,
+                graph_matcher_stop_confidence_margin=args.graph_matcher_stop_confidence_margin,
                 graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
                 graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
                 graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
@@ -3791,6 +3843,9 @@ def main() -> int:
                     "graph_matcher_prune_ranking_weight": args.graph_matcher_prune_ranking_weight
                     if args.train_graph_matcher
                     else 0.0,
+                    "graph_matcher_stop_confidence_weight": args.graph_matcher_stop_confidence_weight
+                    if args.train_graph_matcher
+                    else 0.0,
                     **metrics,
                 }
             )
@@ -3811,6 +3866,7 @@ def main() -> int:
                     f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
                     f"gacc={metrics.get('graph_matcher_accept_loss', 0.0):.6f} "
                     f"gprune={metrics.get('graph_matcher_prune_ranking_loss', 0.0):.6f} "
+                    f"gstop={metrics.get('graph_matcher_stop_confidence_loss', 0.0):.6f} "
                     f"skip={int(metrics['skipped'])} "
                     f"top1={metrics['top1_accuracy']:.4f} top5={metrics['top5_accuracy']:.4f} "
                     f"rank={metrics['mean_positive_rank']:.2f} "

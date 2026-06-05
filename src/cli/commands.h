@@ -84,6 +84,8 @@ struct CliOptions
     int graph_matcher_accept_negative_topk = 8;
     double graph_matcher_prune_ranking_weight = 0.1;
     double graph_matcher_prune_ranking_margin = 0.25;
+    double graph_matcher_stop_confidence_weight = 0.05;
+    double graph_matcher_stop_confidence_margin = 0.5;
     bool train_backbone = false;
     bool train_dual_fpn = false;
     bool freeze_descriptor_head = false;

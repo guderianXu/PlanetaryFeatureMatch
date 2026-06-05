@@ -399,6 +399,16 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_prune_ranking_margin must be non-negative and finite");
     }
+    if (!std::isfinite(config.graph_matcher_stop_confidence_weight) ||
+        config.graph_matcher_stop_confidence_weight < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_stop_confidence_weight must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_stop_confidence_margin) ||
+        config.graph_matcher_stop_confidence_margin < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_stop_confidence_margin must be non-negative and finite");
+    }
     if (!std::isfinite(config.training_texture_blend_weight) || config.training_texture_blend_weight < 0.0)
     {
         throw std::invalid_argument("training_texture_blend_weight must be non-negative and finite");
@@ -4529,12 +4539,55 @@ torch::Tensor make_python_compare_graph_prune_ranking_loss(const v21::PfmV21Grap
     return torch::stack(terms).mean();
 }
 
+torch::Tensor binary_cross_entropy_probability_mean(const torch::Tensor& probabilities, const torch::Tensor& targets)
+{
+    const auto clamped = probabilities.clamp(1.0e-6, 1.0 - 1.0e-6);
+    return -(targets * clamped.log() + (1.0 - targets) * (1.0 - clamped).log()).mean();
+}
+
+torch::Tensor make_python_compare_assignment_confidence(const torch::Tensor& pair_logits)
+{
+    if (pair_logits.numel() == 0)
+    {
+        return pair_logits.new_zeros({});
+    }
+    auto row_confidence = std::get<0>(torch::softmax(pair_logits, 1).max(1));
+    auto column_confidence = std::get<0>(torch::softmax(pair_logits, 0).max(0));
+    return torch::minimum(row_confidence.mean(), column_confidence.mean());
+}
+
+torch::Tensor make_python_compare_graph_stop_confidence_loss(const v21::PfmV21GraphMatcherOutput& output,
+                                                             int64_t positive_count, double safe_margin)
+{
+    const auto count =
+        std::min<int64_t>({positive_count, output.logits.size(0) - 1, output.logits.size(1) - 1});
+    if (count <= 1)
+    {
+        return output.logits.new_zeros({});
+    }
+
+    auto pair_logits = output.logits.narrow(0, 0, count).narrow(1, 0, count);
+    auto diagonal_mask = torch::eye(count, torch::TensorOptions().dtype(torch::kBool).device(pair_logits.device()));
+    auto positive_logits = pair_logits.diagonal();
+    auto masked = pair_logits.masked_fill(diagonal_mask, -std::numeric_limits<float>::infinity());
+    auto row_hard = std::get<0>(masked.max(1));
+    auto col_hard = std::get<0>(masked.max(0));
+    auto margin_tensor = torch::full({}, static_cast<float>(safe_margin), output.logits.options());
+    auto safe_rows = positive_logits - row_hard >= margin_tensor;
+    auto safe_cols = positive_logits - col_hard >= margin_tensor;
+    auto target = safe_rows.logical_and(safe_cols).to(pair_logits.dtype()).mean().detach();
+    auto confidence = make_python_compare_assignment_confidence(pair_logits);
+    return binary_cross_entropy_probability_mean(confidence, target);
+}
+
 template <typename GraphMatcherT>
 torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const torch::Tensor& desc_a,
                                              const torch::Tensor& desc_b, const torch::Tensor& points_a,
                                              const torch::Tensor& points_b, int64_t meta_dim,
                                              double accept_weight = 0.0, int64_t accept_negative_topk = 8,
-                                             double prune_ranking_weight = 0.0, double prune_ranking_margin = 0.25)
+                                             double prune_ranking_weight = 0.0, double prune_ranking_margin = 0.25,
+                                             double stop_confidence_weight = 0.0,
+                                             double stop_confidence_margin = 0.5)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4564,6 +4617,11 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     {
         loss = loss + static_cast<float>(prune_ranking_weight) *
                           make_python_compare_graph_prune_ranking_loss(output, count, prune_ranking_margin);
+    }
+    if (stop_confidence_weight > 0.0)
+    {
+        loss = loss + static_cast<float>(stop_confidence_weight) *
+                          make_python_compare_graph_stop_confidence_loss(output, count, stop_confidence_margin);
     }
     return loss;
 }
@@ -4616,7 +4674,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 normalize_python_descriptor_rows(desc_b), sample.points_a, sample.points_b,
                 config.graph_keypoint_meta_dim, config.graph_matcher_accept_weight,
                 config.graph_matcher_accept_negative_topk, config.graph_matcher_prune_ranking_weight,
-                config.graph_matcher_prune_ranking_margin));
+                config.graph_matcher_prune_ranking_margin, config.graph_matcher_stop_confidence_weight,
+                config.graph_matcher_stop_confidence_margin));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6588,6 +6647,17 @@ torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImp
 {
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight,
                                           8, prune_ranking_weight, prune_ranking_margin);
+}
+
+torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImpl& graph_matcher,
+                                                      const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+                                                      const torch::Tensor& points_a, const torch::Tensor& points_b,
+                                                      int64_t meta_dim, double accept_weight,
+                                                      double prune_ranking_weight, double prune_ranking_margin,
+                                                      double stop_confidence_weight)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight,
+                                          8, prune_ranking_weight, prune_ranking_margin, stop_confidence_weight, 0.5);
 }
 
 } // namespace testing

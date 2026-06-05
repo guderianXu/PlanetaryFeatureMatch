@@ -156,6 +156,12 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--graph-matcher-prune-ranking-margin", options.graph_matcher_prune_ranking_margin,
                       "Python-compatible graph pruning ranking logit margin")
         ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-stop-confidence-weight", options.graph_matcher_stop_confidence_weight,
+                      "Python-compatible LightGlue-style early-stop confidence calibration loss weight")
+        ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-stop-confidence-margin", options.graph_matcher_stop_confidence_margin,
+                      "Python-compatible early-stop confidence safe logit margin")
+        ->check(CLI::NonNegativeNumber);
     train->add_flag("--train-backbone", options.train_backbone, "Python-compatible: train backbone parameters");
     train->add_flag("--train-dual-fpn", options.train_dual_fpn, "Python-compatible: train dual FPN parameters");
     train->add_flag("--freeze-descriptor-head", options.freeze_descriptor_head,
