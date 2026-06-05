@@ -47,6 +47,7 @@ class TrainingRequest:
     seed: int = 20260603
     graph_inference_preset: str = "fast"
     graph_min_accept_probability: float = -1.0
+    graph_max_attention_work_fraction: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>learning_rate={request.learning_rate}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 <li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
+<li>graph_max_attention_work_fraction={request.graph_max_attention_work_fraction}</li>
 </ul>
 </body>
 </html>
@@ -296,6 +298,8 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
     _graph_inference_thresholds(request.graph_inference_preset)
     if request.graph_min_accept_probability < -1.0 or request.graph_min_accept_probability > 1.0:
         raise ValueError("graph_min_accept_probability must be in [-1, 1]")
+    if request.graph_max_attention_work_fraction < 0.0 or request.graph_max_attention_work_fraction > 1.0:
+        raise ValueError("graph_max_attention_work_fraction must be in [0, 1]")
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

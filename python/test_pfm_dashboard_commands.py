@@ -20,9 +20,11 @@ class DashboardCommandsTest(unittest.TestCase):
                 training_crop_size=512,
                 learning_rate=3.0e-5,
                 graph_min_accept_probability=0.7,
+                graph_max_attention_work_fraction=0.55,
             )
 
             runs = create_training_runs(request)
+            run_html = runs[0].html_path.read_text(encoding="utf-8")
 
         self.assertEqual(len(runs), 1)
         script = runs[0].script_text
@@ -38,6 +40,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--report-graph-width-prune-min-score 0.25", script)
         self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
         self.assertIn("--report-graph-min-accept-probability 0.7", script)
+        self.assertIn("graph_max_attention_work_fraction=0.55", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -123,6 +126,19 @@ class DashboardCommandsTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "graph_min_accept_probability must be in"):
+                create_training_runs(request)
+
+    def test_graph_max_attention_work_fraction_range_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+                graph_max_attention_work_fraction=1.5,
+            )
+
+            with self.assertRaisesRegex(ValueError, "graph_max_attention_work_fraction must be in"):
                 create_training_runs(request)
 
 
