@@ -683,6 +683,18 @@ GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& 
     {
         graph_options.min_accept_probability = options.graph_min_accept_probability;
     }
+    if (options.graph_fallback_mode == "geometry")
+    {
+        graph_options.fallback_mode = GraphMatcherFallbackMode::Geometry;
+    }
+    else if (options.graph_fallback_mode == "none")
+    {
+        graph_options.fallback_mode = GraphMatcherFallbackMode::None;
+    }
+    else
+    {
+        throw std::invalid_argument("graph_fallback_mode must be one of: geometry, none");
+    }
     return graph_options;
 }
 

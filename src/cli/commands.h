@@ -62,6 +62,7 @@ struct CliOptions
     double graph_width_prune_min_score = -1.0;
     double graph_early_stop_min_confidence = -1.0;
     double graph_min_accept_probability = -1.0;
+    std::string graph_fallback_mode = "geometry";
     int epochs = 1;
     int batch_size = 1;
     int resize = 512;

@@ -956,12 +956,14 @@ static void pipeline_graph_inference_preset_allows_numeric_override()
     options.graph_inference_preset = "fast";
     options.graph_width_prune_min_score = 0.7;
     options.graph_min_accept_probability = 0.65;
+    options.graph_fallback_mode = "none";
 
     const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
 
     PFM_REQUIRE_CLOSE(graph_options.width_prune_min_score, 0.7, 1.0e-12);
     PFM_REQUIRE_CLOSE(graph_options.early_stop_min_confidence, 0.85, 1.0e-12);
     PFM_REQUIRE_CLOSE(graph_options.min_accept_probability, 0.65, 1.0e-12);
+    PFM_REQUIRE(graph_options.fallback_mode == pfm::GraphMatcherFallbackMode::None);
 }
 
 static void pipeline_graph_inference_off_preset_disables_lightglue_thresholds()

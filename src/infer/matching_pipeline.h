@@ -8,6 +8,12 @@
 namespace pfm
 {
 
+enum class GraphMatcherFallbackMode
+{
+    Geometry,
+    None,
+};
+
 struct GraphMatcherInferenceOptions
 {
     /// LightGlue 风格宽度剪枝阈值；-1 表示关闭，0..1 表示保留 raw 相似度达到阈值的点。
@@ -16,6 +22,8 @@ struct GraphMatcherInferenceOptions
     double early_stop_min_confidence = -1.0;
     /// LightGlue 风格 matchability/accept 概率阈值；-1 表示关闭，0..1 表示低于阈值的匹配被丢弃。
     double min_accept_probability = -1.0;
+    /// 图匹配输出后的回退策略；Geometry 表示继续 descriptor/top-k/几何回退，None 表示严格返回 graph 输出。
+    GraphMatcherFallbackMode fallback_mode = GraphMatcherFallbackMode::Geometry;
 };
 
 /// 使用已学习的行星图匹配器匹配两组已解码特征。

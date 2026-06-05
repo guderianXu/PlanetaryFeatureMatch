@@ -1543,7 +1543,7 @@ std::pair<torch::Tensor, torch::Tensor> matchSparseFeatures(const FeatureSet& fe
                   << " descriptor_matches=" << descriptor_matches.first.size(0) << " graph_matches=" << matches.size(0)
                   << '\n';
     }
-    if (returnRawGraphMatchesForDebug())
+    if (graph_options.fallback_mode == GraphMatcherFallbackMode::None || returnRawGraphMatchesForDebug())
     {
         return {matches, scores};
     }

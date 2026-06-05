@@ -444,6 +444,8 @@ static void parse_match_command()
         "high_precision",
         "--graph-min-accept-probability",
         "0.75",
+        "--graph-fallback-mode",
+        "none",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Match);
@@ -466,6 +468,7 @@ static void parse_match_command()
     PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.85, 1.0e-12);
     PFM_REQUIRE(parsed.graph_inference_preset == "high_precision");
     PFM_REQUIRE_CLOSE(parsed.graph_min_accept_probability, 0.75, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_fallback_mode == "none");
 }
 
 static void parse_match_defaults_to_sparse_mode()
@@ -522,6 +525,8 @@ static void parse_eval_command()
         "fast",
         "--graph-min-accept-probability",
         "0.7",
+        "--graph-fallback-mode",
+        "none",
     });
 
     PFM_REQUIRE(parsed.command == pfm::Command::Eval);
@@ -539,6 +544,7 @@ static void parse_eval_command()
     PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.9, 1.0e-12);
     PFM_REQUIRE(parsed.graph_inference_preset == "fast");
     PFM_REQUIRE_CLOSE(parsed.graph_min_accept_probability, 0.7, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_fallback_mode == "none");
 }
 
 static void parse_export_command()
