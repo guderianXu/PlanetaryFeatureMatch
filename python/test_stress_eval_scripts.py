@@ -15,6 +15,7 @@ from continuous_rotation_stress_eval import rotate_pair_from_view
 from illumination_stress_eval import make_illumination_variants
 from benchmark_lazy_pose_pairs import LazyPairSpec, LazyPairResult, RenderRecord
 import visualize_lazy_pose_matches as visual_mod
+import training_visual_report as training_report_mod
 from visualize_lazy_pose_matches import (
     LazyMatchVisual,
     filter_visual_matches,
@@ -24,6 +25,25 @@ from visualize_lazy_pose_matches import (
 
 
 class StressEvalScriptsTest(unittest.TestCase):
+    def test_training_visual_report_parse_args_accepts_lightglue_graph_options(self) -> None:
+        argv = [
+            "training_visual_report.py",
+            "--run-dir",
+            "run",
+            "--validation-cache-dir",
+            "val",
+            "--graph-width-prune-min-score",
+            "0.25",
+            "--graph-early-stop-min-confidence",
+            "0.85",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = training_report_mod.parse_args()
+
+        self.assertEqual(args.graph_width_prune_min_score, 0.25)
+        self.assertEqual(args.graph_early_stop_min_confidence, 0.85)
+
     def test_lazy_visual_parse_args_defaults_to_filtered_all_match_report(self) -> None:
         argv = [
             "visualize_lazy_pose_matches.py",

@@ -41,6 +41,8 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
                 self.assertIn('value="dashboard_cpp"', train_html)
                 self.assertIn('<option value="cpp">C++ 训练</option>', train_html)
+                self.assertIn('name="graph_inference_preset"', train_html)
+                self.assertIn("LightGlue 快速剪枝", train_html)
                 self.assertNotIn("Python + C++ 对比", train_html)
                 self.assertNotIn('name="align_python_compare"', train_html)
                 self.assertNotIn('name="profile"', train_html)

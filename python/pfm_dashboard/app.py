@@ -575,6 +575,13 @@ def render_train(project_root: Path, message: str = "") -> str:
       </label>
       <label>设备 <input name="device" value="cuda"></label>
       <label>初始检查点 <input name="init_checkpoint" placeholder="可选路径"></label>
+      <label>GraphMatcher 推理预设
+        <select name="graph_inference_preset">
+          <option value="fast">LightGlue 快速剪枝</option>
+          <option value="high_precision">LightGlue 高精度过滤</option>
+          <option value="off">关闭自适应剪枝</option>
+        </select>
+      </label>
     </div>
     <div class="quick-presets">
       <button type="button" data-preset="smoke">冒烟测试</button>
@@ -787,6 +794,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             prefetch_workers=int(value("prefetch_workers", "2")),
             dataloader_workers=int(value("dataloader_workers", "2")),
             max_train_batches=int(value("max_train_batches", "0")),
+            graph_inference_preset=value("graph_inference_preset", "fast"),
         )
         try:
             generated = create_training_runs(request)

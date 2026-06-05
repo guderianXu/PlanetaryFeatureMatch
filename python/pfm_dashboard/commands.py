@@ -9,6 +9,11 @@ from pathlib import Path
 
 
 PLASCAN_PYTHON = Path("/home/xjw/.local/share/mamba/envs/plascan/bin/python")
+GRAPH_INFERENCE_PRESETS = {
+    "off": (-1.0, -1.0),
+    "fast": (0.25, 0.85),
+    "high_precision": (0.5, 0.85),
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,7 @@ class TrainingRequest:
     temperature: float = 0.07
     min_intensity: float = 0.01
     seed: int = 20260603
+    graph_inference_preset: str = "fast"
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>resize={request.resize}</li>
 <li>samples_per_pair={request.samples_per_pair}</li>
 <li>learning_rate={request.learning_rate}</li>
+<li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 </ul>
 </body>
 </html>
@@ -95,7 +102,16 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
     path.write_text(content, encoding="utf-8")
 
 
+def _graph_inference_thresholds(preset: str) -> tuple[float, float]:
+    try:
+        return GRAPH_INFERENCE_PRESETS[preset]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(GRAPH_INFERENCE_PRESETS))
+        raise ValueError(f"graph_inference_preset must be one of: {allowed}") from exc
+
+
 def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str:
+    width_prune_min_score, early_stop_min_confidence = _graph_inference_thresholds(request.graph_inference_preset)
     parts: list[str] = [
         _quote(PLASCAN_PYTHON),
         "-u",
@@ -154,6 +170,18 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         parts.extend(["--cache-dir", _quote(cache_dir)])
     for cache_dir in request.validation_cache_dirs:
         parts.extend(["--validation-cache-dir", _quote(cache_dir)])
+    if request.validation_cache_dirs:
+        parts.extend(
+            [
+                "--generate-training-report",
+                "--report-matcher-mode",
+                "graph_matcher",
+                "--report-graph-width-prune-min-score",
+                str(width_prune_min_score),
+                "--report-graph-early-stop-min-confidence",
+                str(early_stop_min_confidence),
+            ]
+        )
     if request.max_train_batches > 0:
         parts.extend(["--steps", str(request.max_train_batches)])
     train_flags = [
@@ -259,6 +287,7 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
 def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
     if not request.cache_dirs:
         raise ValueError("at least one cache dir is required")
+    _graph_inference_thresholds(request.graph_inference_preset)
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

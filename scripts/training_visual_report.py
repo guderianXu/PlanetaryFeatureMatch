@@ -480,6 +480,8 @@ def compute_visual_matches(
     graph_acceptance_margin: float,
     graph_min_raw_score: float,
     graph_min_raw_margin: float,
+    graph_width_prune_min_score: float,
+    graph_early_stop_min_confidence: float,
     mutual: bool,
     matcher_mode: str,
     graph_metadata_mode: str,
@@ -569,6 +571,8 @@ def compute_visual_matches(
                 graph_acceptance_margin=graph_acceptance_margin,
                 graph_min_raw_score=graph_min_raw_score,
                 graph_min_raw_margin=graph_min_raw_margin,
+                graph_width_prune_min_score=graph_width_prune_min_score,
+                graph_early_stop_min_confidence=graph_early_stop_min_confidence,
                 scores_a=row_scores_a,
                 scores_b=row_scores_b,
                 metadata_a=meta_a,
@@ -1327,6 +1331,7 @@ def matching_config_lines(args: argparse.Namespace) -> list[str]:
         f"texture_fraction={args.texture_keypoint_fraction:.3f}, weak_texture_fraction={args.weak_texture_keypoint_fraction:.3f}, spatial_bins={args.keypoint_spatial_bins}, cell_cap={args.keypoint_cell_cap}。",
         f"min_score={args.min_score:.6f}, min_margin={args.min_margin:.6f}, threshold_px={args.threshold_px:.2f}。",
         f"graph_dustbin_delta={args.graph_dustbin_delta:.6f}, graph_acceptance_margin={args.graph_acceptance_margin:.6f}, graph_min_raw_score={args.graph_min_raw_score:.6f}, graph_min_raw_margin={args.graph_min_raw_margin:.6f}。",
+        f"graph_width_prune_min_score={args.graph_width_prune_min_score:.6f}, graph_early_stop_min_confidence={args.graph_early_stop_min_confidence:.6f}。",
         f"training_crop_size={args.training_crop_size}, training_max_image_size={args.training_max_image_size}。",
     ]
 
@@ -1376,6 +1381,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
+    parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--non-mutual", action="store_true")
     parser.add_argument("--no-pdf", action="store_true")
     args = parser.parse_args()
@@ -1399,6 +1406,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--keypoint-cell-cap must be nonnegative")
     if args.coverage_bins <= 0:
         parser.error("--coverage-bins must be positive")
+    if args.graph_width_prune_min_score < -1.0 or args.graph_width_prune_min_score > 1.0:
+        parser.error("--graph-width-prune-min-score must be in [-1, 1]")
+    if args.graph_early_stop_min_confidence < -1.0 or args.graph_early_stop_min_confidence > 1.0:
+        parser.error("--graph-early-stop-min-confidence must be in [-1, 1]")
     return args
 
 
@@ -1454,6 +1465,8 @@ def main() -> int:
             graph_acceptance_margin=args.graph_acceptance_margin,
             graph_min_raw_score=args.graph_min_raw_score,
             graph_min_raw_margin=args.graph_min_raw_margin,
+            graph_width_prune_min_score=args.graph_width_prune_min_score,
+            graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
             mutual=not args.non_mutual,
             matcher_mode=args.matcher_mode,
             graph_metadata_mode=args.graph_metadata_mode,

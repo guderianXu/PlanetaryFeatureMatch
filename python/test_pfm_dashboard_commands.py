@@ -31,6 +31,27 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--training-crop-size 512", script)
         self.assertIn("--training-max-image-size 512", script)
         self.assertIn("--learning-rate 3e-05", script)
+        self.assertIn("--generate-training-report", script)
+        self.assertIn("--report-matcher-mode graph_matcher", script)
+        self.assertIn("--report-graph-width-prune-min-score 0.25", script)
+        self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
+
+    def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                validation_cache_dirs=["/cache/val"],
+                output_root=Path(temp),
+                graph_inference_preset="high_precision",
+            )
+
+            runs = create_training_runs(request)
+
+        script = runs[0].script_text
+        self.assertIn("--report-graph-width-prune-min-score 0.5", script)
+        self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
 
     def test_create_cpp_training_run_writes_script(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
