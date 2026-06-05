@@ -996,6 +996,8 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         str(args.visual_threshold_px),
         "--graph-width-prune-min-score",
         str(args.visual_graph_width_prune_min_score),
+        "--graph-early-stop-min-confidence",
+        str(args.visual_graph_early_stop_min_confidence),
     ]
     command.append("--filtered-report" if args.visual_filtered_report else "--no-filtered-report")
     command.extend(
@@ -1790,6 +1792,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-draw-matches", type=int, default=0)
     parser.add_argument("--visual-threshold-px", type=float, default=5.0)
     parser.add_argument("--visual-graph-width-prune-min-score", type=float, default=-1.0)
+    parser.add_argument("--visual-graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--visual-filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
@@ -1840,6 +1843,8 @@ def main() -> int:
         raise ValueError("--visual-filtered-min-margin must be non-negative")
     if args.visual_graph_width_prune_min_score < -1.0:
         raise ValueError("--visual-graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
+    if args.visual_graph_early_stop_min_confidence < -1.0:
+        raise ValueError("--visual-graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
     if args.hard_curriculum_max_probability < 0.0 or args.hard_curriculum_max_probability > 1.0:
         raise ValueError("--hard-curriculum-max-probability must be in [0, 1]")
     if args.false_match_curriculum_max_probability < 0.0 or args.false_match_curriculum_max_probability > 1.0:

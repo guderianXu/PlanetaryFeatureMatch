@@ -220,6 +220,8 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "0.03",
             "--graph-width-prune-min-score",
             "0.35",
+            "--graph-early-stop-min-confidence",
+            "0.8",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -231,6 +233,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(args.graph_min_raw_score, 0.4)
         self.assertEqual(args.graph_min_raw_margin, 0.03)
         self.assertEqual(args.graph_width_prune_min_score, 0.35)
+        self.assertEqual(args.graph_early_stop_min_confidence, 0.8)
 
     def test_sample_descriptor_rows_at_keypoints_interpolates_rows(self):
         descriptors = torch.zeros(1, 2, 2, 2)
@@ -502,7 +505,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertEqual(matches.tolist(), [])
 
-    def test_graph_matcher_matches_passes_width_prune_threshold(self):
+    def test_graph_matcher_matches_passes_pruning_and_early_stop_thresholds(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
@@ -512,9 +515,20 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
                 super().__init__()
                 self.anchor = torch.nn.Parameter(torch.zeros(()))
                 self.width_prune_min_score = None
+                self.early_stop_min_confidence = None
 
-            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b, *, width_prune_min_score=-1.0):
+            def graph_matcher(
+                self,
+                desc_a,
+                keypoints_a,
+                desc_b,
+                keypoints_b,
+                *,
+                width_prune_min_score=-1.0,
+                early_stop_min_confidence=-1.0,
+            ):
                 self.width_prune_min_score = width_prune_min_score
+                self.early_stop_min_confidence = early_stop_min_confidence
                 return pfm_model.GraphMatcherOutput(
                     logits=torch.empty(3, 3),
                     matches=torch.tensor([[0, 0], [1, 1]], dtype=torch.long),
@@ -530,9 +544,11 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             keypoints,
             max_matches=8,
             graph_width_prune_min_score=0.25,
+            graph_early_stop_min_confidence=0.75,
         )
 
         self.assertEqual(model.width_prune_min_score, 0.25)
+        self.assertEqual(model.early_stop_min_confidence, 0.75)
         self.assertEqual(matches.tolist(), [[0, 0], [1, 1]])
 
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):

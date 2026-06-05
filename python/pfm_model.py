@@ -723,6 +723,7 @@ class PlanetaryGraphMatcher(nn.Module):
         self.graph_delta_scale = nn.Parameter(torch.tensor(0.20, dtype=torch.float32))
         self.accept_logit_scale = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
         self.dustbin_bias = nn.Parameter(torch.zeros(1))
+        self.last_executed_attention_layers = 0
         self.attention_layers = nn.ModuleList([PlanetaryGraphAttentionLayer(hidden_dim) for _ in range(attention_layers)])
         _zero_module(self.geometry_bias[-1])
         _zero_module(self.accept_head[-1])
@@ -827,6 +828,32 @@ class PlanetaryGraphMatcher(nn.Module):
         )
         return self.accept_head(features).squeeze(-1)
 
+    def _provisional_pair_logits(
+        self,
+        embed_a: torch.Tensor,
+        embed_b: torch.Tensor,
+        raw_similarity: torch.Tensor,
+        meta_a: torch.Tensor,
+        meta_b: torch.Tensor,
+    ) -> torch.Tensor:
+        projected_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
+        projected_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
+        graph_delta = (projected_a @ projected_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
+        graph_delta = graph_delta + self._geometry_compatibility_bias(meta_a, meta_b)
+        accept_logits = self._acceptance_logits(raw_similarity, graph_delta, meta_a, meta_b)
+        raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
+        delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
+        accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
+        return raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
+
+    @staticmethod
+    def _assignment_confidence(pair_logits: torch.Tensor) -> torch.Tensor:
+        if pair_logits.numel() == 0:
+            return pair_logits.new_tensor(0.0)
+        row_confidence = torch.softmax(pair_logits, dim=1).max(dim=1).values
+        column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values
+        return torch.minimum(row_confidence.min(), column_confidence.min())
+
     def forward(
         self,
         descriptors_a: torch.Tensor,
@@ -835,7 +862,10 @@ class PlanetaryGraphMatcher(nn.Module):
         keypoints_b: torch.Tensor,
         apply_candidate_mask: bool = True,
         width_prune_min_score: float = -1.0,
+        early_stop_min_confidence: float = -1.0,
     ) -> GraphMatcherOutput:
+        if early_stop_min_confidence < -1.0:
+            raise ValueError("early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
         if descriptors_a.size(0) != keypoints_a.size(0) or descriptors_b.size(0) != keypoints_b.size(0):
@@ -863,16 +893,29 @@ class PlanetaryGraphMatcher(nn.Module):
         kp_work_a = kp_a.index_select(0, indices_a)
         kp_work_b = kp_b.index_select(0, indices_b)
         if desc_work_a.size(0) == 0 or desc_work_b.size(0) == 0:
+            self.last_executed_attention_layers = 0
             pair_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
             accept_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
         else:
             embed_a = torch.relu(self.descriptor_projection(desc_work_a) + self.keypoint_projection(kp_work_a))
             embed_b = torch.relu(self.descriptor_projection(desc_work_b) + self.keypoint_projection(kp_work_b))
+            raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b)
+            self.last_executed_attention_layers = 0
             for layer in self.attention_layers:
                 embed_a, embed_b = layer(embed_a, embed_b)
+                self.last_executed_attention_layers += 1
+                if early_stop_min_confidence > -1.0 and self.last_executed_attention_layers < len(self.attention_layers):
+                    provisional_pair_logits = self._provisional_pair_logits(
+                        embed_a,
+                        embed_b,
+                        raw_similarity,
+                        kp_work_a,
+                        kp_work_b,
+                    )
+                    if bool(self._assignment_confidence(provisional_pair_logits).ge(float(early_stop_min_confidence))):
+                        break
             embed_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
             embed_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
-            raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b)
             graph_delta = (embed_a @ embed_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
             graph_delta = graph_delta + self._geometry_compatibility_bias(kp_work_a, kp_work_b)
             accept_logits_work = self._acceptance_logits(raw_similarity, graph_delta, kp_work_a, kp_work_b)

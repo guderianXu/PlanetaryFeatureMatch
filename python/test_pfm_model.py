@@ -119,6 +119,16 @@ class PFMModelTest(unittest.TestCase):
         self.assertTrue(torch.all(output.logits[2, :2] < -9000.0))
         self.assertTrue(torch.all(output.accept_logits[2] < -9000.0))
 
+    def test_graph_matcher_can_stop_attention_layers_when_confident(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
+        desc = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+
+        output = graph(desc, keypoints, desc, keypoints, early_stop_min_confidence=0.0)
+
+        self.assertEqual(tuple(output.logits.shape), (3, 3))
+        self.assertEqual(graph.last_executed_attention_layers, 1)
+
     def test_current_libtorch_checkpoint_loads_strictly_when_available(self):
         checkpoint = Path("runs/rotation_clean_2026-05-25/rotation_clean_ft_e1_b2.pt")
         if not checkpoint.exists():

@@ -204,6 +204,22 @@ static void pfm_v21_graph_matcher_width_pruning_restores_full_logits()
     PFM_REQUIRE((output.accept_logits.index({2, Slice()}) < -9000.0F).all().item<bool>());
 }
 
+static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 3, 4);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    auto descriptors = torch::eye(2, torch::kFloat32);
+    auto keypoints = torch::zeros({2, 2}, torch::kFloat32);
+    keypoints.index_put_({1, 0}, 1.0F);
+
+    const auto output = matcher->forward(descriptors, keypoints, descriptors, keypoints, true, -1.0, 0.0);
+
+    PFM_REQUIRE(output.logits.sizes() == torch::IntArrayRef({3, 3}));
+    PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
+}
+
 static void pfm_v21_optimizer_step_updates_parameters()
 {
     torch::manual_seed(7);
@@ -254,5 +270,7 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss);
     register_test("pfm v21 graph matcher width pruning restores full logits",
                   pfm_v21_graph_matcher_width_pruning_restores_full_logits);
+    register_test("pfm v21 graph matcher can stop attention layers when confident",
+                  pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
     register_test("pfm v21 optimizer step updates parameters", pfm_v21_optimizer_step_updates_parameters);
 }

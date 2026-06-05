@@ -891,17 +891,57 @@ torch::Tensor PfmV21GraphMatcherImpl::acceptanceLogits(const torch::Tensor& raw_
     return _accept_head->forward(features).squeeze(-1);
 }
 
+torch::Tensor PfmV21GraphMatcherImpl::provisionalPairLogits(const torch::Tensor& embed_a,
+                                                            const torch::Tensor& embed_b,
+                                                            const torch::Tensor& raw_similarity,
+                                                            const torch::Tensor& meta_a,
+                                                            const torch::Tensor& meta_b)
+{
+    auto projected_a = torch::nn::functional::normalize(_score_projection->forward(embed_a),
+                                                        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto projected_b = torch::nn::functional::normalize(_score_projection->forward(embed_b),
+                                                        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto graph_delta = torch::matmul(projected_a, projected_b.transpose(0, 1)) * _logit_scale.clamp(1.0, 100.0);
+    graph_delta = graph_delta + geometryCompatibilityBias(meta_a, meta_b);
+    auto accept_logits = acceptanceLogits(raw_similarity, graph_delta, meta_a, meta_b);
+    auto raw_temperature = _raw_score_temperature.abs().clamp(0.03, 1.0);
+    auto delta_scale = _graph_delta_scale.clamp(0.0, 2.0);
+    auto accept_scale = _accept_logit_scale.clamp(0.0, 2.0);
+    return raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits;
+}
+
+torch::Tensor PfmV21GraphMatcherImpl::assignmentConfidence(const torch::Tensor& pair_logits)
+{
+    if (pair_logits.numel() == 0)
+    {
+        return torch::zeros({}, pair_logits.options());
+    }
+    auto row_confidence = std::get<0>(torch::softmax(pair_logits, 1).max(1));
+    auto column_confidence = std::get<0>(torch::softmax(pair_logits, 0).max(0));
+    return torch::minimum(row_confidence.min(), column_confidence.min());
+}
+
+int64_t PfmV21GraphMatcherImpl::lastExecutedAttentionLayers() const
+{
+    return _last_executed_attention_layers;
+}
+
 PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& descriptors_a,
                                                          const torch::Tensor& keypoints_a,
                                                          const torch::Tensor& descriptors_b,
                                                          const torch::Tensor& keypoints_b,
-                                                         bool apply_candidate_mask, double width_prune_min_score)
+                                                         bool apply_candidate_mask, double width_prune_min_score,
+                                                         double early_stop_min_confidence)
 {
     using torch::indexing::Slice;
 
     if (width_prune_min_score < -1.0)
     {
         throw std::invalid_argument("width_prune_min_score must be at least -1.0; -1 disables pruning");
+    }
+    if (early_stop_min_confidence < -1.0)
+    {
+        throw std::invalid_argument("early_stop_min_confidence must be at least -1.0; -1 disables early stopping");
     }
     if (descriptors_a.dim() != 2 || descriptors_b.dim() != 2)
     {
@@ -954,6 +994,7 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     torch::Tensor accept_logits;
     if (desc_work_a.size(0) == 0 || desc_work_b.size(0) == 0)
     {
+        _last_executed_attention_layers = 0;
         pair_logits = torch::full_like(raw_similarity_full, -1.0e4);
         accept_logits = torch::full_like(raw_similarity_full, -1.0e4);
     }
@@ -963,17 +1004,28 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
             torch::relu(_descriptor_projection->forward(desc_work_a) + _keypoint_projection->forward(kp_work_a));
         auto embed_b =
             torch::relu(_descriptor_projection->forward(desc_work_b) + _keypoint_projection->forward(kp_work_b));
+        auto raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b);
+        _last_executed_attention_layers = 0;
         for (const auto& layer : *_attention_layers)
         {
             auto refined = layer->as<PfmV21GraphAttentionLayerImpl>()->forward(embed_a, embed_b);
             embed_a = refined.first;
             embed_b = refined.second;
+            ++_last_executed_attention_layers;
+            if (early_stop_min_confidence > -1.0 && _last_executed_attention_layers < _attention_layer_count)
+            {
+                auto provisional_pair_logits =
+                    provisionalPairLogits(embed_a, embed_b, raw_similarity, kp_work_a, kp_work_b);
+                if (assignmentConfidence(provisional_pair_logits).item<float>() >= early_stop_min_confidence)
+                {
+                    break;
+                }
+            }
         }
         embed_a = torch::nn::functional::normalize(_score_projection->forward(embed_a),
                                                    torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
         embed_b = torch::nn::functional::normalize(_score_projection->forward(embed_b),
                                                    torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
-        auto raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b);
         auto graph_delta = torch::matmul(embed_a, embed_b.transpose(0, 1)) * _logit_scale.clamp(1.0, 100.0);
         graph_delta = graph_delta + geometryCompatibilityBias(kp_work_a, kp_work_b);
         auto accept_logits_work = acceptanceLogits(raw_similarity, graph_delta, kp_work_a, kp_work_b);

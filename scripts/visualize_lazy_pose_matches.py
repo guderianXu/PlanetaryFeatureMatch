@@ -158,6 +158,7 @@ def compute_visual(
     min_score: float,
     min_margin: float,
     graph_width_prune_min_score: float,
+    graph_early_stop_min_confidence: float,
     mutual: bool,
     geometry_filter: str,
     input_local_contrast: bool,
@@ -230,6 +231,7 @@ def compute_visual(
                 max_matches=max_matches,
                 min_score=min_score,
                 graph_width_prune_min_score=graph_width_prune_min_score,
+                graph_early_stop_min_confidence=graph_early_stop_min_confidence,
                 scores_a=row_scores_a,
                 scores_b=row_scores_b,
                 metadata_a=metadata_a,
@@ -842,6 +844,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
+    parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--mutual", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
@@ -869,6 +872,8 @@ def main() -> int:
         raise ValueError("--filtered-draw-matches must be nonnegative; use 0 to draw all matches")
     if args.graph_width_prune_min_score < -1.0:
         raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
+    if args.graph_early_stop_min_confidence < -1.0:
+        raise ValueError("--graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
     if args.filtered_min_margin < 0.0:
         raise ValueError("--filtered-min-margin must be nonnegative")
     if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
@@ -937,6 +942,7 @@ def main() -> int:
                 min_score=args.min_score,
                 min_margin=args.min_margin,
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
+                graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
                 input_local_contrast=args.input_local_contrast,
@@ -993,6 +999,7 @@ def main() -> int:
                     min_score=args.filtered_min_score,
                     min_margin=args.filtered_min_margin,
                     graph_width_prune_min_score=args.graph_width_prune_min_score,
+                    graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                     mutual=args.filtered_mutual,
                     geometry_filter=args.filtered_geometry_filter,
                     input_local_contrast=args.input_local_contrast,
@@ -1081,6 +1088,7 @@ def main() -> int:
                         min_score=args.min_score,
                         min_margin=args.min_margin,
                         graph_width_prune_min_score=args.graph_width_prune_min_score,
+                        graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                         mutual=args.mutual,
                         geometry_filter=args.geometry_filter,
                         input_local_contrast=args.input_local_contrast,

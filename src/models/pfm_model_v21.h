@@ -300,10 +300,15 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     /// @param keypoints_b MxC 的 B 视图关键点或元数据。
     /// @param apply_candidate_mask 是否应用候选 top-k 剪枝；训练监督 loss 可关闭以避免随机初期屏蔽真值。
     /// @param width_prune_min_score LightGlue 风格宽度剪枝阈值；-1 表示关闭。
+    /// @param early_stop_min_confidence LightGlue 风格深度提前停止阈值；-1 表示关闭。
     /// @return 匹配 logits、互选匹配、概率和接受 logits。
     PfmV21GraphMatcherOutput forward(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
                                      const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
-                                     bool apply_candidate_mask = true, double width_prune_min_score = -1.0);
+                                     bool apply_candidate_mask = true, double width_prune_min_score = -1.0,
+                                     double early_stop_min_confidence = -1.0);
+
+    /// 返回上一次 forward 实际执行的 attention 层数，便于调试 early stopping。
+    int64_t lastExecutedAttentionLayers() const;
 
   private:
     torch::Tensor metadata(const torch::Tensor& keypoints_or_meta) const;
@@ -311,12 +316,17 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     torch::Tensor candidateMask(const torch::Tensor& desc_a, const torch::Tensor& desc_b) const;
     torch::Tensor acceptanceLogits(const torch::Tensor& raw_similarity, const torch::Tensor& graph_delta,
                                    const torch::Tensor& meta_a, const torch::Tensor& meta_b);
+    torch::Tensor provisionalPairLogits(const torch::Tensor& embed_a, const torch::Tensor& embed_b,
+                                        const torch::Tensor& raw_similarity, const torch::Tensor& meta_a,
+                                        const torch::Tensor& meta_b);
+    static torch::Tensor assignmentConfidence(const torch::Tensor& pair_logits);
 
     int64_t _descriptor_dim;
     int64_t _hidden_dim;
     int64_t _attention_layer_count;
     int64_t _keypoint_meta_dim;
     int64_t _candidate_topk;
+    int64_t _last_executed_attention_layers = 0;
     torch::nn::Linear _descriptor_projection{nullptr};
     torch::nn::Linear _keypoint_projection{nullptr};
     torch::nn::Linear _score_projection{nullptr};
