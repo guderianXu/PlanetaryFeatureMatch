@@ -42,6 +42,7 @@ class EvalSummary:
     avg_kept_keypoints_a: float = 0.0
     avg_kept_keypoints_b: float = 0.0
     pruned_keypoint_fraction: float = 0.0
+    attention_work_fraction: float = 0.0
 
 
 def parse_float_list(value: str) -> list[float]:
@@ -115,6 +116,8 @@ def summarize_eval_csv(path: Path, config: GraphSweepConfig) -> EvalSummary:
     kept_keypoints_b = 0
     pruned_keypoints_a = 0
     pruned_keypoints_b = 0
+    attention_work_units = 0
+    full_attention_work_units = 0
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
@@ -135,12 +138,17 @@ def summarize_eval_csv(path: Path, config: GraphSweepConfig) -> EvalSummary:
             kept_keypoints_b += _int_from_row(row, "graph_kept_keypoints_b")
             pruned_keypoints_a += _int_from_row(row, "graph_pruned_keypoints_a")
             pruned_keypoints_b += _int_from_row(row, "graph_pruned_keypoints_b")
+            attention_work_units += _int_from_row(row, "graph_attention_work_units")
+            full_attention_work_units += _int_from_row(row, "graph_full_attention_work_units")
     precision = 0.0 if matches == 0 else correct / matches
     pair_count = max(1, pairs)
     total_input_keypoints = input_keypoints_a + input_keypoints_b
     total_pruned_keypoints = pruned_keypoints_a + pruned_keypoints_b
     pruned_keypoint_fraction = (
         0.0 if total_input_keypoints == 0 else total_pruned_keypoints / total_input_keypoints
+    )
+    attention_work_fraction = (
+        0.0 if full_attention_work_units == 0 else attention_work_units / full_attention_work_units
     )
     return EvalSummary(
         config=config,
@@ -157,6 +165,7 @@ def summarize_eval_csv(path: Path, config: GraphSweepConfig) -> EvalSummary:
         avg_kept_keypoints_a=kept_keypoints_a / pair_count,
         avg_kept_keypoints_b=kept_keypoints_b / pair_count,
         pruned_keypoint_fraction=pruned_keypoint_fraction,
+        attention_work_fraction=attention_work_fraction,
     )
 
 
@@ -269,6 +278,7 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
                 "avg_kept_keypoints_a",
                 "avg_kept_keypoints_b",
                 "pruned_keypoint_fraction",
+                "attention_work_fraction",
                 "output_csv",
             ],
         )
@@ -291,6 +301,7 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
                     "avg_kept_keypoints_a": f"{summary.avg_kept_keypoints_a:.1f}",
                     "avg_kept_keypoints_b": f"{summary.avg_kept_keypoints_b:.1f}",
                     "pruned_keypoint_fraction": f"{summary.pruned_keypoint_fraction:.6f}",
+                    "attention_work_fraction": f"{summary.attention_work_fraction:.6f}",
                     "output_csv": summary.output_csv.as_posix(),
                 }
             )
@@ -322,6 +333,7 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
             f"<td>{summary.avg_executed_layers:.3f}</td>"
             f"<td>{summary.avg_kept_keypoints_a:.1f} / {summary.avg_kept_keypoints_b:.1f}</td>"
             f"<td>{summary.pruned_keypoint_fraction:.2%}</td>"
+            f"<td>{summary.attention_work_fraction:.2%}</td>"
             f"<td><code>{html.escape(summary.output_csv.as_posix())}</code></td>"
             "</tr>"
         )
@@ -335,7 +347,8 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
         best_text = (
             f"{best.config.preset} / accept={best.config.accept_probability:g} / "
             f"fallback={best.config.fallback_mode}，precision={best.precision:.6f}，correct={best.correct}，"
-            f"平均执行层数={best.avg_executed_layers:.3f}，剪枝比例={best.pruned_keypoint_fraction:.2%}"
+            f"平均执行层数={best.avg_executed_layers:.3f}，剪枝比例={best.pruned_keypoint_fraction:.2%}，"
+            f"计算量比例={best.attention_work_fraction:.2%}"
         )
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     document = f"""<!doctype html>
@@ -420,6 +433,7 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
         <th>平均执行层数</th>
         <th>平均保留点 A/B</th>
         <th>剪枝比例</th>
+        <th>计算量比例</th>
         <th>明细 CSV</th>
       </tr>
     </thead>

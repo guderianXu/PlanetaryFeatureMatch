@@ -1014,6 +1014,10 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     auto desc_work_b = desc_b.index_select(0, indices_b);
     auto kp_work_a = kp_a.index_select(0, indices_a);
     auto kp_work_b = kp_b.index_select(0, indices_b);
+    const int64_t input_keypoints_a = descriptors_a.size(0);
+    const int64_t input_keypoints_b = descriptors_b.size(0);
+    const int64_t full_attention_work_units = input_keypoints_a * input_keypoints_b * _attention_layer_count;
+    int64_t attention_work_units = 0;
 
     torch::Tensor pair_logits;
     torch::Tensor accept_logits;
@@ -1033,6 +1037,7 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
         _last_executed_attention_layers = 0;
         for (const auto& layer : *_attention_layers)
         {
+            attention_work_units += embed_a.size(0) * embed_b.size(0);
             auto refined = layer->as<PfmV21GraphAttentionLayerImpl>()->forward(embed_a, embed_b);
             embed_a = refined.first;
             embed_b = refined.second;
@@ -1130,10 +1135,12 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     auto probabilities = best_values.index({inlier_mask});
     auto matches = torch::stack({source_indices, target_indices}, 1).to(torch::kCPU, torch::kInt64).contiguous();
     auto scores = probabilities.to(torch::kCPU, torch::kFloat32).contiguous();
-    const int64_t input_keypoints_a = descriptors_a.size(0);
-    const int64_t input_keypoints_b = descriptors_b.size(0);
     const int64_t kept_keypoints_a = indices_a.size(0);
     const int64_t kept_keypoints_b = indices_b.size(0);
+    const double attention_work_fraction =
+        full_attention_work_units == 0 ? 0.0
+                                       : static_cast<double>(attention_work_units) /
+                                             static_cast<double>(full_attention_work_units);
     return PfmV21GraphMatcherOutput{
         logits.contiguous(),
         matches,
@@ -1146,6 +1153,9 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
         kept_keypoints_b,
         std::max<int64_t>(0, input_keypoints_a - kept_keypoints_a),
         std::max<int64_t>(0, input_keypoints_b - kept_keypoints_b),
+        attention_work_units,
+        full_attention_work_units,
+        attention_work_fraction,
     };
 }
 

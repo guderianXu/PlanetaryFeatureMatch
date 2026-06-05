@@ -76,6 +76,12 @@ struct PfmV21GraphMatcherOutput
     int64_t pruned_keypoints_a = 0;
     /// 自适应剪枝移除的 B 视图关键点数。
     int64_t pruned_keypoints_b = 0;
+    /// 实际执行的注意力点对计算量代理，按每层 N_a * N_b 累加。
+    int64_t attention_work_units = 0;
+    /// 不早停、不剪枝时的满层注意力点对计算量代理。
+    int64_t full_attention_work_units = 0;
+    /// 实际计算量占满计算量的比例。
+    double attention_work_fraction = 0.0;
 };
 
 struct PfmV21SemiDenseCandidateOutput

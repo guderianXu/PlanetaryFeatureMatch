@@ -256,6 +256,9 @@ static void pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance()
     PFM_REQUIRE(output.kept_keypoints_b == 4);
     PFM_REQUIRE(output.pruned_keypoints_a == 1);
     PFM_REQUIRE(output.pruned_keypoints_b == 1);
+    PFM_REQUIRE(output.attention_work_units == 57);
+    PFM_REQUIRE(output.full_attention_work_units == 75);
+    PFM_REQUIRE_CLOSE(output.attention_work_fraction, 57.0 / 75.0, 1.0e-6);
 }
 
 static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()

@@ -17,6 +17,9 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertIn("graph_executed_layers", eval_py.EVAL_CSV_FIELDNAMES)
         self.assertIn("graph_kept_keypoints_a", eval_py.EVAL_CSV_FIELDNAMES)
         self.assertIn("graph_pruned_keypoints_b", eval_py.EVAL_CSV_FIELDNAMES)
+        self.assertIn("graph_attention_work_units", eval_py.EVAL_CSV_FIELDNAMES)
+        self.assertIn("graph_full_attention_work_units", eval_py.EVAL_CSV_FIELDNAMES)
+        self.assertIn("graph_attention_work_fraction", eval_py.EVAL_CSV_FIELDNAMES)
 
     def test_select_descriptor_keypoints_filters_dark_pixels_and_caps(self):
         image = torch.ones(1, 8, 8)
@@ -679,6 +682,9 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
                     kept_keypoints_b=1,
                     pruned_keypoints_a=1,
                     pruned_keypoints_b=1,
+                    attention_work_units=4,
+                    full_attention_work_units=8,
+                    attention_work_fraction=0.5,
                 )
 
         graph_stats = {}
@@ -696,6 +702,9 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(graph_stats["graph_executed_layers"], 2)
         self.assertEqual(graph_stats["graph_pruned_keypoints_a"], 1)
         self.assertEqual(graph_stats["graph_kept_keypoints_b"], 1)
+        self.assertEqual(graph_stats["graph_attention_work_units"], 4)
+        self.assertEqual(graph_stats["graph_full_attention_work_units"], 8)
+        self.assertAlmostEqual(graph_stats["graph_attention_work_fraction"], 0.5)
 
     def test_mutual_nearest_matches_reject_one_way_descriptor_candidates(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])

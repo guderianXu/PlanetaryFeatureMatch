@@ -63,6 +63,9 @@ class MatchEvalResult:
     graph_kept_keypoints_b: int = 0
     graph_pruned_keypoints_a: int = 0
     graph_pruned_keypoints_b: int = 0
+    graph_attention_work_units: int = 0
+    graph_full_attention_work_units: int = 0
+    graph_attention_work_fraction: float = 0.0
 
 
 EVAL_CSV_FIELDNAMES = [
@@ -78,6 +81,9 @@ EVAL_CSV_FIELDNAMES = [
     "graph_kept_keypoints_b",
     "graph_pruned_keypoints_a",
     "graph_pruned_keypoints_b",
+    "graph_attention_work_units",
+    "graph_full_attention_work_units",
+    "graph_attention_work_fraction",
 ]
 
 
@@ -87,7 +93,7 @@ def match_eval_result(
     correct: int,
     wrong: int,
     precision: float,
-    graph_stats: dict[str, int] | None = None,
+    graph_stats: dict[str, float | int] | None = None,
 ) -> MatchEvalResult:
     stats = graph_stats or {}
     return MatchEvalResult(
@@ -102,6 +108,9 @@ def match_eval_result(
         graph_kept_keypoints_b=int(stats.get("graph_kept_keypoints_b", 0)),
         graph_pruned_keypoints_a=int(stats.get("graph_pruned_keypoints_a", 0)),
         graph_pruned_keypoints_b=int(stats.get("graph_pruned_keypoints_b", 0)),
+        graph_attention_work_units=int(stats.get("graph_attention_work_units", 0)),
+        graph_full_attention_work_units=int(stats.get("graph_full_attention_work_units", 0)),
+        graph_attention_work_fraction=float(stats.get("graph_attention_work_fraction", 0.0)),
     )
 
 
@@ -582,7 +591,7 @@ def graph_matcher_matches(
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
     metadata_b: torch.Tensor | None = None,
-    graph_stats: dict[str, int] | None = None,
+    graph_stats: dict[str, float | int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if max_matches < 0:
         raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
@@ -644,6 +653,9 @@ def graph_matcher_matches(
                 "graph_kept_keypoints_b": int(getattr(output, "kept_keypoints_b", desc_b.size(0))),
                 "graph_pruned_keypoints_a": int(getattr(output, "pruned_keypoints_a", 0)),
                 "graph_pruned_keypoints_b": int(getattr(output, "pruned_keypoints_b", 0)),
+                "graph_attention_work_units": int(getattr(output, "attention_work_units", 0)),
+                "graph_full_attention_work_units": int(getattr(output, "full_attention_work_units", 0)),
+                "graph_attention_work_fraction": float(getattr(output, "attention_work_fraction", 0.0)),
             }
         )
     use_calibrated_logits = (
@@ -962,7 +974,7 @@ def match_pair_descriptor_maps(
 ) -> MatchEvalResult:
     if graph_fallback_mode not in {"mutual", "none"}:
         raise ValueError("graph_fallback_mode must be mutual or none")
-    graph_stats: dict[str, int] = {}
+    graph_stats: dict[str, float | int] = {}
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
         descriptors_a,
@@ -1522,6 +1534,9 @@ def main() -> int:
                 "graph_kept_keypoints_b": str(result.graph_kept_keypoints_b),
                 "graph_pruned_keypoints_a": str(result.graph_pruned_keypoints_a),
                 "graph_pruned_keypoints_b": str(result.graph_pruned_keypoints_b),
+                "graph_attention_work_units": str(result.graph_attention_work_units),
+                "graph_full_attention_work_units": str(result.graph_full_attention_work_units),
+                "graph_attention_work_fraction": f"{result.graph_attention_work_fraction:.6f}",
             }
             rows.append(row)
             writer.writerow(row)

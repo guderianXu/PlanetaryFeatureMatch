@@ -53,6 +53,9 @@ class GraphMatcherOutput:
     kept_keypoints_b: int = 0
     pruned_keypoints_a: int = 0
     pruned_keypoints_b: int = 0
+    attention_work_units: int = 0
+    full_attention_work_units: int = 0
+    attention_work_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -922,6 +925,10 @@ class PlanetaryGraphMatcher(nn.Module):
         desc_work_b = desc_b.index_select(0, indices_b)
         kp_work_a = kp_a.index_select(0, indices_a)
         kp_work_b = kp_b.index_select(0, indices_b)
+        input_keypoints_a = int(descriptors_a.size(0))
+        input_keypoints_b = int(descriptors_b.size(0))
+        full_attention_work_units = input_keypoints_a * input_keypoints_b * len(self.attention_layers)
+        attention_work_units = 0
         if desc_work_a.size(0) == 0 or desc_work_b.size(0) == 0:
             self.last_executed_attention_layers = 0
             pair_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
@@ -932,6 +939,7 @@ class PlanetaryGraphMatcher(nn.Module):
             raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b)
             self.last_executed_attention_layers = 0
             for layer in self.attention_layers:
+                attention_work_units += int(embed_a.size(0)) * int(embed_b.size(0))
                 embed_a, embed_b = layer(embed_a, embed_b)
                 self.last_executed_attention_layers += 1
                 can_adapt = self.last_executed_attention_layers < len(self.attention_layers)
@@ -1015,8 +1023,9 @@ class PlanetaryGraphMatcher(nn.Module):
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
         kept_keypoints_a = int(indices_a.numel())
         kept_keypoints_b = int(indices_b.numel())
-        input_keypoints_a = int(descriptors_a.size(0))
-        input_keypoints_b = int(descriptors_b.size(0))
+        attention_work_fraction = (
+            0.0 if full_attention_work_units == 0 else attention_work_units / full_attention_work_units
+        )
         return GraphMatcherOutput(
             logits.contiguous(),
             matches,
@@ -1029,6 +1038,9 @@ class PlanetaryGraphMatcher(nn.Module):
             kept_keypoints_b=kept_keypoints_b,
             pruned_keypoints_a=max(0, input_keypoints_a - kept_keypoints_a),
             pruned_keypoints_b=max(0, input_keypoints_b - kept_keypoints_b),
+            attention_work_units=attention_work_units,
+            full_attention_work_units=full_attention_work_units,
+            attention_work_fraction=float(attention_work_fraction),
         )
 
 

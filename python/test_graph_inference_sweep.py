@@ -81,9 +81,10 @@ class GraphInferenceSweepTest(unittest.TestCase):
                 "pair_pt,matches,correct,wrong,precision,"
                 "graph_executed_layers,graph_input_keypoints_a,graph_input_keypoints_b,"
                 "graph_kept_keypoints_a,graph_kept_keypoints_b,"
-                "graph_pruned_keypoints_a,graph_pruned_keypoints_b\n"
-                "a.pt,10,8,2,0.8,2,10,8,7,6,3,2\n"
-                "b.pt,5,5,0,1.0,4,20,18,16,15,4,3\n",
+                "graph_pruned_keypoints_a,graph_pruned_keypoints_b,"
+                "graph_attention_work_units,graph_full_attention_work_units,graph_attention_work_fraction\n"
+                "a.pt,10,8,2,0.8,2,10,8,7,6,3,2,10,20,0.5\n"
+                "b.pt,5,5,0,1.0,4,20,18,16,15,4,3,8,32,0.25\n",
                 encoding="utf-8",
             )
 
@@ -101,6 +102,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             self.assertAlmostEqual(summary.avg_kept_keypoints_a, 11.5)
             self.assertAlmostEqual(summary.avg_kept_keypoints_b, 10.5)
             self.assertAlmostEqual(summary.pruned_keypoint_fraction, 12 / 56)
+            self.assertAlmostEqual(summary.attention_work_fraction, 18 / 52)
 
             summary_csv = tmp_path / "summary.csv"
             report_html = tmp_path / "report.html"
@@ -112,12 +114,15 @@ class GraphInferenceSweepTest(unittest.TestCase):
             self.assertIn("avg_executed_layers", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("3.000", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("0.214286", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("attention_work_fraction", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("0.346154", summary_csv.read_text(encoding="utf-8"))
             html = report_html.read_text(encoding="utf-8")
             self.assertIn("<html", html)
             self.assertIn("high_precision", html)
             self.assertIn("严格图匹配", html)
             self.assertIn("平均执行层数", html)
             self.assertIn("剪枝比例", html)
+            self.assertIn("计算量比例", html)
 
 
 if __name__ == "__main__":
