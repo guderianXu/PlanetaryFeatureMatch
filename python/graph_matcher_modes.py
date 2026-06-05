@@ -27,6 +27,9 @@ class GraphMatcherModeConfig:
     graph_acceptance_margin: float = 0.0
     graph_min_raw_score: float = -1.0
     graph_min_raw_margin: float = 0.0
+    graph_inference_preset: str = "high_precision"
+    graph_min_accept_probability: float = -1.0
+    graph_fallback_mode: str = "mutual"
 
     def resolved_state_path(self, root: Path | str = ".") -> Path:
         state = Path(self.pytorch_state)
@@ -72,6 +75,12 @@ class GraphMatcherModeConfig:
             str(self.graph_min_raw_score),
             "--graph-min-raw-margin",
             str(self.graph_min_raw_margin),
+            "--graph-inference-preset",
+            self.graph_inference_preset,
+            "--graph-min-accept-probability",
+            str(self.graph_min_accept_probability),
+            "--graph-fallback-mode",
+            self.graph_fallback_mode,
         ]
 
     def report_args(self) -> list[str]:
@@ -94,6 +103,9 @@ _MODES: dict[str, GraphMatcherModeConfig] = {
         ),
         graph_min_raw_score=0.4,
         graph_min_raw_margin=0.01,
+        graph_inference_preset="fast",
+        graph_min_accept_probability=0.7,
+        graph_fallback_mode="mutual",
     ),
 }
 
