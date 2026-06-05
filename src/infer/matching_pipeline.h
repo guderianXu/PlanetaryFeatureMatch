@@ -26,6 +26,8 @@ struct GraphMatcherInferenceOptions
     int64_t max_attention_layers = 0;
     /// LightGlue 风格 attention 工作量预算；1 表示完整执行，0 表示跳过 attention 层。
     double max_attention_work_fraction = 1.0;
+    /// LightGlue 风格宽度保留比例；1 表示关闭，低于 1 时保留高置信点。
+    double width_prune_keep_ratio = 1.0;
     /// 图匹配输出后的回退策略；Geometry 表示继续 descriptor/top-k/几何回退，None 表示严格返回 graph 输出。
     GraphMatcherFallbackMode fallback_mode = GraphMatcherFallbackMode::Geometry;
 };

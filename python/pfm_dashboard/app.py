@@ -584,6 +584,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       </label>
       <label>匹配接受概率 <input type="number" name="graph_min_accept_probability" value="-1" min="-1" max="1" step="0.01"></label>
       <label>计算量预算 <input type="number" name="graph_max_attention_work_fraction" value="1" min="0" max="1" step="0.01"></label>
+      <label>宽度保留比例 <input type="number" name="graph_width_prune_keep_ratio" value="1" min="0" max="1" step="0.01"></label>
     </div>
     <div class="quick-presets">
       <button type="button" data-preset="smoke">冒烟测试</button>
@@ -799,6 +800,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_inference_preset=value("graph_inference_preset", "fast"),
             graph_min_accept_probability=float(value("graph_min_accept_probability", "-1")),
             graph_max_attention_work_fraction=float(value("graph_max_attention_work_fraction", "1")),
+            graph_width_prune_keep_ratio=float(value("graph_width_prune_keep_ratio", "1")),
         )
         try:
             generated = create_training_runs(request)

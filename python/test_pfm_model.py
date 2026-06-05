@@ -155,6 +155,43 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(output.full_attention_work_units, 75)
         self.assertAlmostEqual(output.attention_work_fraction, 57 / 75)
 
+    def test_graph_matcher_width_pruning_can_keep_top_ratio(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=5,
+            hidden_dim=16,
+            attention_layers=3,
+            keypoint_meta_dim=16,
+            candidate_topk=0,
+        )
+        with torch.no_grad():
+            for parameter in graph.accept_head.parameters():
+                parameter.zero_()
+            graph.accept_head[0].weight[0, 4] = 10.0
+            graph.accept_head[0].bias[0] = -7.5
+            graph.accept_head[2].weight[0, 0] = 4.0
+            graph.accept_head[2].bias[0] = -4.0
+        descriptors = torch.eye(5)
+        metadata = torch.zeros(5, 16)
+        metadata[:, 12] = torch.tensor([1.0, 0.9, 0.8, 0.7, 0.1])
+
+        output = graph(descriptors, metadata, descriptors, metadata, width_prune_keep_ratio=0.4)
+
+        self.assertEqual(tuple(output.logits.shape), (6, 6))
+        self.assertEqual(tuple(output.accept_logits.shape), (5, 5))
+        self.assertTrue(torch.any(output.accept_logits[:2, :2] > -100.0))
+        self.assertTrue(torch.all(output.accept_logits[2:, :] < -9000.0))
+        self.assertTrue(torch.all(output.accept_logits[:, 2:] < -9000.0))
+        self.assertEqual(output.executed_layers, 3)
+        self.assertEqual(output.input_keypoints_a, 5)
+        self.assertEqual(output.input_keypoints_b, 5)
+        self.assertEqual(output.kept_keypoints_a, 2)
+        self.assertEqual(output.kept_keypoints_b, 2)
+        self.assertEqual(output.pruned_keypoints_a, 3)
+        self.assertEqual(output.pruned_keypoints_b, 3)
+        self.assertEqual(output.attention_work_units, 33)
+        self.assertEqual(output.full_attention_work_units, 75)
+        self.assertAlmostEqual(output.attention_work_fraction, 33 / 75)
+
     def test_graph_matcher_can_stop_attention_layers_when_confident(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
         desc = torch.tensor([[1.0, 0.0], [0.0, 1.0]])

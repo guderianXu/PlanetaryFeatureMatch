@@ -20,6 +20,8 @@ class TrainingVisualReportTest(unittest.TestCase):
             "val",
             "--graph-max-attention-work-fraction",
             "0.55",
+            "--graph-width-prune-keep-ratio",
+            "0.4",
             "--no-pdf",
         ]
 
@@ -27,6 +29,7 @@ class TrainingVisualReportTest(unittest.TestCase):
             args = report.parse_args()
 
         self.assertEqual(args.graph_max_attention_work_fraction, 0.55)
+        self.assertEqual(args.graph_width_prune_keep_ratio, 0.4)
 
 
 if __name__ == "__main__":

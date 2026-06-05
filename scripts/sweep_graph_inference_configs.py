@@ -233,6 +233,8 @@ def build_eval_command(args: argparse.Namespace, config: GraphSweepConfig, outpu
             str(args.graph_max_attention_layers),
             "--graph-max-attention-work-fraction",
             f"{args.graph_max_attention_work_fraction:g}",
+            "--graph-width-prune-keep-ratio",
+            f"{args.graph_width_prune_keep_ratio:g}",
             "--graph-min-accept-probability",
             f"{config.accept_probability:g}",
             "--graph-inference-preset",
@@ -567,6 +569,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
+    parser.add_argument("--graph-width-prune-keep-ratio", type=float, default=1.0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -590,6 +593,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-max-attention-layers must be nonnegative")
     if args.graph_max_attention_work_fraction < 0.0 or args.graph_max_attention_work_fraction > 1.0:
         parser.error("--graph-max-attention-work-fraction must be in [0, 1]")
+    if args.graph_width_prune_keep_ratio < 0.0 or args.graph_width_prune_keep_ratio > 1.0:
+        parser.error("--graph-width-prune-keep-ratio must be in [0, 1]")
     try:
         parse_choice_list(args.presets, allowed=GRAPH_PRESETS, label="graph preset")
         parse_float_list(args.accept_probabilities)

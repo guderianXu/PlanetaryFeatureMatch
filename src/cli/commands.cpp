@@ -361,6 +361,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Maximum graph attention work fraction to execute; 1 uses the full checkpoint work")
         ->check(CLI::Range(0.0, 1.0));
     match
+        ->add_option("--graph-width-prune-keep-ratio", options.graph_width_prune_keep_ratio,
+                     "Graph matcher width pruning keep ratio; 1 disables top-ratio pruning")
+        ->check(CLI::Range(0.0, 1.0));
+    match
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,
                      "Graph matcher fallback mode after learned graph output: geometry or none")
         ->check(CLI::IsMember({"geometry", "none"}));
@@ -442,6 +446,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     eval
         ->add_option("--graph-max-attention-work-fraction", options.graph_max_attention_work_fraction,
                      "Maximum graph attention work fraction to execute; 1 uses the full checkpoint work")
+        ->check(CLI::Range(0.0, 1.0));
+    eval
+        ->add_option("--graph-width-prune-keep-ratio", options.graph_width_prune_keep_ratio,
+                     "Graph matcher width pruning keep ratio; 1 disables top-ratio pruning")
         ->check(CLI::Range(0.0, 1.0));
     eval
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,

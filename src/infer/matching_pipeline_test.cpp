@@ -178,6 +178,34 @@ static void matching_pipeline_forwards_attention_work_fraction_budget_to_v21_gra
     PFM_REQUIRE_CLOSE(matches.graph_attention_work_fraction, 0.5, 1.0e-6);
 }
 
+static void matching_pipeline_forwards_width_prune_keep_ratio_to_v21_graph_matcher()
+{
+    const auto keypoints =
+        torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}, {4.0F, 0.0F}},
+                      torch::kFloat32);
+    const auto descriptors = torch::eye(5, torch::kFloat32);
+    const auto features_a =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    const auto features_b =
+        makeFeatureSet(keypoints, descriptors, torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+    pfm::v21::PfmV21GraphMatcher matcher(5, 16, 3, 2, 0);
+    pfm::GraphMatcherInferenceOptions graph_options;
+    graph_options.width_prune_keep_ratio = 0.4;
+
+    const auto matches = pfm::matchFeatureSets(features_a, features_b, *matcher, graph_options);
+
+    PFM_REQUIRE(matches.graph_executed_layers == 3);
+    PFM_REQUIRE(matches.graph_input_keypoints_a == 5);
+    PFM_REQUIRE(matches.graph_input_keypoints_b == 5);
+    PFM_REQUIRE(matches.graph_kept_keypoints_a == 2);
+    PFM_REQUIRE(matches.graph_kept_keypoints_b == 2);
+    PFM_REQUIRE(matches.graph_pruned_keypoints_a == 3);
+    PFM_REQUIRE(matches.graph_pruned_keypoints_b == 3);
+    PFM_REQUIRE(matches.graph_attention_work_units == 33);
+    PFM_REQUIRE(matches.graph_full_attention_work_units == 75);
+    PFM_REQUIRE_CLOSE(matches.graph_attention_work_fraction, 33.0 / 75.0, 1.0e-6);
+}
+
 static void matching_pipeline_filters_graph_matches_by_accept_probability()
 {
     const auto keypoints = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
@@ -1156,6 +1184,8 @@ void register_matching_pipeline_tests()
                   matching_pipeline_forwards_max_attention_layers_to_v21_graph_matcher);
     register_test("matching_pipeline_forwards_attention_work_fraction_budget_to_v21_graph_matcher",
                   matching_pipeline_forwards_attention_work_fraction_budget_to_v21_graph_matcher);
+    register_test("matching_pipeline_forwards_width_prune_keep_ratio_to_v21_graph_matcher",
+                  matching_pipeline_forwards_width_prune_keep_ratio_to_v21_graph_matcher);
     register_test("matching_pipeline_filters_graph_matches_by_accept_probability",
                   matching_pipeline_filters_graph_matches_by_accept_probability);
     register_test("matching_pipeline_strict_graph_mode_skips_descriptor_fallback",

@@ -958,6 +958,7 @@ static void pipeline_graph_inference_preset_allows_numeric_override()
     options.graph_min_accept_probability = 0.65;
     options.graph_max_attention_layers = 2;
     options.graph_max_attention_work_fraction = 0.5;
+    options.graph_width_prune_keep_ratio = 0.4;
     options.graph_fallback_mode = "none";
 
     const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
@@ -967,6 +968,7 @@ static void pipeline_graph_inference_preset_allows_numeric_override()
     PFM_REQUIRE_CLOSE(graph_options.min_accept_probability, 0.65, 1.0e-12);
     PFM_REQUIRE(graph_options.max_attention_layers == 2);
     PFM_REQUIRE_CLOSE(graph_options.max_attention_work_fraction, 0.5, 1.0e-12);
+    PFM_REQUIRE_CLOSE(graph_options.width_prune_keep_ratio, 0.4, 1.0e-12);
     PFM_REQUIRE(graph_options.fallback_mode == pfm::GraphMatcherFallbackMode::None);
 }
 

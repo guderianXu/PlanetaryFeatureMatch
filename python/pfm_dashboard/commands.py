@@ -48,6 +48,7 @@ class TrainingRequest:
     graph_inference_preset: str = "fast"
     graph_min_accept_probability: float = -1.0
     graph_max_attention_work_fraction: float = 1.0
+    graph_width_prune_keep_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 <li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
 <li>graph_max_attention_work_fraction={request.graph_max_attention_work_fraction}</li>
+<li>graph_width_prune_keep_ratio={request.graph_width_prune_keep_ratio}</li>
 </ul>
 </body>
 </html>
@@ -190,6 +192,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
                 str(request.graph_min_accept_probability),
                 "--report-graph-max-attention-work-fraction",
                 str(request.graph_max_attention_work_fraction),
+                "--report-graph-width-prune-keep-ratio",
+                str(request.graph_width_prune_keep_ratio),
             ]
         )
     if request.max_train_batches > 0:
@@ -302,6 +306,8 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_min_accept_probability must be in [-1, 1]")
     if request.graph_max_attention_work_fraction < 0.0 or request.graph_max_attention_work_fraction > 1.0:
         raise ValueError("graph_max_attention_work_fraction must be in [0, 1]")
+    if request.graph_width_prune_keep_ratio < 0.0 or request.graph_width_prune_keep_ratio > 1.0:
+        raise ValueError("graph_width_prune_keep_ratio must be in [0, 1]")
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

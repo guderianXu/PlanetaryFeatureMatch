@@ -946,6 +946,38 @@ std::pair<torch::Tensor, torch::Tensor> PfmV21GraphMatcherImpl::acceptanceKeepMa
     return {keep_a, keep_b};
 }
 
+std::pair<torch::Tensor, torch::Tensor> PfmV21GraphMatcherImpl::acceptanceTopCountKeepMasks(
+    const torch::Tensor& accept_logits, int64_t keep_count_a, int64_t keep_count_b)
+{
+    if (accept_logits.numel() == 0)
+    {
+        auto keep_a = torch::zeros({accept_logits.size(0)},
+                                   torch::TensorOptions().device(accept_logits.device()).dtype(torch::kBool));
+        auto keep_b = torch::zeros({accept_logits.size(1)},
+                                   torch::TensorOptions().device(accept_logits.device()).dtype(torch::kBool));
+        return {keep_a, keep_b};
+    }
+
+    auto accept_probability = torch::sigmoid(accept_logits);
+    auto score_a = std::get<0>(accept_probability.max(1));
+    auto score_b = std::get<0>(accept_probability.max(0));
+
+    const auto top_mask = [](const torch::Tensor& scores, int64_t keep_count)
+    {
+        keep_count = std::min<int64_t>(scores.size(0), std::max<int64_t>(1, keep_count));
+        if (keep_count >= scores.size(0))
+        {
+            return torch::ones_like(scores, scores.options().dtype(torch::kBool));
+        }
+        auto top_indices = std::get<1>(scores.topk(keep_count, 0, true, false));
+        auto mask = torch::zeros_like(scores, scores.options().dtype(torch::kBool));
+        mask.index_put_({top_indices}, true);
+        return mask;
+    };
+
+    return {top_mask(score_a, keep_count_a), top_mask(score_b, keep_count_b)};
+}
+
 int64_t PfmV21GraphMatcherImpl::lastExecutedAttentionLayers() const
 {
     return _last_executed_attention_layers;
@@ -958,7 +990,8 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
                                                          bool apply_candidate_mask, double width_prune_min_score,
                                                          double early_stop_min_confidence,
                                                          int64_t max_attention_layers,
-                                                         double max_attention_work_fraction)
+                                                         double max_attention_work_fraction,
+                                                         double width_prune_keep_ratio)
 {
     using torch::indexing::Slice;
 
@@ -979,6 +1012,10 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     {
         throw std::invalid_argument("max_attention_work_fraction must be in [0, 1]");
     }
+    if (!std::isfinite(width_prune_keep_ratio) || width_prune_keep_ratio < 0.0 || width_prune_keep_ratio > 1.0)
+    {
+        throw std::invalid_argument("width_prune_keep_ratio must be in [0, 1]");
+    }
     if (descriptors_a.dim() != 2 || descriptors_b.dim() != 2)
     {
         throw std::invalid_argument("graph matcher descriptors must have shape NxD");
@@ -998,6 +1035,7 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
             .transpose(0, 1));
 
     const bool prune_enabled = width_prune_min_score > -1.0;
+    const bool ratio_prune_enabled = width_prune_keep_ratio < 1.0;
     torch::Tensor keep_a;
     torch::Tensor keep_b;
     if (prune_enabled)
@@ -1032,6 +1070,11 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
         static_cast<int64_t>(std::floor(static_cast<double>(full_attention_work_units) * max_attention_work_fraction +
                                         1.0e-9));
     const bool work_budget_enabled = max_attention_work_fraction < 1.0;
+    const int64_t keep_count_a =
+        std::max<int64_t>(1, static_cast<int64_t>(std::ceil(input_keypoints_a * width_prune_keep_ratio)));
+    const int64_t keep_count_b =
+        std::max<int64_t>(1, static_cast<int64_t>(std::ceil(input_keypoints_b * width_prune_keep_ratio)));
+    const bool restore_pruned_logits = prune_enabled || ratio_prune_enabled;
     int64_t attention_work_units = 0;
 
     torch::Tensor pair_logits;
@@ -1070,17 +1113,29 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
                 _last_executed_attention_layers < _attention_layer_count &&
                 (max_attention_layers <= 0 || _last_executed_attention_layers < max_attention_layers);
             const bool can_adapt = can_run_more_layers;
-            if (can_adapt && (prune_enabled || early_stop_min_confidence > -1.0))
+            if (can_adapt && (prune_enabled || ratio_prune_enabled || early_stop_min_confidence > -1.0))
             {
                 auto provisional_outputs = provisionalPairOutputs(embed_a, embed_b, raw_similarity, kp_work_a,
                                                                   kp_work_b);
                 auto provisional_pair_logits = provisional_outputs.first;
                 auto provisional_accept_logits = provisional_outputs.second;
-                if (prune_enabled)
+                if (prune_enabled || ratio_prune_enabled)
                 {
-                    auto keep_masks = acceptanceKeepMasks(provisional_accept_logits, width_prune_min_score);
-                    auto keep_work_a = keep_masks.first;
-                    auto keep_work_b = keep_masks.second;
+                    auto keep_work_a = torch::ones({embed_a.size(0)}, embed_a.options().dtype(torch::kBool));
+                    auto keep_work_b = torch::ones({embed_b.size(0)}, embed_b.options().dtype(torch::kBool));
+                    if (prune_enabled)
+                    {
+                        auto keep_masks = acceptanceKeepMasks(provisional_accept_logits, width_prune_min_score);
+                        keep_work_a = keep_work_a.logical_and(keep_masks.first);
+                        keep_work_b = keep_work_b.logical_and(keep_masks.second);
+                    }
+                    if (ratio_prune_enabled)
+                    {
+                        auto keep_masks =
+                            acceptanceTopCountKeepMasks(provisional_accept_logits, keep_count_a, keep_count_b);
+                        keep_work_a = keep_work_a.logical_and(keep_masks.first);
+                        keep_work_b = keep_work_b.logical_and(keep_masks.second);
+                    }
                     const bool has_a = keep_work_a.any().item<bool>();
                     const bool has_b = keep_work_b.any().item<bool>();
                     const bool keeps_all = keep_work_a.all().item<bool>() && keep_work_b.all().item<bool>();
@@ -1125,7 +1180,7 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
             pair_logits_work = pair_logits_work.masked_fill(mask.logical_not(), -1.0e4);
             accept_logits_work = accept_logits_work.masked_fill(mask.logical_not(), -1.0e4);
         }
-        if (prune_enabled)
+        if (restore_pruned_logits)
         {
             pair_logits = torch::full_like(raw_similarity_full, -1.0e4);
             accept_logits = torch::full_like(raw_similarity_full, -1.0e4);

@@ -685,6 +685,7 @@ GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& 
     }
     graph_options.max_attention_layers = options.graph_max_attention_layers;
     graph_options.max_attention_work_fraction = options.graph_max_attention_work_fraction;
+    graph_options.width_prune_keep_ratio = options.graph_width_prune_keep_ratio;
     if (options.graph_fallback_mode == "geometry")
     {
         graph_options.fallback_mode = GraphMatcherFallbackMode::Geometry;

@@ -323,12 +323,14 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     /// @param early_stop_min_confidence LightGlue 风格深度提前停止阈值；-1 表示关闭。
     /// @param max_attention_layers LightGlue 风格深度预算硬上限；0 表示执行完整层数。
     /// @param max_attention_work_fraction LightGlue 风格 attention 工作量预算；1 表示完整执行。
+    /// @param width_prune_keep_ratio LightGlue 风格宽度保留比例；1 表示关闭，低于 1 时保留高置信点。
     /// @return 匹配 logits、互选匹配、概率和接受 logits。
     PfmV21GraphMatcherOutput forward(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
                                      const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
                                      bool apply_candidate_mask = true, double width_prune_min_score = -1.0,
                                      double early_stop_min_confidence = -1.0, int64_t max_attention_layers = 0,
-                                     double max_attention_work_fraction = 1.0);
+                                     double max_attention_work_fraction = 1.0,
+                                     double width_prune_keep_ratio = 1.0);
 
     /// 返回上一次 forward 实际执行的 attention 层数，便于调试 early stopping。
     int64_t lastExecutedAttentionLayers() const;
@@ -350,6 +352,9 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     static torch::Tensor assignmentConfidence(const torch::Tensor& pair_logits);
     static std::pair<torch::Tensor, torch::Tensor> acceptanceKeepMasks(const torch::Tensor& accept_logits,
                                                                        double min_probability);
+    static std::pair<torch::Tensor, torch::Tensor> acceptanceTopCountKeepMasks(const torch::Tensor& accept_logits,
+                                                                               int64_t keep_count_a,
+                                                                               int64_t keep_count_b);
 
     int64_t _descriptor_dim;
     int64_t _hidden_dim;

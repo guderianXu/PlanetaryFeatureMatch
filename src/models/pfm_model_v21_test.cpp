@@ -261,6 +261,70 @@ static void pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance()
     PFM_REQUIRE_CLOSE(output.attention_work_fraction, 57.0 / 75.0, 1.0e-6);
 }
 
+static void pfm_v21_graph_matcher_width_pruning_can_keep_top_ratio()
+{
+    using torch::indexing::Slice;
+
+    auto matcher = pfm::v21::PfmV21GraphMatcher(5, 16, 3, 16, 0);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key().rfind("accept_head.", 0) == 0)
+        {
+            parameter.value().zero_();
+        }
+    }
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key() == "accept_head.0.weight")
+        {
+            parameter.value().index_put_({0, 4}, 10.0F);
+        }
+        if (parameter.key() == "accept_head.0.bias")
+        {
+            parameter.value().index_put_({0}, -7.5F);
+        }
+        if (parameter.key() == "accept_head.2.weight")
+        {
+            parameter.value().index_put_({0, 0}, 4.0F);
+        }
+        if (parameter.key() == "accept_head.2.bias")
+        {
+            parameter.value().index_put_({0}, -4.0F);
+        }
+    }
+
+    auto descriptors = torch::eye(5, torch::kFloat32);
+    auto metadata = torch::zeros({5, 16}, torch::kFloat32);
+    metadata.index_put_({Slice(), 12}, torch::tensor({1.0F, 0.9F, 0.8F, 0.7F, 0.1F}));
+
+    const auto output = matcher->forward(descriptors, metadata, descriptors, metadata, true, -1.0, -1.0, 0, 1.0, 0.4);
+
+    PFM_REQUIRE(output.logits.sizes() == torch::IntArrayRef({6, 6}));
+    PFM_REQUIRE(output.accept_logits.sizes() == torch::IntArrayRef({5, 5}));
+    const bool kept_block_has_scores =
+        (output.accept_logits.index({Slice(0, 2), Slice(0, 2)}) > -100.0F).any().item<bool>();
+    const bool pruned_rows_are_suppressed =
+        (output.accept_logits.index({Slice(2, 5), Slice()}) < -9000.0F).all().item<bool>();
+    const bool pruned_cols_are_suppressed =
+        (output.accept_logits.index({Slice(), Slice(2, 5)}) < -9000.0F).all().item<bool>();
+    PFM_REQUIRE(kept_block_has_scores);
+    PFM_REQUIRE(pruned_rows_are_suppressed);
+    PFM_REQUIRE(pruned_cols_are_suppressed);
+    PFM_REQUIRE(output.executed_layers == 3);
+    PFM_REQUIRE(output.input_keypoints_a == 5);
+    PFM_REQUIRE(output.input_keypoints_b == 5);
+    PFM_REQUIRE(output.kept_keypoints_a == 2);
+    PFM_REQUIRE(output.kept_keypoints_b == 2);
+    PFM_REQUIRE(output.pruned_keypoints_a == 3);
+    PFM_REQUIRE(output.pruned_keypoints_b == 3);
+    PFM_REQUIRE(output.attention_work_units == 33);
+    PFM_REQUIRE(output.full_attention_work_units == 75);
+    PFM_REQUIRE_CLOSE(output.attention_work_fraction, 33.0 / 75.0, 1.0e-6);
+}
+
 static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 3, 4);
@@ -409,6 +473,8 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_width_pruning_restores_full_logits);
     register_test("pfm v21 graph matcher width pruning uses layer acceptance",
                   pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance);
+    register_test("pfm v21 graph matcher width pruning can keep top ratio",
+                  pfm_v21_graph_matcher_width_pruning_can_keep_top_ratio);
     register_test("pfm v21 graph matcher can stop attention layers when confident",
                   pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
     register_test("pfm v21 graph matcher respects max attention layers",

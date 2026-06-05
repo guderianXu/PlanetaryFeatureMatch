@@ -48,6 +48,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             graph_min_raw_margin=0.0,
             graph_max_attention_layers=2,
             graph_max_attention_work_fraction=0.5,
+            graph_width_prune_keep_ratio=0.4,
             min_target_gradient=0.0,
             min_target_local_contrast=0.0,
             limit_pairs=16,
@@ -72,6 +73,8 @@ class GraphInferenceSweepTest(unittest.TestCase):
         self.assertIn("2", command)
         self.assertIn("--graph-max-attention-work-fraction", command)
         self.assertIn("0.5", command)
+        self.assertIn("--graph-width-prune-keep-ratio", command)
+        self.assertIn("0.4", command)
         self.assertIn("--graph-fallback-mode", command)
         self.assertIn("none", command)
         self.assertIn("--sample-seed", command)

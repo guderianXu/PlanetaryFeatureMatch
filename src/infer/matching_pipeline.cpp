@@ -164,13 +164,18 @@ void validateGraphMatcherInferenceOptions(const GraphMatcherInferenceOptions& gr
     {
         throw std::invalid_argument("graph max attention work fraction must be in [0, 1]");
     }
+    if (!std::isfinite(graph_options.width_prune_keep_ratio) || graph_options.width_prune_keep_ratio < 0.0 ||
+        graph_options.width_prune_keep_ratio > 1.0)
+    {
+        throw std::invalid_argument("graph width prune keep ratio must be in [0, 1]");
+    }
 }
 
 bool hasLightGlueGraphOptions(const GraphMatcherInferenceOptions& graph_options)
 {
     return graph_options.width_prune_min_score > -1.0 || graph_options.early_stop_min_confidence > -1.0 ||
            graph_options.min_accept_probability > -1.0 || graph_options.max_attention_layers > 0 ||
-           graph_options.max_attention_work_fraction < 1.0;
+           graph_options.max_attention_work_fraction < 1.0 || graph_options.width_prune_keep_ratio < 1.0;
 }
 
 PlanetaryGraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
@@ -192,7 +197,8 @@ v21::PfmV21GraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a
 {
     return matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b, true,
                            graph_options.width_prune_min_score, graph_options.early_stop_min_confidence,
-                           graph_options.max_attention_layers, graph_options.max_attention_work_fraction);
+                           graph_options.max_attention_layers, graph_options.max_attention_work_fraction,
+                           graph_options.width_prune_keep_ratio);
 }
 
 GraphInferenceTelemetry graphTelemetry(const PlanetaryGraphMatcherOutput&)

@@ -44,6 +44,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_inference_preset"', train_html)
                 self.assertIn('name="graph_min_accept_probability"', train_html)
                 self.assertIn('name="graph_max_attention_work_fraction"', train_html)
+                self.assertIn('name="graph_width_prune_keep_ratio"', train_html)
                 self.assertIn("LightGlue 快速剪枝", train_html)
                 self.assertNotIn("Python + C++ 对比", train_html)
                 self.assertNotIn('name="align_python_compare"', train_html)
@@ -103,6 +104,7 @@ class DashboardAppTest(unittest.TestCase):
                     "backend": "cpp",
                     "cache_dirs": str(cache),
                     "graph_max_attention_work_fraction": "0.55",
+                    "graph_width_prune_keep_ratio": "0.4",
                 }
                 data = urllib.parse.urlencode(form).encode("utf-8")
                 urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
@@ -113,6 +115,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--train-backbone", script)
                 self.assertIn("--train-graph-matcher", script)
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
+                self.assertIn("graph_width_prune_keep_ratio=0.4", report)
             finally:
                 server.shutdown()
                 server.server_close()

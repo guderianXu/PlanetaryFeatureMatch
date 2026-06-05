@@ -887,6 +887,31 @@ class PlanetaryGraphMatcher(nn.Module):
         keep_b = accept_probability.max(dim=0).values >= float(min_probability)
         return keep_a, keep_b
 
+    @staticmethod
+    def _acceptance_top_count_keep_masks(
+        accept_logits: torch.Tensor,
+        keep_count_a: int,
+        keep_count_b: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if accept_logits.numel() == 0:
+            keep_a = torch.zeros(accept_logits.size(0), dtype=torch.bool, device=accept_logits.device)
+            keep_b = torch.zeros(accept_logits.size(1), dtype=torch.bool, device=accept_logits.device)
+            return keep_a, keep_b
+        accept_probability = torch.sigmoid(accept_logits)
+        score_a = accept_probability.max(dim=1).values
+        score_b = accept_probability.max(dim=0).values
+
+        def top_mask(scores: torch.Tensor, keep_count: int) -> torch.Tensor:
+            keep_count = min(int(scores.numel()), max(1, int(keep_count)))
+            if keep_count >= int(scores.numel()):
+                return torch.ones_like(scores, dtype=torch.bool)
+            top_indices = torch.topk(scores, keep_count, largest=True, sorted=False).indices
+            mask = torch.zeros_like(scores, dtype=torch.bool)
+            mask[top_indices] = True
+            return mask
+
+        return top_mask(score_a, keep_count_a), top_mask(score_b, keep_count_b)
+
     def forward(
         self,
         descriptors_a: torch.Tensor,
@@ -898,6 +923,7 @@ class PlanetaryGraphMatcher(nn.Module):
         early_stop_min_confidence: float = -1.0,
         max_attention_layers: int = 0,
         max_attention_work_fraction: float = 1.0,
+        width_prune_keep_ratio: float = 1.0,
     ) -> GraphMatcherOutput:
         if early_stop_min_confidence < -1.0:
             raise ValueError("early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
@@ -905,6 +931,12 @@ class PlanetaryGraphMatcher(nn.Module):
             raise ValueError("max_attention_layers must be nonnegative; 0 disables hard layer budget")
         if max_attention_work_fraction < 0.0 or max_attention_work_fraction > 1.0:
             raise ValueError("max_attention_work_fraction must be in [0, 1]")
+        if (
+            not math.isfinite(float(width_prune_keep_ratio))
+            or width_prune_keep_ratio < 0.0
+            or width_prune_keep_ratio > 1.0
+        ):
+            raise ValueError("width_prune_keep_ratio must be in [0, 1]")
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
         if descriptors_a.size(0) != keypoints_a.size(0) or descriptors_b.size(0) != keypoints_b.size(0):
@@ -915,6 +947,7 @@ class PlanetaryGraphMatcher(nn.Module):
         kp_b = self._metadata(keypoints_b).to(device=desc_b.device)
         raw_similarity_full = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
         prune_enabled = float(width_prune_min_score) > -1.0
+        ratio_prune_enabled = float(width_prune_keep_ratio) < 1.0
         if prune_enabled:
             if raw_similarity_full.numel() == 0:
                 keep_a = torch.zeros(desc_a.size(0), dtype=torch.bool, device=desc_a.device)
@@ -936,6 +969,9 @@ class PlanetaryGraphMatcher(nn.Module):
         full_attention_work_units = input_keypoints_a * input_keypoints_b * len(self.attention_layers)
         max_attention_work_units = int(math.floor(full_attention_work_units * float(max_attention_work_fraction) + 1.0e-9))
         work_budget_enabled = float(max_attention_work_fraction) < 1.0
+        keep_count_a = max(1, int(math.ceil(input_keypoints_a * float(width_prune_keep_ratio))))
+        keep_count_b = max(1, int(math.ceil(input_keypoints_b * float(width_prune_keep_ratio))))
+        restore_pruned_logits = prune_enabled or ratio_prune_enabled
         attention_work_units = 0
         if desc_work_a.size(0) == 0 or desc_work_b.size(0) == 0:
             self.last_executed_attention_layers = 0
@@ -959,7 +995,7 @@ class PlanetaryGraphMatcher(nn.Module):
                     max_attention_layers <= 0 or self.last_executed_attention_layers < int(max_attention_layers)
                 )
                 can_adapt = can_run_more_layers
-                if can_adapt and (prune_enabled or early_stop_min_confidence > -1.0):
+                if can_adapt and (prune_enabled or ratio_prune_enabled or early_stop_min_confidence > -1.0):
                     provisional_pair_logits, provisional_accept_logits = self._provisional_pair_outputs(
                         embed_a,
                         embed_b,
@@ -967,11 +1003,24 @@ class PlanetaryGraphMatcher(nn.Module):
                         kp_work_a,
                         kp_work_b,
                     )
-                    if prune_enabled:
-                        keep_work_a, keep_work_b = self._acceptance_keep_masks(
-                            provisional_accept_logits,
-                            float(width_prune_min_score),
-                        )
+                    if prune_enabled or ratio_prune_enabled:
+                        keep_work_a = torch.ones(embed_a.size(0), dtype=torch.bool, device=embed_a.device)
+                        keep_work_b = torch.ones(embed_b.size(0), dtype=torch.bool, device=embed_b.device)
+                        if prune_enabled:
+                            threshold_keep_a, threshold_keep_b = self._acceptance_keep_masks(
+                                provisional_accept_logits,
+                                float(width_prune_min_score),
+                            )
+                            keep_work_a = keep_work_a & threshold_keep_a
+                            keep_work_b = keep_work_b & threshold_keep_b
+                        if ratio_prune_enabled:
+                            ratio_keep_a, ratio_keep_b = self._acceptance_top_count_keep_masks(
+                                provisional_accept_logits,
+                                keep_count_a,
+                                keep_count_b,
+                            )
+                            keep_work_a = keep_work_a & ratio_keep_a
+                            keep_work_b = keep_work_b & ratio_keep_b
                         if bool(keep_work_a.any()) and bool(keep_work_b.any()) and (
                             not bool(keep_work_a.all()) or not bool(keep_work_b.all())
                         ):
@@ -1006,7 +1055,7 @@ class PlanetaryGraphMatcher(nn.Module):
                 candidate_mask = self._candidate_mask(desc_work_a, desc_work_b)
                 pair_logits_work = pair_logits_work.masked_fill(~candidate_mask, -1.0e4)
                 accept_logits_work = accept_logits_work.masked_fill(~candidate_mask, -1.0e4)
-            if prune_enabled:
+            if restore_pruned_logits:
                 pair_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
                 accept_logits = raw_similarity_full.new_full(raw_similarity_full.shape, -1.0e4)
                 pair_logits[indices_a[:, None], indices_b[None, :]] = pair_logits_work
