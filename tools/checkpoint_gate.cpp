@@ -1,6 +1,7 @@
 #include "checkpoint_gate/checkpoint_gate.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -37,6 +38,7 @@ struct Options
     bool disable_descriptor_orientation_canonicalization = false;
     double min_keypoint_intensity = 0.08;
     double match_threshold_pixels = 5.0;
+    double max_graph_attention_work_fraction = 1.0;
     std::vector<GateCase> cases;
 };
 
@@ -125,6 +127,16 @@ Options parseOptions(int argc, char** argv)
         {
             options.match_threshold_pixels = std::stod(requireValue(index, argc, argv, "--match-threshold-pixels"));
         }
+        else if (arg == "--max-graph-work")
+        {
+            options.max_graph_attention_work_fraction = std::stod(requireValue(index, argc, argv, "--max-graph-work"));
+            if (!std::isfinite(options.max_graph_attention_work_fraction) ||
+                options.max_graph_attention_work_fraction < 0.0 ||
+                options.max_graph_attention_work_fraction > 1.0)
+            {
+                throw std::invalid_argument("--max-graph-work must be in [0, 1]");
+            }
+        }
         else if (arg == "--case")
         {
             if (index + 6 >= argc)
@@ -143,7 +155,8 @@ Options parseOptions(int argc, char** argv)
         else if (arg == "-h" || arg == "--help")
         {
             std::cout << "Usage: pfm_checkpoint_gate --checkpoint model.pt --pfm-cli ./pfm_cli --case "
-                         "name image_a image_b warp min_correct min_precision [--case ...]\n";
+                         "name image_a image_b warp min_correct min_precision [--case ...] "
+                         "[--max-graph-work 1.0]\n";
             std::exit(0);
         }
         else
@@ -217,11 +230,15 @@ int main(int argc, char** argv)
         {
             const auto output = runCommandCapture(buildMatchCommand(options, test_case));
             const auto metrics = pfm::parse_checkpoint_gate_metrics(output);
-            const auto decision = pfm::evaluate_checkpoint_gate_metrics(metrics, test_case.threshold);
+            auto threshold = test_case.threshold;
+            threshold.max_graph_attention_work_fraction = options.max_graph_attention_work_fraction;
+            const auto decision = pfm::evaluate_checkpoint_gate_metrics(metrics, threshold);
             std::cout << test_case.name << " correct_matches=" << metrics.correct_matches
                       << " wrong_matches=" << metrics.wrong_matches << " match_precision=" << metrics.precision
-                      << " required_correct=" << test_case.threshold.min_correct_matches
-                      << " required_precision=" << test_case.threshold.min_precision
+                      << " graph_work=" << metrics.graph_attention_work_fraction
+                      << " required_correct=" << threshold.min_correct_matches
+                      << " required_precision=" << threshold.min_precision
+                      << " max_graph_work=" << threshold.max_graph_attention_work_fraction
                       << " status=" << (decision.passed ? "PASS" : "FAIL");
             if (!decision.passed)
             {
