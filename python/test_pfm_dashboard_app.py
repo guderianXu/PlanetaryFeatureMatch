@@ -49,6 +49,9 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_min_accept_probability"', train_html)
                 self.assertIn('name="graph_max_attention_work_fraction"', train_html)
                 self.assertIn('name="graph_width_prune_keep_ratio"', train_html)
+                self.assertIn('name="graph_matcher_no_match_points"', train_html)
+                self.assertIn('name="graph_matcher_no_match_weight"', train_html)
+                self.assertIn('name="graph_matcher_no_match_min_distance"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_weight"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_margin"', train_html)
                 self.assertIn("LightGlue 快速剪枝", train_html)
@@ -113,6 +116,9 @@ class DashboardAppTest(unittest.TestCase):
                     "cache_dirs": str(cache),
                     "graph_max_attention_work_fraction": "0.55",
                     "graph_width_prune_keep_ratio": "0.4",
+                    "graph_matcher_no_match_points": "24",
+                    "graph_matcher_no_match_weight": "0.1",
+                    "graph_matcher_no_match_min_distance": "6.0",
                 }
                 data = urllib.parse.urlencode(form).encode("utf-8")
                 urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
@@ -122,7 +128,10 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--training-profile full", script)
                 self.assertIn("--train-backbone", script)
                 self.assertIn("--train-graph-matcher", script)
+                self.assertIn("--graph-matcher-no-match-points 24", script)
+                self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
+                self.assertIn("graph_matcher_no_match_points=24", report)
                 self.assertIn("graph_width_prune_keep_ratio=0.4", report)
             finally:
                 server.shutdown()

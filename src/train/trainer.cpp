@@ -389,6 +389,15 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_accept_negative_topk must be non-negative");
     }
+    if (config.graph_matcher_no_match_points < 0)
+    {
+        throw std::invalid_argument("graph_matcher_no_match_points must be non-negative");
+    }
+    if (!std::isfinite(config.graph_matcher_no_match_min_distance) ||
+        config.graph_matcher_no_match_min_distance < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_no_match_min_distance must be non-negative and finite");
+    }
     if (!std::isfinite(config.graph_matcher_prune_ranking_weight) ||
         config.graph_matcher_prune_ranking_weight < 0.0)
     {
@@ -4361,6 +4370,43 @@ PythonCompareSample sample_python_compare_correspondences(const torch::Tensor& v
         scale_image_points_to_feature_grid(points_b_image, image_height, image_width, feature_height, feature_width)};
 }
 
+torch::Tensor sample_python_compare_unmatched_feature_points(int64_t feature_height, int64_t feature_width,
+                                                             const torch::Tensor& reference_points, int64_t count,
+                                                             double min_distance,
+                                                             std::optional<at::Generator>& generator)
+{
+    if (count <= 0)
+    {
+        return reference_points.new_empty({0, 2});
+    }
+    if (feature_height <= 0 || feature_width <= 0)
+    {
+        throw std::invalid_argument("feature size must be positive");
+    }
+    const int64_t total = feature_height * feature_width;
+    if (total <= 0)
+    {
+        return reference_points.new_empty({0, 2});
+    }
+
+    const int64_t candidate_count = std::min<int64_t>(total, std::max<int64_t>(count * 32, count + 128));
+    auto flat = randperm_with_training_generator(
+                    total, torch::TensorOptions().dtype(torch::kLong).device(reference_points.device()), generator)
+                    .narrow(0, 0, candidate_count);
+    auto y = torch::floor_divide(flat, feature_width).to(torch::kFloat32);
+    auto x = flat.remainder(feature_width).to(torch::kFloat32);
+    auto candidates = torch::stack({x, y}, 1);
+    if (reference_points.numel() > 0 && min_distance > 0.0)
+    {
+        auto refs = reference_points.to(torch::TensorOptions().device(candidates.device()).dtype(torch::kFloat32));
+        auto distances = torch::cdist(candidates, refs);
+        auto keep = std::get<0>(distances.min(1)).ge(min_distance);
+        candidates = candidates.index({keep});
+    }
+    const auto take = std::min<int64_t>(count, candidates.size(0));
+    return candidates.narrow(0, 0, take).contiguous();
+}
+
 DescriptorTrainingMetrics make_python_compare_descriptor_metrics(const torch::Tensor& desc_a,
                                                                  const torch::Tensor& desc_b, double temperature)
 {
@@ -4481,6 +4527,24 @@ torch::Tensor make_python_compare_graph_acceptance_loss(const v21::PfmV21GraphMa
         auto hard_logits = accept_square.gather(1, hard_indices);
         terms.push_back(binary_cross_entropy_with_logits_mean(hard_logits, torch::zeros_like(hard_logits)));
     }
+    if (output.accept_logits.size(1) > count)
+    {
+        auto no_match_ab = output.accept_logits.narrow(0, 0, count)
+                                .narrow(1, count, output.accept_logits.size(1) - count);
+        if (no_match_ab.numel() > 0)
+        {
+            terms.push_back(binary_cross_entropy_with_logits_mean(no_match_ab, torch::zeros_like(no_match_ab)));
+        }
+    }
+    if (output.accept_logits.size(0) > count)
+    {
+        auto no_match_ba = output.accept_logits.narrow(0, count, output.accept_logits.size(0) - count)
+                                .narrow(1, 0, count);
+        if (no_match_ba.numel() > 0)
+        {
+            terms.push_back(binary_cross_entropy_with_logits_mean(no_match_ba, torch::zeros_like(no_match_ba)));
+        }
+    }
     return torch::stack(terms).mean();
 }
 
@@ -4593,14 +4657,16 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     {
         return torch::zeros({}, desc_a.options());
     }
+    if (points_a.size(0) < desc_a.size(0) || points_b.size(0) < desc_b.size(0))
+    {
+        throw std::invalid_argument("python compare graph loss points must cover all descriptors");
+    }
     const auto count = std::min<int64_t>(desc_a.size(0), desc_b.size(0));
-    auto limited_desc_a = desc_a.narrow(0, 0, count);
-    auto limited_desc_b = desc_b.narrow(0, 0, count);
-    auto limited_points_a = points_a.narrow(0, 0, count);
-    auto limited_points_b = points_b.narrow(0, 0, count);
-    auto meta_a = make_python_compare_graph_metadata(limited_points_a, meta_dim).to(desc_a.device());
-    auto meta_b = make_python_compare_graph_metadata(limited_points_b, meta_dim).to(desc_b.device());
-    auto output = graph_matcher.forward(limited_desc_a, meta_a, limited_desc_b, meta_b, false);
+    auto meta_a =
+        make_python_compare_graph_metadata(points_a.narrow(0, 0, desc_a.size(0)), meta_dim).to(desc_a.device());
+    auto meta_b =
+        make_python_compare_graph_metadata(points_b.narrow(0, 0, desc_b.size(0)), meta_dim).to(desc_b.device());
+    auto output = graph_matcher.forward(desc_a, meta_a, desc_b, meta_b, false);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -4610,8 +4676,7 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     if (accept_weight > 0.0)
     {
         loss = loss + static_cast<float>(accept_weight) *
-                          make_python_compare_graph_acceptance_loss(output, limited_desc_a, limited_desc_b, count,
-                                                                    accept_negative_topk);
+                          make_python_compare_graph_acceptance_loss(output, desc_a, desc_b, count, accept_negative_topk);
     }
     if (prune_ranking_weight > 0.0)
     {
@@ -4669,9 +4734,35 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
         counts.push_back(torch::full({}, static_cast<float>(sample.points_a.size(0)), sparse_a.descriptors.options()));
         if (use_graph_loss)
         {
+            auto graph_desc_a = normalize_python_descriptor_rows(desc_a);
+            auto graph_desc_b = normalize_python_descriptor_rows(desc_b);
+            auto graph_points_a = sample.points_a;
+            auto graph_points_b = sample.points_b;
+            if (config.graph_matcher_no_match_points > 0 && config.graph_matcher_accept_weight > 0.0)
+            {
+                auto no_match_a = sample_python_compare_unmatched_feature_points(
+                    sparse_a.descriptors.size(2), sparse_a.descriptors.size(3), sample.points_a,
+                    config.graph_matcher_no_match_points, config.graph_matcher_no_match_min_distance, generator);
+                auto no_match_b = sample_python_compare_unmatched_feature_points(
+                    sparse_b.descriptors.size(2), sparse_b.descriptors.size(3), sample.points_b,
+                    config.graph_matcher_no_match_points, config.graph_matcher_no_match_min_distance, generator);
+                if (no_match_a.numel() > 0)
+                {
+                    auto no_match_desc_a = sample_python_descriptor_points(
+                        sparse_a.descriptors.index({batch}).unsqueeze(0), no_match_a.to(sample.points_a.device()));
+                    graph_desc_a = torch::cat({graph_desc_a, normalize_python_descriptor_rows(no_match_desc_a)}, 0);
+                    graph_points_a = torch::cat({graph_points_a, no_match_a.to(sample.points_a.device())}, 0);
+                }
+                if (no_match_b.numel() > 0)
+                {
+                    auto no_match_desc_b = sample_python_descriptor_points(
+                        sparse_b.descriptors.index({batch}).unsqueeze(0), no_match_b.to(sample.points_b.device()));
+                    graph_desc_b = torch::cat({graph_desc_b, normalize_python_descriptor_rows(no_match_desc_b)}, 0);
+                    graph_points_b = torch::cat({graph_points_b, no_match_b.to(sample.points_b.device())}, 0);
+                }
+            }
             graph_losses.push_back(make_python_compare_graph_loss(
-                *modules.graph_matcher, normalize_python_descriptor_rows(desc_a),
-                normalize_python_descriptor_rows(desc_b), sample.points_a, sample.points_b,
+                *modules.graph_matcher, graph_desc_a, graph_desc_b, graph_points_a, graph_points_b,
                 config.graph_keypoint_meta_dim, config.graph_matcher_accept_weight,
                 config.graph_matcher_accept_negative_topk, config.graph_matcher_prune_ranking_weight,
                 config.graph_matcher_prune_ranking_margin, config.graph_matcher_stop_confidence_weight,

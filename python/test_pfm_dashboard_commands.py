@@ -19,6 +19,9 @@ class DashboardCommandsTest(unittest.TestCase):
                 resize=512,
                 training_crop_size=512,
                 learning_rate=3.0e-5,
+                graph_matcher_no_match_points=32,
+                graph_matcher_no_match_weight=0.1,
+                graph_matcher_no_match_min_distance=5.0,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
                 graph_min_accept_probability=0.7,
@@ -37,6 +40,9 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--training-crop-size 512", script)
         self.assertIn("--training-max-image-size 512", script)
         self.assertIn("--learning-rate 3e-05", script)
+        self.assertIn("--graph-matcher-no-match-points 32", script)
+        self.assertIn("--graph-matcher-no-match-weight 0.1", script)
+        self.assertIn("--graph-matcher-no-match-min-distance 5.0", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--generate-training-report", script)
@@ -49,6 +55,8 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--report-graph-width-prune-keep-ratio 0.4", script)
         self.assertIn("graph_max_attention_work_fraction=0.55", run_html)
         self.assertIn("graph_width_prune_keep_ratio=0.4", run_html)
+        self.assertIn("graph_matcher_no_match_points=32", run_html)
+        self.assertIn("graph_matcher_no_match_weight=0.1", run_html)
         self.assertIn("graph_matcher_stop_confidence_weight=0.07", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
@@ -79,6 +87,8 @@ class DashboardCommandsTest(unittest.TestCase):
                 device="cuda",
                 full_v21=True,
                 memory_cache_items=16,
+                graph_matcher_no_match_points=24,
+                graph_matcher_no_match_min_distance=6.0,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
             )
@@ -94,6 +104,8 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--memory-cache-items 16", script)
         self.assertIn("--training-crop-size 512", script)
         self.assertIn("--weight-decay 0.0001", script)
+        self.assertIn("--graph-matcher-no-match-points 24", script)
+        self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
         self.assertIn("--train-backbone", script)

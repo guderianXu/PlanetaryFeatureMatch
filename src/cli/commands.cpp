@@ -150,6 +150,12 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--graph-matcher-accept-negative-topk", options.graph_matcher_accept_negative_topk,
                       "Python-compatible graph accept hard negative count")
         ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-no-match-points", options.graph_matcher_no_match_points,
+                      "Python-compatible LightGlue matchability no-match points per pair")
+        ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-no-match-min-distance", options.graph_matcher_no_match_min_distance,
+                      "Minimum feature-grid distance between graph no-match negatives and positives")
+        ->check(CLI::NonNegativeNumber);
     train->add_option("--graph-matcher-prune-ranking-weight", options.graph_matcher_prune_ranking_weight,
                       "Python-compatible LightGlue-style graph pruning ranking loss weight")
         ->check(CLI::NonNegativeNumber);

@@ -417,6 +417,8 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE(config.graph_keypoint_meta_dim == 16);
     PFM_REQUIRE(config.training_profile == "full");
     PFM_REQUIRE_CLOSE(config.graph_matcher_accept_weight, 0.2, 1.0e-12);
+    PFM_REQUIRE(config.graph_matcher_no_match_points == 0);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_no_match_min_distance, 4.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_weight, 0.1, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_stop_confidence_weight, 0.05, 1.0e-12);
@@ -674,6 +676,14 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument()
     auto invalid_pairs_per_image = config;
     invalid_pairs_per_image.pairs_per_image = 0;
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_pairs_per_image));
+
+    auto invalid_no_match_points = config;
+    invalid_no_match_points.graph_matcher_no_match_points = -1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_no_match_points));
+
+    auto invalid_no_match_distance = config;
+    invalid_no_match_distance.graph_matcher_no_match_min_distance = -1.0;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_no_match_distance));
 
     auto invalid_training_profile = config;
     invalid_training_profile.training_profile = "wide-open";
@@ -1784,6 +1794,37 @@ static void trainer_python_compare_graph_loss_can_train_accept_head()
         }
     }
     PFM_REQUIRE(saw_accept_grad);
+}
+
+static void trainer_python_compare_graph_loss_penalizes_unmatched_accept_logits()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 0);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key().rfind("accept_head.", 0) == 0)
+        {
+            parameter.value().zero_();
+        }
+        if (parameter.key() == "accept_head.2.bias")
+        {
+            parameter.value().fill_(4.0F);
+        }
+    }
+
+    auto descriptors_balanced = torch::eye(1, 8, torch::kFloat32);
+    auto descriptors_extra = torch::eye(2, 8, torch::kFloat32);
+    auto points_balanced = torch::tensor({{0.0F, 0.0F}}, torch::kFloat32);
+    auto points_extra = torch::tensor({{0.0F, 0.0F}, {2.0F, 0.0F}}, torch::kFloat32);
+
+    const auto balanced_loss = pfm::testing::make_python_compare_graph_loss_for_test(
+        *matcher, descriptors_balanced, descriptors_balanced, points_balanced, points_balanced, 16, 1.0);
+    const auto extra_loss = pfm::testing::make_python_compare_graph_loss_for_test(
+        *matcher, descriptors_extra, descriptors_balanced, points_extra, points_balanced, 16, 1.0);
+
+    PFM_REQUIRE(extra_loss.item<float>() > balanced_loss.item<float>() + 1.0F);
 }
 
 static void trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head()
@@ -3312,6 +3353,8 @@ void register_trainer_tests()
                   trainer_python_compare_graph_loss_disables_candidate_mask_for_supervision);
     register_test("trainer python compare graph loss can train accept head",
                   trainer_python_compare_graph_loss_can_train_accept_head);
+    register_test("trainer python compare graph loss penalizes unmatched accept logits",
+                  trainer_python_compare_graph_loss_penalizes_unmatched_accept_logits);
     register_test("trainer python compare graph loss can train prune ranking accept head",
                   trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head);
     register_test("trainer python compare graph loss can train stop confidence score path",

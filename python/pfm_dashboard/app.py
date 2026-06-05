@@ -729,6 +729,9 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>匹配接受概率 <input type="number" name="graph_min_accept_probability" value="-1" min="-1" max="1" step="0.01"></label>
       <label>计算量预算 <input type="number" name="graph_max_attention_work_fraction" value="1" min="0" max="1" step="0.01"></label>
       <label>宽度保留比例 <input type="number" name="graph_width_prune_keep_ratio" value="1" min="0" max="1" step="0.01"></label>
+      <label>不可匹配点数 <input type="number" name="graph_matcher_no_match_points" value="0" min="0"></label>
+      <label>不可匹配权重 <input type="number" name="graph_matcher_no_match_weight" value="0" min="0" step="0.01"></label>
+      <label>不可匹配最小距离 <input type="number" name="graph_matcher_no_match_min_distance" value="4" min="0" step="0.5"></label>
       <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
       <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
     </div>
@@ -947,6 +950,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_min_accept_probability=float(value("graph_min_accept_probability", "-1")),
             graph_max_attention_work_fraction=float(value("graph_max_attention_work_fraction", "1")),
             graph_width_prune_keep_ratio=float(value("graph_width_prune_keep_ratio", "1")),
+            graph_matcher_no_match_points=int(value("graph_matcher_no_match_points", "0")),
+            graph_matcher_no_match_weight=float(value("graph_matcher_no_match_weight", "0")),
+            graph_matcher_no_match_min_distance=float(value("graph_matcher_no_match_min_distance", "4")),
             graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
             graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
         )
