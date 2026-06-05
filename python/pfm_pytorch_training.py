@@ -1982,6 +1982,9 @@ def train_step(
     illumination_consistency_weight: float = 0.0,
     illumination_consistency_max_points: int = 0,
     illumination_consistency_probability: float = 1.0,
+    illumination_match_pairs: dict[Path, SyntheticPair] | None = None,
+    illumination_match_weight: float = 0.0,
+    illumination_match_probability: float = 1.0,
     pose_metadata: pose_pair_metadata.PoseMetadataIndex | None = None,
     pose_balanced_sampling: bool = False,
     pose_difficulty_loss_weight: float = 0.0,
@@ -2022,6 +2025,8 @@ def train_step(
     online_false_match_pairs = 0
     illumination_consistency_points = 0
     illumination_consistency_pairs_used = 0
+    illumination_match_points = 0
+    illumination_match_pairs_used = 0
     pose_counts = {
         "pose_easy_pairs": 0.0,
         "pose_medium_pairs": 0.0,
@@ -2296,6 +2301,49 @@ def train_step(
                         )
                         illumination_consistency_points += int(per_view_points) * 2
                         illumination_consistency_pairs_used += 1
+                if (
+                    illumination_match_pairs
+                    and illumination_match_weight > 0.0
+                    and points_a.size(0) > 0
+                    and random.random() <= max(0.0, min(1.0, float(illumination_match_probability)))
+                ):
+                    changed_match_pair = illumination_match_pairs.get(pair_key)
+                    if changed_match_pair is not None:
+                        changed_match_pair = move_pair_to_device(changed_match_pair, device=device)
+                        changed_maps = compute_student_teacher_descriptor_maps(
+                            model,
+                            changed_match_pair,
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            include_heatmaps=False,
+                        )
+                        changed_descriptors_a, changed_descriptors_b, changed_teacher_a, changed_teacher_b = changed_maps[:4]
+                        match_loss, match_metrics = descriptor_map_pair_loss(
+                            changed_descriptors_a,
+                            changed_descriptors_b,
+                            points_a,
+                            points_b,
+                            temperature=temperature,
+                            teacher_descriptors_a=changed_teacher_a,
+                            teacher_descriptors_b=changed_teacher_b,
+                            teacher_weight=teacher_weight,
+                            hard_negative_weight=hard_negative_weight,
+                            diversity_weight=diversity_weight,
+                            warp_hard_negative_weight=warp_hard_negative_weight,
+                            warp_hard_negative_radius=warp_hard_negative_radius,
+                            warp_hard_negative_margin=warp_hard_negative_margin,
+                            warp_hard_negative_candidates=warp_hard_negative_candidates,
+                            abstention_weight=abstention_weight,
+                            abstention_negative_radius=abstention_negative_radius,
+                            abstention_max_false_score=abstention_max_false_score,
+                            abstention_topk=abstention_topk,
+                            abstention_candidates=abstention_candidates,
+                        )
+                        pair_losses.append(float(illumination_match_weight) * match_loss)
+                        metric_rows.append(match_metrics)
+                        sampled_count += points_a.size(0)
+                        illumination_match_points += points_a.size(0)
+                        illumination_match_pairs_used += 1
                 if pair_losses:
                     losses.append(torch.stack(pair_losses).sum())
             if not losses:
@@ -2329,6 +2377,8 @@ def train_step(
         metrics["online_false_match_pairs"] = float(online_false_match_pairs)
         metrics["illumination_consistency_points"] = float(illumination_consistency_points)
         metrics["illumination_consistency_pairs"] = float(illumination_consistency_pairs_used)
+        metrics["illumination_match_points"] = float(illumination_match_points)
+        metrics["illumination_match_pairs"] = float(illumination_match_pairs_used)
         metrics["pose_easy_pairs"] = pose_counts["pose_easy_pairs"]
         metrics["pose_medium_pairs"] = pose_counts["pose_medium_pairs"]
         metrics["pose_hard_pairs"] = pose_counts["pose_hard_pairs"]
@@ -2354,6 +2404,8 @@ def train_step(
         "online_false_match_pairs": float(online_false_match_pairs),
         "illumination_consistency_points": float(illumination_consistency_points),
         "illumination_consistency_pairs": float(illumination_consistency_pairs_used),
+        "illumination_match_points": float(illumination_match_points),
+        "illumination_match_pairs": float(illumination_match_pairs_used),
         "pose_easy_pairs": pose_counts["pose_easy_pairs"],
         "pose_medium_pairs": pose_counts["pose_medium_pairs"],
         "pose_hard_pairs": pose_counts["pose_hard_pairs"],

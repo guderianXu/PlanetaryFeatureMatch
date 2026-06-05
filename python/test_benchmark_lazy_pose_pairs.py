@@ -18,6 +18,7 @@ from benchmark_lazy_pose_pairs import (
     StreamingCsvRows,
     apply_local_contrast_normalization,
     apply_photometric_augmentation,
+    make_illumination_match_pair,
 )
 from patch_descriptor_training import SyntheticPair
 
@@ -157,6 +158,10 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.8",
             "--illumination-consistency-shadow",
             "0.7",
+            "--illumination-match-weight",
+            "0.35",
+            "--illumination-match-probability",
+            "0.7",
             "--hard-variant",
             "extreme",
             "--hard-valid-fraction-max",
@@ -183,6 +188,8 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.illumination_consistency_points, 96)
         self.assertAlmostEqual(args.illumination_consistency_gamma, 0.8)
         self.assertAlmostEqual(args.illumination_consistency_shadow, 0.7)
+        self.assertAlmostEqual(args.illumination_match_weight, 0.35)
+        self.assertAlmostEqual(args.illumination_match_probability, 0.7)
         self.assertEqual(args.hard_variant, ["extreme"])
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
@@ -235,6 +242,17 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         changed = lazy_bench.make_illumination_consistency_pair(pair, config, seed=123)
 
         self.assertFalse(torch.allclose(changed.view_a, pair.view_a))
+        self.assertFalse(torch.allclose(changed.view_b, pair.view_b))
+        self.assertTrue(torch.equal(changed.warp_a_to_b, pair.warp_a_to_b))
+        self.assertTrue(torch.equal(changed.valid_mask, pair.valid_mask))
+
+    def test_illumination_match_pair_can_change_only_target_view(self) -> None:
+        pair = self.make_pair()
+        config = PhotometricAugmentConfig(enabled=True, probability=1.0, brightness=0.4, gamma=0.5, shadow=0.4)
+
+        changed = make_illumination_match_pair(pair, config, seed=123, changed_view="b")
+
+        self.assertTrue(torch.allclose(changed.view_a, pair.view_a))
         self.assertFalse(torch.allclose(changed.view_b, pair.view_b))
         self.assertTrue(torch.equal(changed.warp_a_to_b, pair.warp_a_to_b))
         self.assertTrue(torch.equal(changed.valid_mask, pair.valid_mask))

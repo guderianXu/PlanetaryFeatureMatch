@@ -129,6 +129,37 @@ def make_illumination_consistency_pair(
     return apply_photometric_augmentation(pair, config, seed=seed)
 
 
+def make_illumination_match_pair(
+    pair: SyntheticPair,
+    config: PhotometricAugmentConfig,
+    *,
+    seed: int,
+    changed_view: str = "b",
+) -> SyntheticPair:
+    """生成同一几何关系下的单侧光照扰动匹配训练样本。"""
+    if not config.enabled:
+        return pair
+    if changed_view not in {"a", "b", "both"}:
+        raise ValueError("changed_view must be one of: a, b, both")
+
+    generator_a = torch.Generator(device=pair.view_a.device)
+    generator_b = torch.Generator(device=pair.view_b.device)
+    generator_a.manual_seed(int(seed) & 0x7FFFFFFFFFFFFFFF)
+    generator_b.manual_seed((int(seed) + 0x9E3779B97F4A7C15) & 0x7FFFFFFFFFFFFFFF)
+    view_a = pair.view_a
+    view_b = pair.view_b
+    if changed_view in {"a", "both"}:
+        view_a = augment_single_view(pair.view_a, config, generator_a)
+    if changed_view in {"b", "both"}:
+        view_b = augment_single_view(pair.view_b, config, generator_b)
+    return SyntheticPair(
+        view_a=view_a.contiguous(),
+        view_b=view_b.contiguous(),
+        warp_a_to_b=pair.warp_a_to_b,
+        valid_mask=pair.valid_mask,
+    )
+
+
 def local_contrast_single_view(view: torch.Tensor, *, strength: float, kernel_size: int) -> torch.Tensor:
     if strength <= 0.0:
         return view

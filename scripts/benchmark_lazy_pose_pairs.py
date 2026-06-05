@@ -47,6 +47,7 @@ from pfm_data.photometric import (  # noqa: E402
     apply_photometric_augmentation,
     apply_training_transforms,
     make_illumination_consistency_pair,
+    make_illumination_match_pair,
 )
 from pfm_pytorch_training import (  # noqa: E402
     FalseMatchLabels,
@@ -106,6 +107,7 @@ class LazyPairResult:
     attempt_count: int
     elapsed_ms: float
     illumination_pair: SyntheticPair | None = None
+    illumination_match_pair: SyntheticPair | None = None
 
 
 def _worker_init(cache_max_items: int) -> None:
@@ -383,6 +385,9 @@ def generate_lazy_pair(
     local_contrast_kernel: int = 31,
     illumination_consistency_config: PhotometricAugmentConfig | None = None,
     illumination_consistency_probability: float = 1.0,
+    illumination_match_config: PhotometricAugmentConfig | None = None,
+    illumination_match_probability: float = 1.0,
+    illumination_match_changed_view: str = "b",
 ) -> LazyPairResult:
     start = time.perf_counter()
     view_a = _cached_view(_selected_image_path(spec.reference, image_source))
@@ -434,6 +439,16 @@ def generate_lazy_pair(
             consistency_config,
             seed=transform_seed + 0xD1B54A32D192ED03,
         )
+    illumination_match_pair = None
+    match_config = illumination_match_config or PhotometricAugmentConfig()
+    match_probability = max(0.0, min(1.0, float(illumination_match_probability)))
+    if match_config.enabled and random.Random(transform_seed + 0xC0FFEE).random() <= match_probability:
+        illumination_match_pair = make_illumination_match_pair(
+            pair,
+            match_config,
+            seed=transform_seed + 0xA24BAED4963EE407,
+            changed_view=illumination_match_changed_view,
+        )
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return LazyPairResult(
         spec=spec,
@@ -443,6 +458,7 @@ def generate_lazy_pair(
         attempt_count=attempt + 1,
         elapsed_ms=elapsed_ms,
         illumination_pair=illumination_pair,
+        illumination_match_pair=illumination_match_pair,
     )
 
 
@@ -468,6 +484,9 @@ def iter_lazy_pairs(
     local_contrast_kernel: int = 31,
     illumination_consistency_config: PhotometricAugmentConfig | None = None,
     illumination_consistency_probability: float = 1.0,
+    illumination_match_config: PhotometricAugmentConfig | None = None,
+    illumination_match_probability: float = 1.0,
+    illumination_match_changed_view: str = "b",
 ) -> Iterator[LazyPairResult]:
     if not specs:
         raise RuntimeError("no lazy pair specs available")
@@ -496,6 +515,9 @@ def iter_lazy_pairs(
             local_contrast_kernel=local_contrast_kernel,
             illumination_consistency_config=illumination_consistency_config,
             illumination_consistency_probability=illumination_consistency_probability,
+            illumination_match_config=illumination_match_config,
+            illumination_match_probability=illumination_match_probability,
+            illumination_match_changed_view=illumination_match_changed_view,
         )
         future_map[future] = time.perf_counter()
         cursor += 1
@@ -726,6 +748,18 @@ def _illumination_consistency_config_from_args(args: argparse.Namespace) -> Phot
         gamma=float(args.illumination_consistency_gamma),
         shadow=float(args.illumination_consistency_shadow),
         noise=float(args.illumination_consistency_noise),
+    )
+
+
+def _illumination_match_config_from_args(args: argparse.Namespace) -> PhotometricAugmentConfig:
+    return PhotometricAugmentConfig(
+        enabled=float(args.illumination_match_weight) > 0.0,
+        probability=1.0,
+        brightness=float(args.illumination_match_brightness),
+        contrast=float(args.illumination_match_contrast),
+        gamma=float(args.illumination_match_gamma),
+        shadow=float(args.illumination_match_shadow),
+        noise=float(args.illumination_match_noise),
     )
 
 
@@ -1150,6 +1184,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     rows: list[dict[str, object]] = []
     photometric_config = _photometric_config_from_args(args)
     illumination_consistency_config = _illumination_consistency_config_from_args(args)
+    illumination_match_config = _illumination_match_config_from_args(args)
     train_metric_fields = [
         "step",
         "loss",
@@ -1162,6 +1197,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "online_false_match_pairs",
         "illumination_consistency_points",
         "illumination_consistency_pairs",
+        "illumination_match_points",
+        "illumination_match_pairs",
         "hard_lazy_pairs",
         "data_wait_ms",
         "augment_ms",
@@ -1179,6 +1216,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "inline_false_match_mining",
         "illumination_consistency_weight",
         "illumination_consistency_probability",
+        "illumination_match_weight",
+        "illumination_match_probability",
         "gpu_util_percent",
         "gpu_mem_used_mib",
         "gpu_mem_total_mib",
@@ -1206,6 +1245,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         local_contrast_kernel=args.input_local_contrast_kernel,
         illumination_consistency_config=illumination_consistency_config,
         illumination_consistency_probability=args.illumination_consistency_probability,
+        illumination_match_config=illumination_match_config,
+        illumination_match_probability=args.illumination_match_probability,
+        illumination_match_changed_view=args.illumination_match_changed_view,
     )
     hard_iterator: Iterator[LazyPairResult] | None = None
     if hard_specs:
@@ -1230,6 +1272,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             local_contrast_kernel=args.input_local_contrast_kernel,
             illumination_consistency_config=illumination_consistency_config,
             illumination_consistency_probability=args.illumination_consistency_probability,
+            illumination_match_config=illumination_match_config,
+            illumination_match_probability=args.illumination_match_probability,
+            illumination_match_changed_view=args.illumination_match_changed_view,
         )
         print(f"hard_lazy_specs={len(hard_specs)} hard_variants={','.join(args.hard_variant)}", flush=True)
     static_false_matches = read_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
@@ -1276,6 +1321,11 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 path.resolve(strict=False): result.illumination_pair
                 for path, result in zip(fake_paths, results)
                 if result.illumination_pair is not None
+            }
+            illumination_match_prefetched = {
+                path.resolve(strict=False): result.illumination_match_pair
+                for path, result in zip(fake_paths, results)
+                if result.illumination_match_pair is not None
             }
             mined_false_matches = dict(static_false_matches)
             mined_false_rows: list[dict[str, object]] = []
@@ -1385,6 +1435,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 illumination_consistency_weight=args.illumination_consistency_weight,
                 illumination_consistency_max_points=args.illumination_consistency_points,
                 illumination_consistency_probability=1.0,
+                illumination_match_pairs=illumination_match_prefetched,
+                illumination_match_weight=args.illumination_match_weight,
+                illumination_match_probability=1.0,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -1416,6 +1469,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "online_false_match_pairs": f"{metrics.get('online_false_match_pairs', 0.0):.0f}",
                 "illumination_consistency_points": f"{metrics.get('illumination_consistency_points', 0.0):.0f}",
                 "illumination_consistency_pairs": f"{metrics.get('illumination_consistency_pairs', 0.0):.0f}",
+                "illumination_match_points": f"{metrics.get('illumination_match_points', 0.0):.0f}",
+                "illumination_match_pairs": f"{metrics.get('illumination_match_pairs', 0.0):.0f}",
                 "hard_lazy_pairs": hard_lazy_pairs,
                 "data_wait_ms": f"{data_wait_ms:.2f}",
                 "augment_ms": f"{augment_ms:.2f}",
@@ -1433,6 +1488,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "inline_false_match_mining": int(args.inline_false_match_mining),
                 "illumination_consistency_weight": f"{args.illumination_consistency_weight:.6f}",
                 "illumination_consistency_probability": f"{args.illumination_consistency_probability:.3f}",
+                "illumination_match_weight": f"{args.illumination_match_weight:.6f}",
+                "illumination_match_probability": f"{args.illumination_match_probability:.3f}",
                 **gpu,
             }
             rows.append(row)
@@ -1442,7 +1499,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 print(
                     f"train step={step}/{args.steps} loss={row['loss']} "
                     f"top1={row['top1_accuracy']} false={row['false_match_points']} "
-                    f"illum={row['illumination_consistency_points']} hard={row['hard_lazy_pairs']} "
+                    f"illum={row['illumination_consistency_points']} "
+                    f"illum_match={row['illumination_match_points']} hard={row['hard_lazy_pairs']} "
                     f"data_wait={data_wait_ms:.1f}ms "
                     f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
                     flush=True,
@@ -1483,6 +1541,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             "probability": float(args.illumination_consistency_probability),
             "points": int(args.illumination_consistency_points),
             "config": vars(illumination_consistency_config),
+        },
+        "illumination_match": {
+            "enabled": float(args.illumination_match_weight) > 0.0,
+            "weight": float(args.illumination_match_weight),
+            "probability": float(args.illumination_match_probability),
+            "changed_view": args.illumination_match_changed_view,
+            "config": vars(illumination_match_config),
         },
         "gpu_monitor_enabled": bool(gpu_monitor is not None),
         "gpu_sample_interval_s": float(args.gpu_sample_interval_s),
@@ -1548,6 +1613,12 @@ def _save_training_state(
                 "photometric_gamma": float(args.photometric_gamma),
                 "photometric_shadow": float(args.photometric_shadow),
                 "photometric_noise": float(args.photometric_noise),
+                "illumination_consistency_weight": float(args.illumination_consistency_weight),
+                "illumination_consistency_probability": float(args.illumination_consistency_probability),
+                "illumination_consistency_points": int(args.illumination_consistency_points),
+                "illumination_match_weight": float(args.illumination_match_weight),
+                "illumination_match_probability": float(args.illumination_match_probability),
+                "illumination_match_changed_view": str(args.illumination_match_changed_view),
                 "input_local_contrast": bool(args.input_local_contrast),
                 "input_local_contrast_strength": float(args.input_local_contrast_strength),
                 "gpu_snapshot_every": int(args.gpu_snapshot_every),
@@ -1683,6 +1754,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--illumination-consistency-gamma", type=float, default=0.75)
     parser.add_argument("--illumination-consistency-shadow", type=float, default=0.65)
     parser.add_argument("--illumination-consistency-noise", type=float, default=0.02)
+    parser.add_argument("--illumination-match-weight", type=float, default=0.0)
+    parser.add_argument("--illumination-match-probability", type=float, default=1.0)
+    parser.add_argument("--illumination-match-changed-view", choices=["a", "b", "both"], default="b")
+    parser.add_argument("--illumination-match-brightness", type=float, default=0.25)
+    parser.add_argument("--illumination-match-contrast", type=float, default=0.55)
+    parser.add_argument("--illumination-match-gamma", type=float, default=0.95)
+    parser.add_argument("--illumination-match-shadow", type=float, default=0.75)
+    parser.add_argument("--illumination-match-noise", type=float, default=0.02)
     parser.add_argument("--train-backbone", action="store_true")
     parser.add_argument("--train-dual-fpn", action="store_true")
     parser.add_argument("--train-descriptor-head", action=argparse.BooleanOptionalAction, default=True)
@@ -1739,6 +1818,10 @@ def main() -> int:
         raise ValueError("--illumination-consistency-weight must be nonnegative")
     if args.illumination_consistency_points < 0:
         raise ValueError("--illumination-consistency-points must be nonnegative")
+    if not 0.0 <= args.illumination_match_probability <= 1.0:
+        raise ValueError("--illumination-match-probability must be in [0, 1]")
+    if args.illumination_match_weight < 0.0:
+        raise ValueError("--illumination-match-weight must be nonnegative")
     if args.visual_max_matches < 0:
         raise ValueError("--visual-max-matches must be nonnegative; use 0 to keep all matches")
     if args.visual_draw_matches < 0:
@@ -1773,6 +1856,16 @@ def main() -> int:
         "photometric_gamma",
         "photometric_shadow",
         "photometric_noise",
+        "illumination_consistency_brightness",
+        "illumination_consistency_contrast",
+        "illumination_consistency_gamma",
+        "illumination_consistency_shadow",
+        "illumination_consistency_noise",
+        "illumination_match_brightness",
+        "illumination_match_contrast",
+        "illumination_match_gamma",
+        "illumination_match_shadow",
+        "illumination_match_noise",
     ):
         if getattr(args, name) < 0.0:
             raise ValueError(f"--{name.replace('_', '-')} must be non-negative")
@@ -1810,6 +1903,13 @@ def main() -> int:
             "probability": float(args.illumination_consistency_probability),
             "points": int(args.illumination_consistency_points),
             "config": vars(_illumination_consistency_config_from_args(args)),
+        },
+        "illumination_match": {
+            "enabled": float(args.illumination_match_weight) > 0.0,
+            "weight": float(args.illumination_match_weight),
+            "probability": float(args.illumination_match_probability),
+            "changed_view": args.illumination_match_changed_view,
+            "config": vars(_illumination_match_config_from_args(args)),
         },
     }
     (args.output_dir / "input_summary.json").write_text(

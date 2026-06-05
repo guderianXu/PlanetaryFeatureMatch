@@ -1950,6 +1950,74 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(descriptor_maps.call_count, 1)
         self.assertEqual(lightweight.call_count, 2)
 
+    def test_train_step_adds_illumination_match_pair_loss(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_a.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        changed_pair = SyntheticPair(
+            view_a=pair.view_a,
+            view_b=torch.ones(1, 2, 2) * 0.25,
+            warp_a_to_b=pair.warp_a_to_b,
+            valid_mask=pair.valid_mask,
+        )
+        descriptors = (
+            torch.ones(1, 1, 2, 2),
+            torch.ones(1, 1, 2, 2),
+            torch.ones(1, 1, 2, 2),
+            torch.ones(1, 1, 2, 2),
+        )
+
+        def fake_descriptor_loss(*_args, **_kwargs):
+            fake_descriptor_loss.calls += 1
+            return parameter * 2.0, {
+                "top1_accuracy": 1.0,
+                "top5_accuracy": 1.0,
+                "top10_accuracy": 1.0,
+                "mean_positive_rank": 1.0,
+                "mean_positive_score": 1.0,
+                "mean_negative_score": 0.0,
+            }
+
+        fake_descriptor_loss.calls = 0
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps", return_value=descriptors),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss", side_effect=fake_descriptor_loss),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.25,
+                illumination_match_pairs={pair_path.resolve(strict=False): changed_pair},
+                illumination_match_weight=0.5,
+                illumination_match_probability=1.0,
+            )
+
+        self.assertEqual(fake_descriptor_loss.calls, 2)
+        self.assertAlmostEqual(float(parameter.detach()), 0.7, places=5)
+        self.assertEqual(metrics["illumination_match_pairs"], 1.0)
+        self.assertEqual(metrics["illumination_match_points"], 2.0)
+
     def test_train_step_adds_weighted_pseudo_label_loss(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))
         optimizer = torch.optim.SGD([parameter], lr=0.1)
