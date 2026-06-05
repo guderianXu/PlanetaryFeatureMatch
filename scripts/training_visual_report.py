@@ -80,6 +80,16 @@ class VisualMatchResult:
     selected_b_count: int = 0
     selected_a_weak_count: int = 0
     graph_rejected_count: int = 0
+    graph_executed_layers: int = 0
+    graph_input_keypoints_a: int = 0
+    graph_input_keypoints_b: int = 0
+    graph_kept_keypoints_a: int = 0
+    graph_kept_keypoints_b: int = 0
+    graph_pruned_keypoints_a: int = 0
+    graph_pruned_keypoints_b: int = 0
+    graph_attention_work_units: int = 0
+    graph_full_attention_work_units: int = 0
+    graph_attention_work_fraction: float = 0.0
     raw_top1_recall: float = 0.0
     raw_top5_recall: float = 0.0
     raw_top16_recall: float = 0.0
@@ -130,6 +140,35 @@ class VisualMatchResult:
     @property
     def score_gap(self) -> float:
         return self.correct_score_mean - self.wrong_score_mean
+
+    @property
+    def graph_attention_saved_fraction(self) -> float:
+        if self.graph_full_attention_work_units <= 0:
+            return 0.0
+        return max(0.0, 1.0 - float(self.graph_attention_work_fraction))
+
+    @property
+    def graph_pruned_keypoint_fraction(self) -> float:
+        total = self.graph_input_keypoints_a + self.graph_input_keypoints_b
+        if total <= 0:
+            return 0.0
+        pruned = self.graph_pruned_keypoints_a + self.graph_pruned_keypoints_b
+        return float(pruned) / float(total)
+
+
+def graph_result_kwargs(graph_stats: dict[str, float | int]) -> dict[str, float | int]:
+    return {
+        "graph_executed_layers": int(graph_stats.get("graph_executed_layers", 0)),
+        "graph_input_keypoints_a": int(graph_stats.get("graph_input_keypoints_a", 0)),
+        "graph_input_keypoints_b": int(graph_stats.get("graph_input_keypoints_b", 0)),
+        "graph_kept_keypoints_a": int(graph_stats.get("graph_kept_keypoints_a", 0)),
+        "graph_kept_keypoints_b": int(graph_stats.get("graph_kept_keypoints_b", 0)),
+        "graph_pruned_keypoints_a": int(graph_stats.get("graph_pruned_keypoints_a", 0)),
+        "graph_pruned_keypoints_b": int(graph_stats.get("graph_pruned_keypoints_b", 0)),
+        "graph_attention_work_units": int(graph_stats.get("graph_attention_work_units", 0)),
+        "graph_full_attention_work_units": int(graph_stats.get("graph_full_attention_work_units", 0)),
+        "graph_attention_work_fraction": float(graph_stats.get("graph_attention_work_fraction", 0.0)),
+    }
 
 
 def spatial_coverage_metrics(points_xy: np.ndarray, *, image_height: int, image_width: int, bins: int) -> tuple[float, float, float]:
@@ -547,6 +586,7 @@ def compute_visual_matches(
             image_width=image_width_a,
         )
         selected_a_weak_count = int(weak_texture_mask(pair.view_a, selected_a_image_points.detach().cpu().numpy()).sum())
+        graph_stats: dict[str, float | int] = {}
         if matcher_mode == "graph_matcher":
             meta_a = match_eval.graph_metadata_from_raw_features(
                 raw_a,
@@ -583,6 +623,7 @@ def compute_visual_matches(
                 scores_b=row_scores_b,
                 metadata_a=meta_a,
                 metadata_b=meta_b,
+                graph_stats=graph_stats,
             )
         elif matcher_mode == "raw_descriptor" and mutual:
             matches, scores = match_eval.mutual_nearest_matches(
@@ -622,6 +663,7 @@ def compute_visual_matches(
                 selected_b_count=int(keypoints_b.size(0)),
                 selected_a_weak_count=selected_a_weak_count,
                 graph_rejected_count=int(max(0, keypoints_a.size(0) - matches.size(0))) if matcher_mode == "graph_matcher" else 0,
+                **graph_result_kwargs(graph_stats),
                 raw_top1_recall=topk_recalls[1],
                 raw_top5_recall=topk_recalls[5],
                 raw_top16_recall=topk_recalls[16],
@@ -666,6 +708,7 @@ def compute_visual_matches(
             selected_b_count=int(keypoints_b.size(0)),
             selected_a_weak_count=selected_a_weak_count,
             graph_rejected_count=int(max(0, keypoints_a.size(0) - matches.size(0))) if matcher_mode == "graph_matcher" else 0,
+            **graph_result_kwargs(graph_stats),
             raw_top1_recall=topk_recalls[1],
             raw_top5_recall=topk_recalls[5],
             raw_top16_recall=topk_recalls[16],
@@ -752,6 +795,18 @@ def write_match_summary(results: list[VisualMatchResult], output_path: Path, *, 
         "selected_a_count",
         "selected_b_count",
         "graph_rejected_count",
+        "graph_executed_layers",
+        "graph_input_keypoints_a",
+        "graph_input_keypoints_b",
+        "graph_kept_keypoints_a",
+        "graph_kept_keypoints_b",
+        "graph_pruned_keypoints_a",
+        "graph_pruned_keypoints_b",
+        "graph_attention_work_units",
+        "graph_full_attention_work_units",
+        "graph_attention_work_fraction",
+        "graph_attention_saved_fraction",
+        "graph_pruned_keypoint_fraction",
         "mean_error_px",
         "median_error_px",
         "p90_error_px",
@@ -798,6 +853,18 @@ def write_match_summary(results: list[VisualMatchResult], output_path: Path, *, 
                     "selected_a_count": result.selected_a_count,
                     "selected_b_count": result.selected_b_count,
                     "graph_rejected_count": result.graph_rejected_count,
+                    "graph_executed_layers": result.graph_executed_layers,
+                    "graph_input_keypoints_a": result.graph_input_keypoints_a,
+                    "graph_input_keypoints_b": result.graph_input_keypoints_b,
+                    "graph_kept_keypoints_a": result.graph_kept_keypoints_a,
+                    "graph_kept_keypoints_b": result.graph_kept_keypoints_b,
+                    "graph_pruned_keypoints_a": result.graph_pruned_keypoints_a,
+                    "graph_pruned_keypoints_b": result.graph_pruned_keypoints_b,
+                    "graph_attention_work_units": result.graph_attention_work_units,
+                    "graph_full_attention_work_units": result.graph_full_attention_work_units,
+                    "graph_attention_work_fraction": f"{result.graph_attention_work_fraction:.6f}",
+                    "graph_attention_saved_fraction": f"{result.graph_attention_saved_fraction:.6f}",
+                    "graph_pruned_keypoint_fraction": f"{result.graph_pruned_keypoint_fraction:.6f}",
                     "mean_error_px": f"{result.mean_error:.3f}",
                     "median_error_px": f"{result.median_error:.3f}",
                     "p90_error_px": f"{result.p90_error:.3f}",
@@ -900,6 +967,18 @@ def aggregate_match_stats(results: list[VisualMatchResult], *, requested_matches
         "mean_raw_top16_recall": float(np.mean([result.raw_top16_recall for result in results])) if results else 0.0,
         "mean_raw_top32_recall": float(np.mean([result.raw_top32_recall for result in results])) if results else 0.0,
         "mean_raw_top64_recall": float(np.mean([result.raw_top64_recall for result in results])) if results else 0.0,
+        "mean_graph_executed_layers": float(np.mean([result.graph_executed_layers for result in results]))
+        if results
+        else 0.0,
+        "mean_graph_attention_work_fraction": float(np.mean([result.graph_attention_work_fraction for result in results]))
+        if results
+        else 0.0,
+        "mean_graph_attention_saved_fraction": float(np.mean([result.graph_attention_saved_fraction for result in results]))
+        if results
+        else 0.0,
+        "mean_graph_pruned_keypoint_fraction": float(np.mean([result.graph_pruned_keypoint_fraction for result in results]))
+        if results
+        else 0.0,
     }
 
 
@@ -1295,6 +1374,9 @@ def make_markdown_report(
                 f"P90 error: `{stats['p90_error']:.2f}px`",
                 f"Mean grid coverage: `{stats['mean_coverage_occupied']:.4f}`",
                 f"Mean weak-texture match fraction: `{stats['mean_weak_texture_fraction']:.4f}`",
+                f"Mean GraphMatcher executed layers: `{stats['mean_graph_executed_layers']:.2f}`",
+                f"Mean GraphMatcher work fraction: `{stats['mean_graph_attention_work_fraction']:.4f}`",
+                f"Mean GraphMatcher pruned keypoint fraction: `{stats['mean_graph_pruned_keypoint_fraction']:.4f}`",
                 "",
             ]
         )

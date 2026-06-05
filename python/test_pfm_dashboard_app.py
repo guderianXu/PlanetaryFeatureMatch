@@ -158,6 +158,47 @@ class DashboardAppTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_history_shows_lightglue_graph_efficiency_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "runs" / "graph_efficiency_run"
+            visual = run / "visual_report"
+            visual.mkdir(parents=True)
+            (run / "metrics.csv").write_text(
+                "step,loss,graph_attention_work_fraction,graph_executed_layers,graph_pruned_keypoint_fraction\n"
+                "1,2.0,0.60,3,0.25\n"
+                "2,1.5,0.40,2,0.50\n",
+                encoding="utf-8",
+            )
+            (visual / "index.html").write_text("<html><body>匹配报告</body></html>", encoding="utf-8")
+            (visual / "match_visual_summary.csv").write_text(
+                "pair_pt,matches,correct,wrong,precision,graph_executed_layers,"
+                "graph_attention_work_fraction,graph_pruned_keypoint_fraction\n"
+                "a.pt,20,18,2,0.9,2,0.5,0.4\n",
+                encoding="utf-8",
+            )
+            server = make_server("127.0.0.1", 0, project_root=root)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with urllib.request.urlopen(base + "/history?run=graph_efficiency_run", timeout=5) as response:
+                    history_html = response.read().decode("utf-8")
+
+                self.assertIn("LightGlue 自适应推理", history_html)
+                self.assertIn("平均计算量占比", history_html)
+                self.assertIn("50.0%", history_html)
+                self.assertIn("平均执行层数", history_html)
+                self.assertIn("2.50", history_html)
+                self.assertIn("平均剪枝比例", history_html)
+                self.assertIn("37.5%", history_html)
+                self.assertIn("计算量占比", history_html)
+                self.assertIn("执行层数", history_html)
+                self.assertIn("剪枝比例", history_html)
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

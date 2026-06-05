@@ -320,8 +320,7 @@ def _svg_path(points: list[tuple[float, float]], x_min: float, x_max: float, y_m
     return " ".join(commands)
 
 
-def _line_chart_svg(metrics, title: str, names: tuple[str, ...]) -> str:
-    points = _metric_points(metrics, names)
+def _line_chart_from_points_svg(points: list[tuple[float, float]], title: str) -> str:
     if not points:
         return f'<div class="history-chart empty"><strong>{html.escape(title)}</strong><span>暂无指标</span></div>'
     max_points = 420
@@ -354,6 +353,21 @@ def _line_chart_svg(metrics, title: str, names: tuple[str, ...]) -> str:
   </svg>
 </div>
 """
+
+
+def _line_chart_svg(metrics, title: str, names: tuple[str, ...]) -> str:
+    return _line_chart_from_points_svg(_metric_points(metrics, names), title)
+
+
+def _derived_line_chart_svg(metrics, title: str, value_fn) -> str:
+    points: list[tuple[float, float]] = []
+    for index, row in enumerate(metrics.rows):
+        x = _row_number(row, "step", "global_step", "iteration", "batch")
+        value = value_fn(row)
+        if value is None:
+            continue
+        points.append((float(index + 1 if x is None else x), value))
+    return _line_chart_from_points_svg(points, title)
 
 
 def _histogram_svg(metrics, title: str, names: tuple[str, ...]) -> str:
@@ -399,6 +413,134 @@ def _read_visual_summary(run_path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _read_visual_match_summary(run_path: Path) -> list[dict[str, str]]:
+    report_path = _visual_report_path(run_path)
+    summary = (
+        report_path.parent / "match_visual_summary.csv"
+        if report_path is not None
+        else run_path / "visual_report" / "match_visual_summary.csv"
+    )
+    if not summary.exists():
+        return []
+    with summary.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _float_value(value: object) -> float | None:
+    if isinstance(value, (float, int)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _mapping_number(row: dict[str, object], *names: str) -> float | None:
+    for name in names:
+        number = _float_value(row.get(name))
+        if number is not None:
+            return number
+    return None
+
+
+def _metric_values(metrics, *names: str) -> list[float]:
+    return [
+        value
+        for row in metrics.rows
+        for value in [_mapping_number(row, *names)]
+        if value is not None
+    ]
+
+
+def _summary_values(rows: list[dict[str, str]], *names: str) -> list[float]:
+    return [
+        value
+        for row in rows
+        for value in [_mapping_number(row, *names)]
+        if value is not None
+    ]
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / float(len(values))
+
+
+def _format_percent(value: float | None) -> str:
+    return "-" if value is None else f"{value * 100.0:.1f}%"
+
+
+def _format_float(value: float | None, digits: int = 2) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
+
+
+def _graph_pruned_fraction_from_row(row: dict[str, object]) -> float | None:
+    explicit = _mapping_number(row, "graph_pruned_keypoint_fraction", "pruned_keypoint_fraction", "graph_prune_fraction")
+    if explicit is not None:
+        return explicit
+    pruned_a = _mapping_number(row, "graph_pruned_keypoints_a", "pruned_keypoints_a")
+    pruned_b = _mapping_number(row, "graph_pruned_keypoints_b", "pruned_keypoints_b")
+    input_a = _mapping_number(row, "graph_input_keypoints_a", "input_keypoints_a")
+    input_b = _mapping_number(row, "graph_input_keypoints_b", "input_keypoints_b")
+    if None in (pruned_a, pruned_b, input_a, input_b):
+        return None
+    total = float(input_a or 0.0) + float(input_b or 0.0)
+    if total <= 0.0:
+        return None
+    return (float(pruned_a or 0.0) + float(pruned_b or 0.0)) / total
+
+
+def _graph_pruned_fraction_values(metrics, summary_rows: list[dict[str, str]]) -> list[float]:
+    values = [value for row in metrics.rows for value in [_graph_pruned_fraction_from_row(row)] if value is not None]
+    if values:
+        return values
+    return [value for row in summary_rows for value in [_graph_pruned_fraction_from_row(row)] if value is not None]
+
+
+def _graph_efficiency_section(metrics, summary_rows: list[dict[str, str]]) -> str:
+    work_values = _metric_values(
+        metrics,
+        "graph_attention_work_fraction",
+        "attention_work_fraction",
+        "graph_work",
+        "average_graph_attention_work_fraction",
+    )
+    if not work_values:
+        work_values = _summary_values(summary_rows, "graph_attention_work_fraction", "attention_work_fraction", "graph_work")
+    layer_values = _metric_values(metrics, "graph_executed_layers", "executed_layers", "average_graph_executed_layers")
+    if not layer_values:
+        layer_values = _summary_values(summary_rows, "graph_executed_layers", "executed_layers")
+    pruned_values = _graph_pruned_fraction_values(metrics, summary_rows)
+    if not work_values and not layer_values and not pruned_values:
+        return ""
+    mean_work = _mean(work_values)
+    mean_layers = _mean(layer_values)
+    mean_pruned = _mean(pruned_values)
+    saved = None if mean_work is None else max(0.0, 1.0 - mean_work)
+    return f"""
+  <section class="panel history-charts">
+    <div class="panel-head"><div><h2>LightGlue 自适应推理</h2><p>展示 GraphMatcher 的早停、剪枝和注意力计算量占比，用来判断自适应推理是否真的省算力。</p></div></div>
+    <div class="metric-grid history-metrics">
+      <article class="metric-card"><span>平均计算量占比</span><strong>{_format_percent(mean_work)}</strong><small>越低越省 attention</small></article>
+      <article class="metric-card"><span>平均节省计算量</span><strong>{_format_percent(saved)}</strong><small>相对满层全宽度</small></article>
+      <article class="metric-card"><span>平均执行层数</span><strong>{_format_float(mean_layers)}</strong><small>早停后层数</small></article>
+      <article class="metric-card"><span>平均剪枝比例</span><strong>{_format_percent(mean_pruned)}</strong><small>宽度剪枝点占比</small></article>
+    </div>
+    <div class="history-chart-grid">
+      {_line_chart_svg(metrics, '计算量占比', ('graph_attention_work_fraction', 'attention_work_fraction', 'graph_work', 'average_graph_attention_work_fraction'))}
+      {_line_chart_svg(metrics, '执行层数', ('graph_executed_layers', 'executed_layers', 'average_graph_executed_layers'))}
+      {_derived_line_chart_svg(metrics, '剪枝比例', _graph_pruned_fraction_from_row)}
+      {_histogram_svg(metrics, '计算量占比分布', ('graph_attention_work_fraction', 'attention_work_fraction', 'graph_work', 'average_graph_attention_work_fraction'))}
+    </div>
+  </section>
+"""
+
+
 def render_history(project_root: Path, query: dict[str, list[str]]) -> str:
     runs = discover_runs(project_root / "runs")
     selected_name = query.get("run", [runs[0].name if runs else ""])[0]
@@ -417,6 +559,7 @@ def render_history(project_root: Path, query: dict[str, list[str]]) -> str:
         metrics = read_metrics_csv(run_metrics_path(selected.path))
         visual_report = _visual_report_path(selected.path)
         summary_rows = _read_visual_summary(selected.path)
+        match_summary_rows = _read_visual_match_summary(selected.path)
         summary_table = "".join(
             "<tr>"
             f"<td>{html.escape(row.get('label', '-'))}</td>"
@@ -461,6 +604,7 @@ def render_history(project_root: Path, query: dict[str, list[str]]) -> str:
       {_histogram_svg(metrics, 'Loss 直方图', ('loss', 'loss_total', 'total_loss', 'train_loss'))}
     </div>
   </section>
+  {_graph_efficiency_section(metrics, match_summary_rows)}
   <section class="panel">
     <div class="panel-head"><div><h2>匹配样本摘要</h2><p>绿色正确、红色错误；下方完整报告内含连线图和误差直方图。</p></div></div>
     <div class="table-wrap"><table><thead><tr><th>类型</th><th>扰动</th><th>匹配</th><th>正确</th><th>错误</th><th>正确率</th></tr></thead><tbody>{summary_table}</tbody></table></div>
