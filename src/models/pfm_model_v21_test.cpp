@@ -325,6 +325,40 @@ static void pfm_v21_graph_matcher_width_pruning_can_keep_top_ratio()
     PFM_REQUIRE_CLOSE(output.attention_work_fraction, 33.0 / 75.0, 1.0e-6);
 }
 
+static void pfm_v21_graph_matcher_top_ratio_survives_over_strict_accept_threshold()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(5, 16, 3, 16, 0);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key().rfind("accept_head.", 0) == 0)
+        {
+            parameter.value().zero_();
+        }
+    }
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key() == "accept_head.2.bias")
+        {
+            parameter.value().fill_(-4.0F);
+        }
+    }
+
+    auto descriptors = torch::eye(5, torch::kFloat32);
+    auto metadata = torch::zeros({5, 16}, torch::kFloat32);
+    metadata.index_put_({torch::indexing::Slice(), 12}, torch::tensor({1.0F, 0.9F, 0.8F, 0.7F, 0.1F}));
+
+    const auto output = matcher->forward(descriptors, metadata, descriptors, metadata, true, 0.8, -1.0, 0, 1.0, 0.4);
+
+    PFM_REQUIRE(output.kept_keypoints_a == 2);
+    PFM_REQUIRE(output.kept_keypoints_b == 2);
+    PFM_REQUIRE(output.pruned_keypoints_a == 3);
+    PFM_REQUIRE(output.pruned_keypoints_b == 3);
+    PFM_REQUIRE(output.attention_work_fraction < 1.0);
+}
+
 static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 3, 4);
@@ -475,6 +509,8 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance);
     register_test("pfm v21 graph matcher width pruning can keep top ratio",
                   pfm_v21_graph_matcher_width_pruning_can_keep_top_ratio);
+    register_test("pfm v21 graph matcher top ratio survives over strict accept threshold",
+                  pfm_v21_graph_matcher_top_ratio_survives_over_strict_accept_threshold);
     register_test("pfm v21 graph matcher can stop attention layers when confident",
                   pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
     register_test("pfm v21 graph matcher respects max attention layers",

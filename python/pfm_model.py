@@ -1006,21 +1006,34 @@ class PlanetaryGraphMatcher(nn.Module):
                     if prune_enabled or ratio_prune_enabled:
                         keep_work_a = torch.ones(embed_a.size(0), dtype=torch.bool, device=embed_a.device)
                         keep_work_b = torch.ones(embed_b.size(0), dtype=torch.bool, device=embed_b.device)
+                        threshold_keep_a = keep_work_a
+                        threshold_keep_b = keep_work_b
                         if prune_enabled:
                             threshold_keep_a, threshold_keep_b = self._acceptance_keep_masks(
                                 provisional_accept_logits,
                                 float(width_prune_min_score),
                             )
-                            keep_work_a = keep_work_a & threshold_keep_a
-                            keep_work_b = keep_work_b & threshold_keep_b
                         if ratio_prune_enabled:
                             ratio_keep_a, ratio_keep_b = self._acceptance_top_count_keep_masks(
                                 provisional_accept_logits,
                                 keep_count_a,
                                 keep_count_b,
                             )
-                            keep_work_a = keep_work_a & ratio_keep_a
-                            keep_work_b = keep_work_b & ratio_keep_b
+                            if prune_enabled and bool(threshold_keep_a.any()) and bool(threshold_keep_b.any()):
+                                combined_keep_a = threshold_keep_a & ratio_keep_a
+                                combined_keep_b = threshold_keep_b & ratio_keep_b
+                                if bool(combined_keep_a.any()) and bool(combined_keep_b.any()):
+                                    keep_work_a = combined_keep_a
+                                    keep_work_b = combined_keep_b
+                                else:
+                                    keep_work_a = ratio_keep_a
+                                    keep_work_b = ratio_keep_b
+                            else:
+                                keep_work_a = ratio_keep_a
+                                keep_work_b = ratio_keep_b
+                        elif prune_enabled:
+                            keep_work_a = threshold_keep_a
+                            keep_work_b = threshold_keep_b
                         if bool(keep_work_a.any()) and bool(keep_work_b.any()) and (
                             not bool(keep_work_a.all()) or not bool(keep_work_b.all())
                         ):

@@ -25,6 +25,7 @@ class GraphSweepConfig:
     preset: str
     accept_probability: float
     fallback_mode: str
+    width_prune_keep_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,24 @@ def parse_float_list(value: str) -> list[float]:
     return values
 
 
+def parse_unit_float_list(value: str, *, label: str) -> list[float]:
+    values: list[float] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            parsed = float(item)
+        except ValueError as exc:
+            raise ValueError(f"invalid float value: {item}") from exc
+        if parsed < 0.0 or parsed > 1.0:
+            raise ValueError(f"{label} must be in [0, 1]")
+        values.append(parsed)
+    if not values:
+        raise ValueError(f"at least one {label} is required")
+    return values
+
+
 def parse_choice_list(value: str, *, allowed: set[str], label: str) -> list[str]:
     choices: list[str] = []
     for raw in value.split(","):
@@ -83,18 +102,26 @@ def iter_sweep_configs(
     presets: list[str],
     accept_probabilities: list[float],
     fallback_modes: list[str],
+    width_prune_keep_ratios: list[float],
 ) -> list[GraphSweepConfig]:
     return [
-        GraphSweepConfig(preset=preset, accept_probability=accept_probability, fallback_mode=fallback_mode)
+        GraphSweepConfig(
+            preset=preset,
+            accept_probability=accept_probability,
+            fallback_mode=fallback_mode,
+            width_prune_keep_ratio=width_prune_keep_ratio,
+        )
         for preset in presets
         for accept_probability in accept_probabilities
         for fallback_mode in fallback_modes
+        for width_prune_keep_ratio in width_prune_keep_ratios
     ]
 
 
 def slug_for_config(config: GraphSweepConfig) -> str:
     probability = f"{config.accept_probability:g}".replace("-", "neg").replace(".", "p")
-    return f"{config.preset}_accept{probability}_fallback{config.fallback_mode}"
+    keep_ratio = f"{config.width_prune_keep_ratio:g}".replace(".", "p")
+    return f"{config.preset}_accept{probability}_keep{keep_ratio}_fallback{config.fallback_mode}"
 
 
 def _int_from_row(row: dict[str, str], key: str) -> int:
@@ -234,7 +261,7 @@ def build_eval_command(args: argparse.Namespace, config: GraphSweepConfig, outpu
             "--graph-max-attention-work-fraction",
             f"{args.graph_max_attention_work_fraction:g}",
             "--graph-width-prune-keep-ratio",
-            f"{args.graph_width_prune_keep_ratio:g}",
+            f"{config.width_prune_keep_ratio:g}",
             "--graph-min-accept-probability",
             f"{config.accept_probability:g}",
             "--graph-inference-preset",
@@ -272,6 +299,7 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
             fieldnames=[
                 "preset",
                 "accept_probability",
+                "width_prune_keep_ratio",
                 "fallback_mode",
                 "pairs",
                 "matches",
@@ -295,6 +323,7 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
                 {
                     "preset": summary.config.preset,
                     "accept_probability": f"{summary.config.accept_probability:g}",
+                    "width_prune_keep_ratio": f"{summary.config.width_prune_keep_ratio:g}",
                     "fallback_mode": summary.config.fallback_mode,
                     "pairs": summary.pairs,
                     "matches": summary.matches,
@@ -364,6 +393,7 @@ def write_report_html(
             "<tr class=\"best\" if-best>"
             f"<td>{html.escape(summary.config.preset)}</td>"
             f"<td>{summary.config.accept_probability:g}</td>"
+            f"<td>{summary.config.width_prune_keep_ratio:g}</td>"
             f"<td>{html.escape(summary.config.fallback_mode)}</td>"
             f"<td>{summary.pairs}</td>"
             f"<td>{summary.matches}</td>"
@@ -392,7 +422,8 @@ def write_report_html(
         )
         best_text = (
             f"{best.config.preset} / accept={best.config.accept_probability:g} / "
-            f"fallback={best.config.fallback_mode}，precision={best.precision:.6f}，correct={best.correct}，"
+            f"keep={best.config.width_prune_keep_ratio:g} / fallback={best.config.fallback_mode}，"
+            f"precision={best.precision:.6f}，correct={best.correct}，"
             f"平均执行层数={best.avg_executed_layers:.3f}，剪枝比例={best.pruned_keypoint_fraction:.2%}，"
             f"计算量比例={best.attention_work_fraction:.2%}。{budget_text}"
         )
@@ -469,6 +500,7 @@ def write_report_html(
       <tr>
         <th>Preset</th>
         <th>Accept 概率</th>
+        <th>宽度保留比例</th>
         <th>Fallback</th>
         <th>Pair 数</th>
         <th>匹配数</th>
@@ -506,7 +538,7 @@ def run_sweep(args: argparse.Namespace) -> list[EvalSummary]:
     presets = parse_choice_list(args.presets, allowed=GRAPH_PRESETS, label="graph preset")
     accept_probabilities = parse_float_list(args.accept_probabilities)
     fallback_modes = parse_choice_list(args.fallback_modes, allowed=PYTHON_FALLBACK_MODES, label="fallback mode")
-    configs = iter_sweep_configs(presets, accept_probabilities, fallback_modes)
+    configs = iter_sweep_configs(presets, accept_probabilities, fallback_modes, args.width_prune_keep_ratios)
     env = os.environ.copy()
     env["PYTHONPATH"] = _pythonpath_with_project(env.get("PYTHONPATH"))
 
@@ -569,7 +601,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
-    parser.add_argument("--graph-width-prune-keep-ratio", type=float, default=1.0)
+    parser.add_argument(
+        "--graph-width-prune-keep-ratio",
+        type=float,
+        default=None,
+        help="Single keep ratio kept for compatibility; prefer --width-prune-keep-ratios for sweeps.",
+    )
+    parser.add_argument(
+        "--width-prune-keep-ratios",
+        default=None,
+        help="Comma-separated GraphMatcher width keep ratios to sweep, e.g. 1,0.7,0.5.",
+    )
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -593,11 +635,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-max-attention-layers must be nonnegative")
     if args.graph_max_attention_work_fraction < 0.0 or args.graph_max_attention_work_fraction > 1.0:
         parser.error("--graph-max-attention-work-fraction must be in [0, 1]")
-    if args.graph_width_prune_keep_ratio < 0.0 or args.graph_width_prune_keep_ratio > 1.0:
+    if args.graph_width_prune_keep_ratio is not None and (
+        args.graph_width_prune_keep_ratio < 0.0 or args.graph_width_prune_keep_ratio > 1.0
+    ):
         parser.error("--graph-width-prune-keep-ratio must be in [0, 1]")
     try:
         parse_choice_list(args.presets, allowed=GRAPH_PRESETS, label="graph preset")
         parse_float_list(args.accept_probabilities)
+        keep_ratio_text = (
+            args.width_prune_keep_ratios
+            if args.width_prune_keep_ratios is not None
+            else ("1.0" if args.graph_width_prune_keep_ratio is None else f"{args.graph_width_prune_keep_ratio:g}")
+        )
+        args.width_prune_keep_ratios = parse_unit_float_list(keep_ratio_text, label="width prune keep ratios")
         parse_choice_list(args.fallback_modes, allowed=PYTHON_FALLBACK_MODES, label="fallback mode")
     except ValueError as exc:
         parser.error(str(exc))

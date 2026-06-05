@@ -1123,18 +1123,44 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
                 {
                     auto keep_work_a = torch::ones({embed_a.size(0)}, embed_a.options().dtype(torch::kBool));
                     auto keep_work_b = torch::ones({embed_b.size(0)}, embed_b.options().dtype(torch::kBool));
+                    auto threshold_keep_a = keep_work_a;
+                    auto threshold_keep_b = keep_work_b;
                     if (prune_enabled)
                     {
                         auto keep_masks = acceptanceKeepMasks(provisional_accept_logits, width_prune_min_score);
-                        keep_work_a = keep_work_a.logical_and(keep_masks.first);
-                        keep_work_b = keep_work_b.logical_and(keep_masks.second);
+                        threshold_keep_a = keep_masks.first;
+                        threshold_keep_b = keep_masks.second;
                     }
                     if (ratio_prune_enabled)
                     {
                         auto keep_masks =
                             acceptanceTopCountKeepMasks(provisional_accept_logits, keep_count_a, keep_count_b);
-                        keep_work_a = keep_work_a.logical_and(keep_masks.first);
-                        keep_work_b = keep_work_b.logical_and(keep_masks.second);
+                        if (prune_enabled && threshold_keep_a.any().item<bool>() &&
+                            threshold_keep_b.any().item<bool>())
+                        {
+                            auto combined_keep_a = threshold_keep_a.logical_and(keep_masks.first);
+                            auto combined_keep_b = threshold_keep_b.logical_and(keep_masks.second);
+                            if (combined_keep_a.any().item<bool>() && combined_keep_b.any().item<bool>())
+                            {
+                                keep_work_a = combined_keep_a;
+                                keep_work_b = combined_keep_b;
+                            }
+                            else
+                            {
+                                keep_work_a = keep_masks.first;
+                                keep_work_b = keep_masks.second;
+                            }
+                        }
+                        else
+                        {
+                            keep_work_a = keep_masks.first;
+                            keep_work_b = keep_masks.second;
+                        }
+                    }
+                    else if (prune_enabled)
+                    {
+                        keep_work_a = threshold_keep_a;
+                        keep_work_b = threshold_keep_b;
                     }
                     const bool has_a = keep_work_a.any().item<bool>();
                     const bool has_b = keep_work_b.any().item<bool>();

@@ -192,6 +192,37 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(output.full_attention_work_units, 75)
         self.assertAlmostEqual(output.attention_work_fraction, 33 / 75)
 
+    def test_graph_matcher_top_ratio_survives_over_strict_accept_threshold(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=5,
+            hidden_dim=16,
+            attention_layers=3,
+            keypoint_meta_dim=16,
+            candidate_topk=0,
+        )
+        with torch.no_grad():
+            for parameter in graph.accept_head.parameters():
+                parameter.zero_()
+            graph.accept_head[2].bias.fill_(-4.0)
+        descriptors = torch.eye(5)
+        metadata = torch.zeros(5, 16)
+        metadata[:, 12] = torch.tensor([1.0, 0.9, 0.8, 0.7, 0.1])
+
+        output = graph(
+            descriptors,
+            metadata,
+            descriptors,
+            metadata,
+            width_prune_min_score=0.8,
+            width_prune_keep_ratio=0.4,
+        )
+
+        self.assertEqual(output.kept_keypoints_a, 2)
+        self.assertEqual(output.kept_keypoints_b, 2)
+        self.assertEqual(output.pruned_keypoints_a, 3)
+        self.assertEqual(output.pruned_keypoints_b, 3)
+        self.assertLess(output.attention_work_fraction, 1.0)
+
     def test_graph_matcher_can_stop_attention_layers_when_confident(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
         desc = torch.tensor([[1.0, 0.0], [0.0, 1.0]])

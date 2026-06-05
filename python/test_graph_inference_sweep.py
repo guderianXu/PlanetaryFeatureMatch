@@ -48,7 +48,6 @@ class GraphInferenceSweepTest(unittest.TestCase):
             graph_min_raw_margin=0.0,
             graph_max_attention_layers=2,
             graph_max_attention_work_fraction=0.5,
-            graph_width_prune_keep_ratio=0.4,
             min_target_gradient=0.0,
             min_target_local_contrast=0.0,
             limit_pairs=16,
@@ -59,7 +58,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             hard_min_matches=4,
             hard_max_precision=0.9,
         )
-        config = sweep.GraphSweepConfig("high_precision", 0.7, "none")
+        config = sweep.GraphSweepConfig("high_precision", 0.7, "none", 0.4)
 
         command = sweep.build_eval_command(args, config, Path("/out/high_precision.csv"))
 
@@ -81,9 +80,16 @@ class GraphInferenceSweepTest(unittest.TestCase):
         self.assertIn("123", command)
         self.assertIn("--exclude-self-pairs", command)
 
+    def test_iter_sweep_configs_crosses_width_prune_keep_ratios(self):
+        configs = sweep.iter_sweep_configs(["fast"], [0.7], ["none"], [1.0, 0.5])
+
+        self.assertEqual([config.width_prune_keep_ratio for config in configs], [1.0, 0.5])
+        self.assertEqual(sweep.slug_for_config(configs[0]), "fast_accept0p7_keep1_fallbacknone")
+        self.assertEqual(sweep.slug_for_config(configs[1]), "fast_accept0p7_keep0p5_fallbacknone")
+
     def test_best_summary_prefers_lower_attention_work_when_precision_is_close(self):
         high_precision = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("high_precision", 0.85, "none"),
+            config=sweep.GraphSweepConfig("high_precision", 0.85, "none", 1.0),
             output_csv=Path("/out/high_precision.csv"),
             pairs=10,
             matches=100,
@@ -94,7 +100,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             attention_work_fraction=1.0,
         )
         fast = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("fast", 0.7, "none"),
+            config=sweep.GraphSweepConfig("fast", 0.7, "none", 0.5),
             output_csv=Path("/out/fast.csv"),
             pairs=10,
             matches=96,
@@ -105,7 +111,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             attention_work_fraction=0.35,
         )
         low_quality = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("fast", 0.5, "mutual"),
+            config=sweep.GraphSweepConfig("fast", 0.5, "mutual", 0.25),
             output_csv=Path("/out/low_quality.csv"),
             pairs=10,
             matches=120,
@@ -122,7 +128,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
 
     def test_best_summary_obeys_attention_work_budget_before_precision_tolerance(self):
         accurate_expensive = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("high_precision", 0.85, "none"),
+            config=sweep.GraphSweepConfig("high_precision", 0.85, "none", 1.0),
             output_csv=Path("/out/high_precision.csv"),
             pairs=10,
             matches=100,
@@ -133,7 +139,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             attention_work_fraction=0.9,
         )
         budget_fast = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("fast", 0.7, "none"),
+            config=sweep.GraphSweepConfig("fast", 0.7, "none", 0.5),
             output_csv=Path("/out/fast.csv"),
             pairs=10,
             matches=95,
@@ -144,7 +150,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             attention_work_fraction=0.45,
         )
         cheap_low_quality = sweep.EvalSummary(
-            config=sweep.GraphSweepConfig("fast", 0.5, "mutual"),
+            config=sweep.GraphSweepConfig("fast", 0.5, "mutual", 0.25),
             output_csv=Path("/out/cheap.csv"),
             pairs=10,
             matches=80,
@@ -163,7 +169,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
         self.assertIs(best, budget_fast)
 
     def test_summarize_eval_csv_and_write_reports(self):
-        config = sweep.GraphSweepConfig("high_precision", 0.7, "none")
+        config = sweep.GraphSweepConfig("high_precision", 0.7, "none", 0.5)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             eval_csv = tmp_path / "eval.csv"
@@ -200,6 +206,8 @@ class GraphInferenceSweepTest(unittest.TestCase):
             sweep.write_report_html([summary], report_html)
 
             self.assertIn("high_precision", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("width_prune_keep_ratio", summary_csv.read_text(encoding="utf-8"))
+            self.assertIn("0.5", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("0.866667", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("avg_executed_layers", summary_csv.read_text(encoding="utf-8"))
             self.assertIn("3.000", summary_csv.read_text(encoding="utf-8"))
@@ -209,6 +217,7 @@ class GraphInferenceSweepTest(unittest.TestCase):
             html = report_html.read_text(encoding="utf-8")
             self.assertIn("<html", html)
             self.assertIn("high_precision", html)
+            self.assertIn("0.5", html)
             self.assertIn("严格图匹配", html)
             self.assertIn("平均执行层数", html)
             self.assertIn("剪枝比例", html)
