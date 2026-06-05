@@ -1640,6 +1640,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "fast",
             "--report-graph-min-accept-probability",
             "0.7",
+            "--report-graph-max-attention-work-fraction",
+            "0.55",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -1656,6 +1658,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.report_graph_early_stop_min_confidence, 0.85)
         self.assertEqual(args.report_graph_inference_preset, "fast")
         self.assertEqual(args.report_graph_min_accept_probability, 0.7)
+        self.assertEqual(args.report_graph_max_attention_work_fraction, 0.55)
 
     def test_training_report_command_forwards_lightglue_graph_options(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1681,6 +1684,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 report_graph_width_prune_min_score=0.25,
                 report_graph_early_stop_min_confidence=0.85,
                 report_graph_min_accept_probability=0.7,
+                report_graph_max_attention_work_fraction=0.55,
                 min_intensity=0.01,
                 report_required_sample_glob=[],
                 pose_metadata_root=[],
@@ -1698,6 +1702,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("0.85", command)
         self.assertIn("--graph-min-accept-probability", command)
         self.assertIn("0.7", command)
+        self.assertIn("--graph-max-attention-work-fraction", command)
+        self.assertIn("0.55", command)
 
     def test_parse_args_accepts_pseudo_label_options(self):
         argv = [

@@ -238,6 +238,8 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "0.75",
             "--graph-max-attention-layers",
             "2",
+            "--graph-max-attention-work-fraction",
+            "0.5",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -254,6 +256,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(args.graph_inference_preset, "high_precision")
         self.assertEqual(args.graph_min_accept_probability, 0.75)
         self.assertEqual(args.graph_max_attention_layers, 2)
+        self.assertEqual(args.graph_max_attention_work_fraction, 0.5)
 
     def test_graph_inference_thresholds_resolve_lightglue_presets(self):
         self.assertEqual(eval_py.graph_inference_thresholds("off", -1.0, -1.0), (-1.0, -1.0))
@@ -609,10 +612,12 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
                 width_prune_min_score=-1.0,
                 early_stop_min_confidence=-1.0,
                 max_attention_layers=0,
+                max_attention_work_fraction=1.0,
             ):
                 self.width_prune_min_score = width_prune_min_score
                 self.early_stop_min_confidence = early_stop_min_confidence
                 self.max_attention_layers = max_attention_layers
+                self.max_attention_work_fraction = max_attention_work_fraction
                 return pfm_model.GraphMatcherOutput(
                     logits=torch.empty(3, 3),
                     matches=torch.tensor([[0, 0], [1, 1]], dtype=torch.long),
@@ -630,11 +635,13 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             graph_width_prune_min_score=0.25,
             graph_early_stop_min_confidence=0.75,
             graph_max_attention_layers=2,
+            graph_max_attention_work_fraction=0.5,
         )
 
         self.assertEqual(model.width_prune_min_score, 0.25)
         self.assertEqual(model.early_stop_min_confidence, 0.75)
         self.assertEqual(model.max_attention_layers, 2)
+        self.assertEqual(model.max_attention_work_fraction, 0.5)
         self.assertEqual(matches.tolist(), [[0, 0], [1, 1]])
 
     def test_graph_matcher_matches_filters_low_accept_probability(self):

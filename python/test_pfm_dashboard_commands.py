@@ -40,6 +40,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--report-graph-width-prune-min-score 0.25", script)
         self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
         self.assertIn("--report-graph-min-accept-probability 0.7", script)
+        self.assertIn("--report-graph-max-attention-work-fraction 0.55", script)
         self.assertIn("graph_max_attention_work_fraction=0.55", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:

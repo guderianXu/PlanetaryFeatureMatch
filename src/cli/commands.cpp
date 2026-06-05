@@ -357,6 +357,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Maximum graph attention layers to execute; 0 uses the checkpoint layer count")
         ->check(CLI::NonNegativeNumber);
     match
+        ->add_option("--graph-max-attention-work-fraction", options.graph_max_attention_work_fraction,
+                     "Maximum graph attention work fraction to execute; 1 uses the full checkpoint work")
+        ->check(CLI::Range(0.0, 1.0));
+    match
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,
                      "Graph matcher fallback mode after learned graph output: geometry or none")
         ->check(CLI::IsMember({"geometry", "none"}));
@@ -435,6 +439,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         ->add_option("--graph-max-attention-layers", options.graph_max_attention_layers,
                      "Maximum graph attention layers to execute; 0 uses the checkpoint layer count")
         ->check(CLI::NonNegativeNumber);
+    eval
+        ->add_option("--graph-max-attention-work-fraction", options.graph_max_attention_work_fraction,
+                     "Maximum graph attention work fraction to execute; 1 uses the full checkpoint work")
+        ->check(CLI::Range(0.0, 1.0));
     eval
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,
                      "Graph matcher fallback mode after learned graph output: geometry or none")

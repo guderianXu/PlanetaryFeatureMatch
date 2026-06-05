@@ -24,6 +24,8 @@ struct GraphMatcherInferenceOptions
     double min_accept_probability = -1.0;
     /// LightGlue 风格深度预算硬上限；0 表示使用 checkpoint 中的完整图注意力层数。
     int64_t max_attention_layers = 0;
+    /// LightGlue 风格 attention 工作量预算；1 表示完整执行，0 表示跳过 attention 层。
+    double max_attention_work_fraction = 1.0;
     /// 图匹配输出后的回退策略；Geometry 表示继续 descriptor/top-k/几何回退，None 表示严格返回 graph 输出。
     GraphMatcherFallbackMode fallback_mode = GraphMatcherFallbackMode::Geometry;
 };

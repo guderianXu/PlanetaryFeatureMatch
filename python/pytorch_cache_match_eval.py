@@ -588,6 +588,7 @@ def graph_matcher_matches(
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
     graph_max_attention_layers: int = 0,
+    graph_max_attention_work_fraction: float = 1.0,
     scores_a: torch.Tensor | None = None,
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
@@ -608,6 +609,8 @@ def graph_matcher_matches(
         raise ValueError("graph_early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
     if graph_max_attention_layers < 0:
         raise ValueError("graph_max_attention_layers must be nonnegative; use 0 to keep all graph layers")
+    if graph_max_attention_work_fraction < 0.0 or graph_max_attention_work_fraction > 1.0:
+        raise ValueError("graph_max_attention_work_fraction must be in [0, 1]")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -640,6 +643,8 @@ def graph_matcher_matches(
         graph_kwargs["early_stop_min_confidence"] = float(graph_early_stop_min_confidence)
     if graph_max_attention_layers > 0:
         graph_kwargs["max_attention_layers"] = int(graph_max_attention_layers)
+    if graph_max_attention_work_fraction < 1.0:
+        graph_kwargs["max_attention_work_fraction"] = float(graph_max_attention_work_fraction)
     output = model.graph_matcher(
         desc_a.to(model_device, torch.float32),
         meta_a,
@@ -967,6 +972,7 @@ def match_pair_descriptor_maps(
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
     graph_max_attention_layers: int = 0,
+    graph_max_attention_work_fraction: float = 1.0,
     mutual: bool = False,
     geometry_filter: str = "none",
     texture_fraction: float = 1.0,
@@ -1066,6 +1072,7 @@ def match_pair_descriptor_maps(
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
             graph_max_attention_layers=graph_max_attention_layers,
+            graph_max_attention_work_fraction=graph_max_attention_work_fraction,
             scores_a=row_scores_a,
             scores_b=row_scores_b,
             metadata_a=metadata_a,
@@ -1320,6 +1327,7 @@ def evaluate_pair_path(
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
     graph_max_attention_layers: int = 0,
+    graph_max_attention_work_fraction: float = 1.0,
 ) -> MatchEvalResult:
     if min_target_gradient < 0.0:
         raise ValueError("min_target_gradient must be non-negative")
@@ -1369,6 +1377,7 @@ def evaluate_pair_path(
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
             graph_max_attention_layers=graph_max_attention_layers,
+            graph_max_attention_work_fraction=graph_max_attention_work_fraction,
             mutual=mutual,
             geometry_filter=geometry_filter,
             keypoint_spatial_bins=keypoint_spatial_bins,
@@ -1433,6 +1442,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
+    parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -1447,6 +1457,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-min-accept-probability must be in [-1, 1]")
     if args.graph_max_attention_layers < 0:
         parser.error("--graph-max-attention-layers must be nonnegative")
+    if args.graph_max_attention_work_fraction < 0.0 or args.graph_max_attention_work_fraction > 1.0:
+        parser.error("--graph-max-attention-work-fraction must be in [0, 1]")
     return args
 
 
@@ -1533,6 +1545,7 @@ def main() -> int:
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
                 graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                 graph_max_attention_layers=args.graph_max_attention_layers,
+                graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

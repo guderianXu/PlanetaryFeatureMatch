@@ -298,6 +298,27 @@ static void pfm_v21_graph_matcher_respects_max_attention_layers()
     PFM_REQUIRE_CLOSE(output.attention_work_fraction, 0.5, 1.0e-6);
 }
 
+static void pfm_v21_graph_matcher_respects_attention_work_fraction_budget()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 4, 4);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    auto descriptors = torch::eye(3, torch::kFloat32).index({torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
+    auto keypoints = torch::zeros({3, 2}, torch::kFloat32);
+    keypoints.index_put_({1, 0}, 1.0F);
+    keypoints.index_put_({2, 0}, 2.0F);
+
+    const auto output = matcher->forward(descriptors, keypoints, descriptors, keypoints, true, -1.0, -1.0, 0, 0.5);
+
+    PFM_REQUIRE(output.logits.sizes() == torch::IntArrayRef({4, 4}));
+    PFM_REQUIRE(output.executed_layers == 2);
+    PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 2);
+    PFM_REQUIRE(output.attention_work_units == 18);
+    PFM_REQUIRE(output.full_attention_work_units == 36);
+    PFM_REQUIRE_CLOSE(output.attention_work_fraction, 0.5, 1.0e-6);
+}
+
 static void pfm_v21_graph_matcher_early_stop_tolerates_single_uncertain_keypoint()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(5, 8, 3, 4);
@@ -392,6 +413,8 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
     register_test("pfm v21 graph matcher respects max attention layers",
                   pfm_v21_graph_matcher_respects_max_attention_layers);
+    register_test("pfm v21 graph matcher respects attention work fraction budget",
+                  pfm_v21_graph_matcher_respects_attention_work_fraction_budget);
     register_test("pfm v21 graph matcher early stop tolerates single uncertain keypoint",
                   pfm_v21_graph_matcher_early_stop_tolerates_single_uncertain_keypoint);
     register_test("pfm v21 optimizer step updates parameters", pfm_v21_optimizer_step_updates_parameters);

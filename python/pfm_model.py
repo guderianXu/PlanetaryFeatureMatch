@@ -897,11 +897,14 @@ class PlanetaryGraphMatcher(nn.Module):
         width_prune_min_score: float = -1.0,
         early_stop_min_confidence: float = -1.0,
         max_attention_layers: int = 0,
+        max_attention_work_fraction: float = 1.0,
     ) -> GraphMatcherOutput:
         if early_stop_min_confidence < -1.0:
             raise ValueError("early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
         if max_attention_layers < 0:
             raise ValueError("max_attention_layers must be nonnegative; 0 disables hard layer budget")
+        if max_attention_work_fraction < 0.0 or max_attention_work_fraction > 1.0:
+            raise ValueError("max_attention_work_fraction must be in [0, 1]")
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
         if descriptors_a.size(0) != keypoints_a.size(0) or descriptors_b.size(0) != keypoints_b.size(0):
@@ -931,6 +934,8 @@ class PlanetaryGraphMatcher(nn.Module):
         input_keypoints_a = int(descriptors_a.size(0))
         input_keypoints_b = int(descriptors_b.size(0))
         full_attention_work_units = input_keypoints_a * input_keypoints_b * len(self.attention_layers)
+        max_attention_work_units = int(math.floor(full_attention_work_units * float(max_attention_work_fraction) + 1.0e-9))
+        work_budget_enabled = float(max_attention_work_fraction) < 1.0
         attention_work_units = 0
         if desc_work_a.size(0) == 0 or desc_work_b.size(0) == 0:
             self.last_executed_attention_layers = 0
@@ -944,7 +949,10 @@ class PlanetaryGraphMatcher(nn.Module):
             for layer in self.attention_layers:
                 if max_attention_layers > 0 and self.last_executed_attention_layers >= int(max_attention_layers):
                     break
-                attention_work_units += int(embed_a.size(0)) * int(embed_b.size(0))
+                layer_work_units = int(embed_a.size(0)) * int(embed_b.size(0))
+                if work_budget_enabled and attention_work_units + layer_work_units > max_attention_work_units:
+                    break
+                attention_work_units += layer_work_units
                 embed_a, embed_b = layer(embed_a, embed_b)
                 self.last_executed_attention_layers += 1
                 can_run_more_layers = self.last_executed_attention_layers < len(self.attention_layers) and (

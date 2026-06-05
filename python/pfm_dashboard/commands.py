@@ -188,6 +188,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
                 str(early_stop_min_confidence),
                 "--report-graph-min-accept-probability",
                 str(request.graph_min_accept_probability),
+                "--report-graph-max-attention-work-fraction",
+                str(request.graph_max_attention_work_fraction),
             ]
         )
     if request.max_train_batches > 0:

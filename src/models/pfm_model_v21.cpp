@@ -957,7 +957,8 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
                                                          const torch::Tensor& keypoints_b,
                                                          bool apply_candidate_mask, double width_prune_min_score,
                                                          double early_stop_min_confidence,
-                                                         int64_t max_attention_layers)
+                                                         int64_t max_attention_layers,
+                                                         double max_attention_work_fraction)
 {
     using torch::indexing::Slice;
 
@@ -972,6 +973,11 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     if (max_attention_layers < 0)
     {
         throw std::invalid_argument("max_attention_layers must be nonnegative; 0 disables hard layer budget");
+    }
+    if (!std::isfinite(max_attention_work_fraction) || max_attention_work_fraction < 0.0 ||
+        max_attention_work_fraction > 1.0)
+    {
+        throw std::invalid_argument("max_attention_work_fraction must be in [0, 1]");
     }
     if (descriptors_a.dim() != 2 || descriptors_b.dim() != 2)
     {
@@ -1022,6 +1028,10 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     const int64_t input_keypoints_a = descriptors_a.size(0);
     const int64_t input_keypoints_b = descriptors_b.size(0);
     const int64_t full_attention_work_units = input_keypoints_a * input_keypoints_b * _attention_layer_count;
+    const int64_t max_attention_work_units =
+        static_cast<int64_t>(std::floor(static_cast<double>(full_attention_work_units) * max_attention_work_fraction +
+                                        1.0e-9));
+    const bool work_budget_enabled = max_attention_work_fraction < 1.0;
     int64_t attention_work_units = 0;
 
     torch::Tensor pair_logits;
@@ -1046,7 +1056,12 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
             {
                 break;
             }
-            attention_work_units += embed_a.size(0) * embed_b.size(0);
+            const int64_t layer_work_units = embed_a.size(0) * embed_b.size(0);
+            if (work_budget_enabled && attention_work_units + layer_work_units > max_attention_work_units)
+            {
+                break;
+            }
+            attention_work_units += layer_work_units;
             auto refined = layer->as<PfmV21GraphAttentionLayerImpl>()->forward(embed_a, embed_b);
             embed_a = refined.first;
             embed_b = refined.second;

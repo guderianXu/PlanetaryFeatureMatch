@@ -483,6 +483,7 @@ def compute_visual_matches(
     graph_min_accept_probability: float,
     graph_width_prune_min_score: float,
     graph_early_stop_min_confidence: float,
+    graph_max_attention_work_fraction: float,
     mutual: bool,
     matcher_mode: str,
     graph_metadata_mode: str,
@@ -575,6 +576,7 @@ def compute_visual_matches(
                 graph_min_accept_probability=graph_min_accept_probability,
                 graph_width_prune_min_score=graph_width_prune_min_score,
                 graph_early_stop_min_confidence=graph_early_stop_min_confidence,
+                graph_max_attention_work_fraction=graph_max_attention_work_fraction,
                 scores_a=row_scores_a,
                 scores_b=row_scores_b,
                 metadata_a=meta_a,
@@ -1333,7 +1335,7 @@ def matching_config_lines(args: argparse.Namespace) -> list[str]:
         f"texture_fraction={args.texture_keypoint_fraction:.3f}, weak_texture_fraction={args.weak_texture_keypoint_fraction:.3f}, spatial_bins={args.keypoint_spatial_bins}, cell_cap={args.keypoint_cell_cap}。",
         f"min_score={args.min_score:.6f}, min_margin={args.min_margin:.6f}, threshold_px={args.threshold_px:.2f}。",
         f"graph_dustbin_delta={args.graph_dustbin_delta:.6f}, graph_acceptance_margin={args.graph_acceptance_margin:.6f}, graph_min_raw_score={args.graph_min_raw_score:.6f}, graph_min_raw_margin={args.graph_min_raw_margin:.6f}。",
-        f"graph_inference_preset={args.graph_inference_preset}, graph_min_accept_probability={args.graph_min_accept_probability:.6f}, graph_width_prune_min_score={args.graph_width_prune_min_score:.6f}, graph_early_stop_min_confidence={args.graph_early_stop_min_confidence:.6f}。",
+        f"graph_inference_preset={args.graph_inference_preset}, graph_min_accept_probability={args.graph_min_accept_probability:.6f}, graph_width_prune_min_score={args.graph_width_prune_min_score:.6f}, graph_early_stop_min_confidence={args.graph_early_stop_min_confidence:.6f}, graph_max_attention_work_fraction={args.graph_max_attention_work_fraction:.6f}。",
         f"training_crop_size={args.training_crop_size}, training_max_image_size={args.training_max_image_size}。",
     ]
 
@@ -1387,6 +1389,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-inference-preset", choices=sorted(match_eval.GRAPH_INFERENCE_PRESETS), default="off")
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
+    parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--non-mutual", action="store_true")
     parser.add_argument("--no-pdf", action="store_true")
     args = parser.parse_args()
@@ -1416,6 +1419,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-early-stop-min-confidence must be in [-1, 1]")
     if args.graph_min_accept_probability < -1.0 or args.graph_min_accept_probability > 1.0:
         parser.error("--graph-min-accept-probability must be in [-1, 1]")
+    if args.graph_max_attention_work_fraction < 0.0 or args.graph_max_attention_work_fraction > 1.0:
+        parser.error("--graph-max-attention-work-fraction must be in [0, 1]")
     return args
 
 
@@ -1479,6 +1484,7 @@ def main() -> int:
             graph_min_accept_probability=args.graph_min_accept_probability,
             graph_width_prune_min_score=args.graph_width_prune_min_score,
             graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
+            graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
             mutual=not args.non_mutual,
             matcher_mode=args.matcher_mode,
             graph_metadata_mode=args.graph_metadata_mode,
