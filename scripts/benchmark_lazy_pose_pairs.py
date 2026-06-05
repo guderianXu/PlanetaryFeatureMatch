@@ -1135,6 +1135,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "false_match_pairs",
         "hard_lazy_pairs",
         "data_wait_ms",
+        "false_mine_ms",
         "train_ms",
         "valid_fraction_mean",
         "worker_elapsed_ms_mean",
@@ -1228,12 +1229,20 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
             mined_false_matches = dict(static_false_matches)
             mined_false_rows: list[dict[str, object]] = []
+            false_mine_ms = 0.0
             false_probability = hard_pair_probability(
                 step,
                 max_probability=args.false_match_curriculum_max_probability,
                 warmup_steps=args.false_match_curriculum_warmup_steps,
             )
-            if args.mine_false_matches and args.false_match_weight > 0.0 and random.random() < false_probability:
+            should_mine_false_matches = (step - 1) % args.false_match_mine_every == 0
+            if (
+                args.mine_false_matches
+                and args.false_match_weight > 0.0
+                and should_mine_false_matches
+                and random.random() < false_probability
+            ):
+                false_mine_start = time.perf_counter()
                 for pair_path, pair in zip(fake_paths, augmented_pairs):
                     labels, label_rows = mine_false_matches_for_lazy_pair(
                         model,
@@ -1256,6 +1265,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     for mined_row in mined_false_rows:
                         false_match_writer.writerow(mined_row)
                     false_match_handle.flush()
+                false_mine_ms = (time.perf_counter() - false_mine_start) * 1000.0
             train_start = time.perf_counter()
             metrics = train_step(
                 model,
@@ -1337,6 +1347,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "false_match_pairs": f"{metrics.get('false_match_pairs', 0.0):.0f}",
                 "hard_lazy_pairs": hard_lazy_pairs,
                 "data_wait_ms": f"{data_wait_ms:.2f}",
+                "false_mine_ms": f"{false_mine_ms:.2f}",
                 "train_ms": f"{train_ms:.2f}",
                 "valid_fraction_mean": f"{statistics.fmean(result.valid_fraction for result in results):.6f}",
                 "worker_elapsed_ms_mean": f"{statistics.fmean(result.elapsed_ms for result in results):.2f}",
@@ -1447,6 +1458,7 @@ def _save_training_state(
                 "false_match_csv": [str(path) for path in args.false_match_csv],
                 "false_match_weight": float(args.false_match_weight),
                 "mine_false_matches": bool(args.mine_false_matches),
+                "false_match_mine_every": int(args.false_match_mine_every),
                 "train_graph_matcher": bool(args.train_graph_matcher),
                 "graph_matcher_loss_weight": float(args.graph_matcher_loss_weight),
                 "graph_matcher_no_match_points": int(args.graph_matcher_no_match_points),
@@ -1550,6 +1562,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--false-match-mine-min-score", type=float, default=-1.0)
     parser.add_argument("--false-match-mine-min-margin", type=float, default=0.02)
     parser.add_argument("--false-match-mine-threshold-px", type=float, default=5.0)
+    parser.add_argument("--false-match-mine-every", type=int, default=1)
     parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
     parser.add_argument("--input-local-contrast-kernel", type=int, default=31)
@@ -1630,6 +1643,8 @@ def main() -> int:
         raise ValueError("--false-match-mine-max-matches must be nonnegative; use 0 to keep all matches")
     if args.false_match_mine_min_margin < 0.0:
         raise ValueError("--false-match-mine-min-margin must be non-negative")
+    if args.false_match_mine_every <= 0:
+        raise ValueError("--false-match-mine-every must be positive")
     if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
         raise ValueError("--input-local-contrast-strength must be in [0, 1]")
     for name in (

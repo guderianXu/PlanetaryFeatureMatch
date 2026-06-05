@@ -103,6 +103,8 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.5",
             "--false-match-curriculum-max-probability",
             "0.75",
+            "--false-match-mine-every",
+            "4",
             "--hard-variant",
             "extreme",
             "--hard-valid-fraction-max",
@@ -120,6 +122,7 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertTrue(args.train_graph_matcher)
         self.assertEqual(args.graph_matcher_no_match_points, 64)
         self.assertEqual(args.false_match_csv, [Path("false.csv")])
+        self.assertEqual(args.false_match_mine_every, 4)
         self.assertEqual(args.hard_variant, ["extreme"])
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
