@@ -29,7 +29,6 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_DIR = PROJECT_ROOT / "python"
@@ -42,6 +41,13 @@ import pfm_model  # noqa: E402
 import pytorch_cache_match_eval as match_eval  # noqa: E402
 from generate_cross_position_pose_pairs import parse_tsai, read_float_tif  # noqa: E402
 from patch_descriptor_training import SyntheticPair  # noqa: E402
+from pfm_data.photometric import (  # noqa: E402
+    PhotometricAugmentConfig,
+    apply_local_contrast_normalization,
+    apply_photometric_augmentation,
+    apply_training_transforms,
+    make_illumination_consistency_pair,
+)
 from pfm_pytorch_training import (  # noqa: E402
     FalseMatchLabels,
     descriptor_parameters,
@@ -100,17 +106,6 @@ class LazyPairResult:
     attempt_count: int
     elapsed_ms: float
     illumination_pair: SyntheticPair | None = None
-
-
-@dataclass(frozen=True)
-class PhotometricAugmentConfig:
-    enabled: bool = False
-    probability: float = 1.0
-    brightness: float = 0.0
-    contrast: float = 0.0
-    gamma: float = 0.0
-    shadow: float = 0.0
-    noise: float = 0.0
 
 
 def _worker_init(cache_max_items: int) -> None:
@@ -268,158 +263,6 @@ def _random_crop_origin(rng: random.Random, *, crop_size: int, full_size: int) -
     if crop_size >= full_size:
         return 0
     return rng.randint(0, full_size - crop_size)
-
-
-def _rand_uniform(generator: torch.Generator, low: float, high: float) -> float:
-    if high <= low:
-        return float(low)
-    value = torch.rand((), generator=generator, dtype=torch.float32).item()
-    return float(low + (high - low) * value)
-
-
-def _make_shadow_map(image: torch.Tensor, config: PhotometricAugmentConfig, generator: torch.Generator) -> torch.Tensor:
-    _, height, width = image.shape
-    device = image.device
-    dtype = image.dtype
-    strength = _rand_uniform(generator, 0.0, max(0.0, float(config.shadow)))
-    if strength <= 0.0:
-        return image.new_ones((1, height, width))
-
-    if _rand_uniform(generator, 0.0, 1.0) < 0.5:
-        axis = torch.linspace(0.0, 1.0, width, dtype=dtype, device=device).view(1, 1, width)
-    else:
-        axis = torch.linspace(0.0, 1.0, height, dtype=dtype, device=device).view(1, height, 1)
-
-    if _rand_uniform(generator, 0.0, 1.0) < 0.5:
-        axis = 1.0 - axis
-    side_profile = axis.expand(1, height, width)
-
-    center = _rand_uniform(generator, 0.2, 0.8)
-    band_width = _rand_uniform(generator, 0.18, 0.45)
-    band_profile = (1.0 - (axis - center).abs() / max(band_width, 1.0e-3)).clamp(0.0, 1.0).expand(1, height, width)
-    mix = _rand_uniform(generator, 0.0, 1.0)
-    profile = (mix * side_profile + (1.0 - mix) * band_profile).clamp(0.0, 1.0)
-    return (1.0 - strength * profile).clamp(1.0 - strength, 1.0)
-
-
-def _augment_single_view(
-    image: torch.Tensor,
-    config: PhotometricAugmentConfig,
-    generator: torch.Generator,
-) -> torch.Tensor:
-    augmented = image.to(torch.float32).clamp(0.0, 1.0)
-    if _rand_uniform(generator, 0.0, 1.0) > max(0.0, min(1.0, float(config.probability))):
-        return augmented
-
-    contrast = max(0.0, float(config.contrast))
-    if contrast > 0.0:
-        contrast_scale = _rand_uniform(generator, max(0.05, 1.0 - contrast), 1.0 + contrast)
-        mean = augmented.mean(dim=(-2, -1), keepdim=True)
-        augmented = (augmented - mean) * contrast_scale + mean
-
-    gamma = max(0.0, float(config.gamma))
-    if gamma > 0.0:
-        # gamma 用指数采样，暗化和亮化的比例更对称。
-        gamma_value = math.exp(_rand_uniform(generator, -gamma, gamma))
-        augmented = augmented.clamp(0.0, 1.0).pow(gamma_value)
-
-    brightness = max(0.0, float(config.brightness))
-    if brightness > 0.0:
-        augmented = augmented + _rand_uniform(generator, -brightness, brightness)
-
-    if config.shadow > 0.0:
-        augmented = augmented * _make_shadow_map(augmented, config, generator)
-
-    noise = max(0.0, float(config.noise))
-    if noise > 0.0:
-        augmented = augmented + torch.randn(
-            augmented.shape,
-            generator=generator,
-            dtype=augmented.dtype,
-            device=augmented.device,
-        ) * _rand_uniform(generator, 0.0, noise)
-
-    return augmented.nan_to_num(0.0, 0.0, 0.0).clamp(0.0, 1.0).contiguous()
-
-
-def apply_photometric_augmentation(
-    pair: SyntheticPair,
-    config: PhotometricAugmentConfig,
-    *,
-    seed: int,
-) -> SyntheticPair:
-    if not config.enabled:
-        return pair
-    generator_a = torch.Generator(device=pair.view_a.device)
-    generator_b = torch.Generator(device=pair.view_b.device)
-    generator_a.manual_seed(int(seed) & 0x7FFFFFFFFFFFFFFF)
-    generator_b.manual_seed((int(seed) + 0x9E3779B97F4A7C15) & 0x7FFFFFFFFFFFFFFF)
-    return SyntheticPair(
-        view_a=_augment_single_view(pair.view_a, config, generator_a),
-        view_b=_augment_single_view(pair.view_b, config, generator_b),
-        warp_a_to_b=pair.warp_a_to_b,
-        valid_mask=pair.valid_mask,
-    )
-
-
-def make_illumination_consistency_pair(
-    pair: SyntheticPair,
-    config: PhotometricAugmentConfig,
-    *,
-    seed: int,
-) -> SyntheticPair:
-    if not config.enabled:
-        return pair
-    return apply_photometric_augmentation(pair, config, seed=seed)
-
-
-def _local_contrast_single_view(view: torch.Tensor, *, strength: float, kernel_size: int) -> torch.Tensor:
-    if strength <= 0.0:
-        return view
-    kernel = max(3, int(kernel_size))
-    if kernel % 2 == 0:
-        kernel += 1
-    image = view.to(torch.float32).clamp(0.0, 1.0)
-    batch = image.unsqueeze(0)
-    mean = F.avg_pool2d(batch, kernel_size=kernel, stride=1, padding=kernel // 2, count_include_pad=False)
-    high_pass = torch.clamp((batch - mean) * 0.75 + 0.5, 0.0, 1.0)
-    normalized = (1.0 - float(strength)) * batch + float(strength) * high_pass
-    return normalized.squeeze(0).clamp(0.0, 1.0).contiguous()
-
-
-def apply_local_contrast_normalization(
-    pair: SyntheticPair,
-    *,
-    strength: float,
-    kernel_size: int = 31,
-) -> SyntheticPair:
-    if strength <= 0.0:
-        return pair
-    return SyntheticPair(
-        view_a=_local_contrast_single_view(pair.view_a, strength=strength, kernel_size=kernel_size),
-        view_b=_local_contrast_single_view(pair.view_b, strength=strength, kernel_size=kernel_size),
-        warp_a_to_b=pair.warp_a_to_b,
-        valid_mask=pair.valid_mask,
-    )
-
-
-def apply_training_transforms(
-    pair: SyntheticPair,
-    *,
-    photometric_config: PhotometricAugmentConfig,
-    seed: int,
-    input_local_contrast: bool,
-    local_contrast_strength: float,
-    local_contrast_kernel: int,
-) -> SyntheticPair:
-    transformed = apply_photometric_augmentation(pair, photometric_config, seed=seed)
-    if input_local_contrast:
-        transformed = apply_local_contrast_normalization(
-            transformed,
-            strength=local_contrast_strength,
-            kernel_size=local_contrast_kernel,
-        )
-    return transformed
 
 
 def _project_crop_pair(
