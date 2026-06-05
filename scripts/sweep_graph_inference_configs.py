@@ -308,17 +308,31 @@ def write_summary_csv(summaries: list[EvalSummary], path: Path) -> None:
             )
 
 
-def _best_summary(summaries: list[EvalSummary]) -> EvalSummary | None:
+def _effective_attention_work_fraction(summary: EvalSummary) -> float:
+    return summary.attention_work_fraction if summary.attention_work_fraction > 0.0 else 1.0
+
+
+def _best_summary(
+    summaries: list[EvalSummary],
+    *,
+    max_attention_work_fraction: float = 1.0,
+) -> EvalSummary | None:
     if not summaries:
         return None
-    best_precision = max(item.precision for item in summaries)
+    budget_candidates = [
+        item
+        for item in summaries
+        if _effective_attention_work_fraction(item) <= max_attention_work_fraction
+    ]
+    pool = budget_candidates or summaries
+    best_precision = max(item.precision for item in pool)
     candidates = [
-        item for item in summaries if item.precision >= best_precision - RECOMMEND_PRECISION_TOLERANCE
+        item for item in pool if item.precision >= best_precision - RECOMMEND_PRECISION_TOLERANCE
     ]
     return min(
         candidates,
         key=lambda item: (
-            item.attention_work_fraction if item.attention_work_fraction > 0.0 else 1.0,
+            _effective_attention_work_fraction(item),
             -item.precision,
             -item.correct,
             -item.matches,
@@ -326,9 +340,17 @@ def _best_summary(summaries: list[EvalSummary]) -> EvalSummary | None:
     )
 
 
-def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
+def write_report_html(
+    summaries: list[EvalSummary],
+    path: Path,
+    *,
+    max_attention_work_fraction: float = 1.0,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    best = _best_summary(summaries)
+    best = _best_summary(summaries, max_attention_work_fraction=max_attention_work_fraction)
+    budget_has_candidate = any(
+        _effective_attention_work_fraction(summary) <= max_attention_work_fraction for summary in summaries
+    )
     rows = []
     for summary in sorted(summaries, key=lambda item: (item.precision, item.correct, item.matches), reverse=True):
         is_best = summary is best
@@ -357,11 +379,16 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
 
     best_text = "暂无结果"
     if best is not None:
+        budget_text = (
+            f"预算内推荐，max_attention_work_fraction={max_attention_work_fraction:.2%}"
+            if budget_has_candidate
+            else f"没有配置满足 max_attention_work_fraction={max_attention_work_fraction:.2%}，已退回全量候选推荐"
+        )
         best_text = (
             f"{best.config.preset} / accept={best.config.accept_probability:g} / "
             f"fallback={best.config.fallback_mode}，precision={best.precision:.6f}，correct={best.correct}，"
             f"平均执行层数={best.avg_executed_layers:.3f}，剪枝比例={best.pruned_keypoint_fraction:.2%}，"
-            f"计算量比例={best.attention_work_fraction:.2%}"
+            f"计算量比例={best.attention_work_fraction:.2%}。{budget_text}"
         )
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     document = f"""<!doctype html>
@@ -427,7 +454,7 @@ def write_report_html(summaries: list[EvalSummary], path: Path) -> None:
 <body>
 <main>
   <h1>Graph 推理配置 Sweep 报告</h1>
-  <div class="meta">生成时间：{html.escape(generated_at)}。本报告用于比较严格图匹配、置信门控、早停、宽度剪枝和 fallback 策略；推荐配置会在接近最高 precision 的候选中优先选择计算量更低的配置。</div>
+  <div class="meta">生成时间：{html.escape(generated_at)}。本报告用于比较严格图匹配、置信门控、早停、宽度剪枝和 fallback 策略；推荐配置会优先满足 max_attention_work_fraction={max_attention_work_fraction:.2%} 的计算预算，再在预算内选择质量和计算量更均衡的配置。</div>
   <section class="summary">
     <strong>推荐配置：</strong>{html.escape(best_text)}
   </section>
@@ -495,7 +522,11 @@ def run_sweep(args: argparse.Namespace) -> list[EvalSummary]:
             summaries.append(summarize_eval_csv(output_csv, config))
 
     write_summary_csv(summaries, args.output_dir / "summary.csv")
-    write_report_html(summaries, args.output_dir / "report.html")
+    write_report_html(
+        summaries,
+        args.output_dir / "report.html",
+        max_attention_work_fraction=args.max_attention_work_fraction,
+    )
     return summaries
 
 
@@ -539,8 +570,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-limit", type=int, default=64)
     parser.add_argument("--hard-min-matches", type=int, default=4)
     parser.add_argument("--hard-max-precision", type=float, default=0.9)
+    parser.add_argument(
+        "--max-attention-work-fraction",
+        type=float,
+        default=1.0,
+        help="Only recommend configs at or below this graph attention work fraction when possible.",
+    )
     parser.add_argument("--continue-on-error", action="store_true")
     args = parser.parse_args()
+    if args.max_attention_work_fraction < 0.0 or args.max_attention_work_fraction > 1.0:
+        parser.error("--max-attention-work-fraction must be in [0, 1]")
     try:
         parse_choice_list(args.presets, allowed=GRAPH_PRESETS, label="graph preset")
         parse_float_list(args.accept_probabilities)
