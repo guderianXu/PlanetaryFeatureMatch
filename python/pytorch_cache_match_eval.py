@@ -587,6 +587,7 @@ def graph_matcher_matches(
     graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
+    graph_max_attention_layers: int = 0,
     scores_a: torch.Tensor | None = None,
     scores_b: torch.Tensor | None = None,
     metadata_a: torch.Tensor | None = None,
@@ -605,6 +606,8 @@ def graph_matcher_matches(
         raise ValueError("graph_width_prune_min_score must be at least -1.0; -1 disables pruning")
     if graph_early_stop_min_confidence < -1.0:
         raise ValueError("graph_early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
+    if graph_max_attention_layers < 0:
+        raise ValueError("graph_max_attention_layers must be nonnegative; use 0 to keep all graph layers")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
@@ -635,6 +638,8 @@ def graph_matcher_matches(
         graph_kwargs["width_prune_min_score"] = float(graph_width_prune_min_score)
     if graph_early_stop_min_confidence > -1.0:
         graph_kwargs["early_stop_min_confidence"] = float(graph_early_stop_min_confidence)
+    if graph_max_attention_layers > 0:
+        graph_kwargs["max_attention_layers"] = int(graph_max_attention_layers)
     output = model.graph_matcher(
         desc_a.to(model_device, torch.float32),
         meta_a,
@@ -961,6 +966,7 @@ def match_pair_descriptor_maps(
     graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
+    graph_max_attention_layers: int = 0,
     mutual: bool = False,
     geometry_filter: str = "none",
     texture_fraction: float = 1.0,
@@ -1059,6 +1065,7 @@ def match_pair_descriptor_maps(
             graph_min_accept_probability=graph_min_accept_probability,
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
+            graph_max_attention_layers=graph_max_attention_layers,
             scores_a=row_scores_a,
             scores_b=row_scores_b,
             metadata_a=metadata_a,
@@ -1312,6 +1319,7 @@ def evaluate_pair_path(
     graph_min_accept_probability: float = -1.0,
     graph_width_prune_min_score: float = -1.0,
     graph_early_stop_min_confidence: float = -1.0,
+    graph_max_attention_layers: int = 0,
 ) -> MatchEvalResult:
     if min_target_gradient < 0.0:
         raise ValueError("min_target_gradient must be non-negative")
@@ -1360,6 +1368,7 @@ def evaluate_pair_path(
             graph_min_accept_probability=graph_min_accept_probability,
             graph_width_prune_min_score=graph_width_prune_min_score,
             graph_early_stop_min_confidence=graph_early_stop_min_confidence,
+            graph_max_attention_layers=graph_max_attention_layers,
             mutual=mutual,
             geometry_filter=geometry_filter,
             keypoint_spatial_bins=keypoint_spatial_bins,
@@ -1423,6 +1432,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-inference-preset", choices=sorted(GRAPH_INFERENCE_PRESETS), default="off")
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
+    parser.add_argument("--graph-max-attention-layers", type=int, default=0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
     parser.add_argument("--min-target-local-contrast", type=float, default=0.0)
     parser.add_argument("--limit-pairs", type=int, default=0)
@@ -1435,6 +1445,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.graph_min_accept_probability < -1.0 or args.graph_min_accept_probability > 1.0:
         parser.error("--graph-min-accept-probability must be in [-1, 1]")
+    if args.graph_max_attention_layers < 0:
+        parser.error("--graph-max-attention-layers must be nonnegative")
     return args
 
 
@@ -1520,6 +1532,7 @@ def main() -> int:
                 graph_min_accept_probability=args.graph_min_accept_probability,
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
                 graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
+                graph_max_attention_layers=args.graph_max_attention_layers,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

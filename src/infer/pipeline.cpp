@@ -683,6 +683,7 @@ GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& 
     {
         graph_options.min_accept_probability = options.graph_min_accept_probability;
     }
+    graph_options.max_attention_layers = options.graph_max_attention_layers;
     if (options.graph_fallback_mode == "geometry")
     {
         graph_options.fallback_mode = GraphMatcherFallbackMode::Geometry;

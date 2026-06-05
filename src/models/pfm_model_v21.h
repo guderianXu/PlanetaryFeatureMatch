@@ -321,11 +321,12 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     /// @param apply_candidate_mask 是否应用候选 top-k 剪枝；训练监督 loss 可关闭以避免随机初期屏蔽真值。
     /// @param width_prune_min_score LightGlue 风格宽度剪枝阈值；-1 表示关闭。
     /// @param early_stop_min_confidence LightGlue 风格深度提前停止阈值；-1 表示关闭。
+    /// @param max_attention_layers LightGlue 风格深度预算硬上限；0 表示执行完整层数。
     /// @return 匹配 logits、互选匹配、概率和接受 logits。
     PfmV21GraphMatcherOutput forward(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
                                      const torch::Tensor& descriptors_b, const torch::Tensor& keypoints_b,
                                      bool apply_candidate_mask = true, double width_prune_min_score = -1.0,
-                                     double early_stop_min_confidence = -1.0);
+                                     double early_stop_min_confidence = -1.0, int64_t max_attention_layers = 0);
 
     /// 返回上一次 forward 实际执行的 attention 层数，便于调试 early stopping。
     int64_t lastExecutedAttentionLayers() const;

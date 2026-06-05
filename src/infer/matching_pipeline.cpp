@@ -155,12 +155,16 @@ void validateGraphMatcherInferenceOptions(const GraphMatcherInferenceOptions& gr
     {
         throw std::invalid_argument("graph min accept probability must be in [-1, 1]");
     }
+    if (graph_options.max_attention_layers < 0)
+    {
+        throw std::invalid_argument("graph max attention layers must be nonnegative");
+    }
 }
 
 bool hasLightGlueGraphOptions(const GraphMatcherInferenceOptions& graph_options)
 {
     return graph_options.width_prune_min_score > -1.0 || graph_options.early_stop_min_confidence > -1.0 ||
-           graph_options.min_accept_probability > -1.0;
+           graph_options.min_accept_probability > -1.0 || graph_options.max_attention_layers > 0;
 }
 
 PlanetaryGraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a, const torch::Tensor& keypoints_a,
@@ -181,7 +185,8 @@ v21::PfmV21GraphMatcherOutput runGraphMatcher(const torch::Tensor& descriptors_a
                                               const GraphMatcherInferenceOptions& graph_options)
 {
     return matcher.forward(descriptors_a, keypoints_a, descriptors_b, keypoints_b, true,
-                           graph_options.width_prune_min_score, graph_options.early_stop_min_confidence);
+                           graph_options.width_prune_min_score, graph_options.early_stop_min_confidence,
+                           graph_options.max_attention_layers);
 }
 
 GraphInferenceTelemetry graphTelemetry(const PlanetaryGraphMatcherOutput&)

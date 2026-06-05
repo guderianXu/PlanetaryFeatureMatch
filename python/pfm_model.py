@@ -896,9 +896,12 @@ class PlanetaryGraphMatcher(nn.Module):
         apply_candidate_mask: bool = True,
         width_prune_min_score: float = -1.0,
         early_stop_min_confidence: float = -1.0,
+        max_attention_layers: int = 0,
     ) -> GraphMatcherOutput:
         if early_stop_min_confidence < -1.0:
             raise ValueError("early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
+        if max_attention_layers < 0:
+            raise ValueError("max_attention_layers must be nonnegative; 0 disables hard layer budget")
         if descriptors_a.dim() != 2 or descriptors_b.dim() != 2:
             raise ValueError("graph matcher descriptors must have shape NxD")
         if descriptors_a.size(0) != keypoints_a.size(0) or descriptors_b.size(0) != keypoints_b.size(0):
@@ -939,10 +942,15 @@ class PlanetaryGraphMatcher(nn.Module):
             raw_similarity = raw_similarity_full.index_select(0, indices_a).index_select(1, indices_b)
             self.last_executed_attention_layers = 0
             for layer in self.attention_layers:
+                if max_attention_layers > 0 and self.last_executed_attention_layers >= int(max_attention_layers):
+                    break
                 attention_work_units += int(embed_a.size(0)) * int(embed_b.size(0))
                 embed_a, embed_b = layer(embed_a, embed_b)
                 self.last_executed_attention_layers += 1
-                can_adapt = self.last_executed_attention_layers < len(self.attention_layers)
+                can_run_more_layers = self.last_executed_attention_layers < len(self.attention_layers) and (
+                    max_attention_layers <= 0 or self.last_executed_attention_layers < int(max_attention_layers)
+                )
+                can_adapt = can_run_more_layers
                 if can_adapt and (prune_enabled or early_stop_min_confidence > -1.0):
                     provisional_pair_logits, provisional_accept_logits = self._provisional_pair_outputs(
                         embed_a,

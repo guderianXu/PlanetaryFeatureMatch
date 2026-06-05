@@ -956,7 +956,8 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
                                                          const torch::Tensor& descriptors_b,
                                                          const torch::Tensor& keypoints_b,
                                                          bool apply_candidate_mask, double width_prune_min_score,
-                                                         double early_stop_min_confidence)
+                                                         double early_stop_min_confidence,
+                                                         int64_t max_attention_layers)
 {
     using torch::indexing::Slice;
 
@@ -967,6 +968,10 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
     if (early_stop_min_confidence < -1.0)
     {
         throw std::invalid_argument("early_stop_min_confidence must be at least -1.0; -1 disables early stopping");
+    }
+    if (max_attention_layers < 0)
+    {
+        throw std::invalid_argument("max_attention_layers must be nonnegative; 0 disables hard layer budget");
     }
     if (descriptors_a.dim() != 2 || descriptors_b.dim() != 2)
     {
@@ -1037,12 +1042,19 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
         _last_executed_attention_layers = 0;
         for (const auto& layer : *_attention_layers)
         {
+            if (max_attention_layers > 0 && _last_executed_attention_layers >= max_attention_layers)
+            {
+                break;
+            }
             attention_work_units += embed_a.size(0) * embed_b.size(0);
             auto refined = layer->as<PfmV21GraphAttentionLayerImpl>()->forward(embed_a, embed_b);
             embed_a = refined.first;
             embed_b = refined.second;
             ++_last_executed_attention_layers;
-            const bool can_adapt = _last_executed_attention_layers < _attention_layer_count;
+            const bool can_run_more_layers =
+                _last_executed_attention_layers < _attention_layer_count &&
+                (max_attention_layers <= 0 || _last_executed_attention_layers < max_attention_layers);
+            const bool can_adapt = can_run_more_layers;
             if (can_adapt && (prune_enabled || early_stop_min_confidence > -1.0))
             {
                 auto provisional_outputs = provisionalPairOutputs(embed_a, embed_b, raw_similarity, kp_work_a,

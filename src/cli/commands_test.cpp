@@ -444,6 +444,8 @@ static void parse_match_command()
         "high_precision",
         "--graph-min-accept-probability",
         "0.75",
+        "--graph-max-attention-layers",
+        "2",
         "--graph-fallback-mode",
         "none",
     });
@@ -468,6 +470,7 @@ static void parse_match_command()
     PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.85, 1.0e-12);
     PFM_REQUIRE(parsed.graph_inference_preset == "high_precision");
     PFM_REQUIRE_CLOSE(parsed.graph_min_accept_probability, 0.75, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_max_attention_layers == 2);
     PFM_REQUIRE(parsed.graph_fallback_mode == "none");
 }
 
@@ -525,6 +528,8 @@ static void parse_eval_command()
         "fast",
         "--graph-min-accept-probability",
         "0.7",
+        "--graph-max-attention-layers",
+        "3",
         "--graph-fallback-mode",
         "none",
     });
@@ -544,6 +549,7 @@ static void parse_eval_command()
     PFM_REQUIRE_CLOSE(parsed.graph_early_stop_min_confidence, 0.9, 1.0e-12);
     PFM_REQUIRE(parsed.graph_inference_preset == "fast");
     PFM_REQUIRE_CLOSE(parsed.graph_min_accept_probability, 0.7, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_max_attention_layers == 3);
     PFM_REQUIRE(parsed.graph_fallback_mode == "none");
 }
 

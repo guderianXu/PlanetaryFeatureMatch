@@ -353,6 +353,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Graph matcher accept probability threshold; -1 disables matchability gating")
         ->check(CLI::Range(-1.0, 1.0));
     match
+        ->add_option("--graph-max-attention-layers", options.graph_max_attention_layers,
+                     "Maximum graph attention layers to execute; 0 uses the checkpoint layer count")
+        ->check(CLI::NonNegativeNumber);
+    match
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,
                      "Graph matcher fallback mode after learned graph output: geometry or none")
         ->check(CLI::IsMember({"geometry", "none"}));
@@ -427,6 +431,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         ->add_option("--graph-min-accept-probability", options.graph_min_accept_probability,
                      "Graph matcher accept probability threshold; -1 disables matchability gating")
         ->check(CLI::Range(-1.0, 1.0));
+    eval
+        ->add_option("--graph-max-attention-layers", options.graph_max_attention_layers,
+                     "Maximum graph attention layers to execute; 0 uses the checkpoint layer count")
+        ->check(CLI::NonNegativeNumber);
     eval
         ->add_option("--graph-fallback-mode", options.graph_fallback_mode,
                      "Graph matcher fallback mode after learned graph output: geometry or none")

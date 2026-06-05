@@ -165,6 +165,20 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(output.logits.shape), (3, 3))
         self.assertEqual(graph.last_executed_attention_layers, 1)
 
+    def test_graph_matcher_respects_max_attention_layers(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=4, keypoint_meta_dim=4)
+        desc = torch.eye(3, dtype=torch.float32)[:, :2]
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+
+        output = graph(desc, keypoints, desc, keypoints, max_attention_layers=2)
+
+        self.assertEqual(tuple(output.logits.shape), (4, 4))
+        self.assertEqual(output.executed_layers, 2)
+        self.assertEqual(graph.last_executed_attention_layers, 2)
+        self.assertEqual(output.attention_work_units, 18)
+        self.assertEqual(output.full_attention_work_units, 36)
+        self.assertAlmostEqual(output.attention_work_fraction, 0.5)
+
     def test_graph_matcher_early_stop_tolerates_single_uncertain_keypoint(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=5, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
         with torch.no_grad():
