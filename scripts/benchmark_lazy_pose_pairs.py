@@ -99,6 +99,7 @@ class LazyPairResult:
     valid_pixels: int
     attempt_count: int
     elapsed_ms: float
+    illumination_pair: SyntheticPair | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +362,17 @@ def apply_photometric_augmentation(
     )
 
 
+def make_illumination_consistency_pair(
+    pair: SyntheticPair,
+    config: PhotometricAugmentConfig,
+    *,
+    seed: int,
+) -> SyntheticPair:
+    if not config.enabled:
+        return pair
+    return apply_photometric_augmentation(pair, config, seed=seed)
+
+
 def _local_contrast_single_view(view: torch.Tensor, *, strength: float, kernel_size: int) -> torch.Tensor:
     if strength <= 0.0:
         return view
@@ -526,6 +538,8 @@ def generate_lazy_pair(
     input_local_contrast: bool = False,
     local_contrast_strength: float = 0.0,
     local_contrast_kernel: int = 31,
+    illumination_consistency_config: PhotometricAugmentConfig | None = None,
+    illumination_consistency_probability: float = 1.0,
 ) -> LazyPairResult:
     start = time.perf_counter()
     view_a = _cached_view(_selected_image_path(spec.reference, image_source))
@@ -568,6 +582,15 @@ def generate_lazy_pair(
             local_contrast_strength=local_contrast_strength,
             local_contrast_kernel=local_contrast_kernel,
         )
+    illumination_pair = None
+    consistency_config = illumination_consistency_config or PhotometricAugmentConfig()
+    consistency_probability = max(0.0, min(1.0, float(illumination_consistency_probability)))
+    if consistency_config.enabled and random.Random(transform_seed + 0x5DEECE66D).random() <= consistency_probability:
+        illumination_pair = make_illumination_consistency_pair(
+            pair,
+            consistency_config,
+            seed=transform_seed + 0xD1B54A32D192ED03,
+        )
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return LazyPairResult(
         spec=spec,
@@ -576,6 +599,7 @@ def generate_lazy_pair(
         valid_pixels=best[2],
         attempt_count=attempt + 1,
         elapsed_ms=elapsed_ms,
+        illumination_pair=illumination_pair,
     )
 
 
@@ -599,6 +623,8 @@ def iter_lazy_pairs(
     input_local_contrast: bool = False,
     local_contrast_strength: float = 0.0,
     local_contrast_kernel: int = 31,
+    illumination_consistency_config: PhotometricAugmentConfig | None = None,
+    illumination_consistency_probability: float = 1.0,
 ) -> Iterator[LazyPairResult]:
     if not specs:
         raise RuntimeError("no lazy pair specs available")
@@ -625,6 +651,8 @@ def iter_lazy_pairs(
             input_local_contrast=input_local_contrast,
             local_contrast_strength=local_contrast_strength,
             local_contrast_kernel=local_contrast_kernel,
+            illumination_consistency_config=illumination_consistency_config,
+            illumination_consistency_probability=illumination_consistency_probability,
         )
         future_map[future] = time.perf_counter()
         cursor += 1
@@ -843,6 +871,18 @@ def _photometric_config_from_args(args: argparse.Namespace) -> PhotometricAugmen
         gamma=float(args.photometric_gamma),
         shadow=float(args.photometric_shadow),
         noise=float(args.photometric_noise),
+    )
+
+
+def _illumination_consistency_config_from_args(args: argparse.Namespace) -> PhotometricAugmentConfig:
+    return PhotometricAugmentConfig(
+        enabled=float(args.illumination_consistency_weight) > 0.0,
+        probability=1.0,
+        brightness=float(args.illumination_consistency_brightness),
+        contrast=float(args.illumination_consistency_contrast),
+        gamma=float(args.illumination_consistency_gamma),
+        shadow=float(args.illumination_consistency_shadow),
+        noise=float(args.illumination_consistency_noise),
     )
 
 
@@ -1266,6 +1306,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     ref_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
     photometric_config = _photometric_config_from_args(args)
+    illumination_consistency_config = _illumination_consistency_config_from_args(args)
     train_metric_fields = [
         "step",
         "loss",
@@ -1276,6 +1317,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "false_match_pairs",
         "online_false_match_points",
         "online_false_match_pairs",
+        "illumination_consistency_points",
+        "illumination_consistency_pairs",
         "hard_lazy_pairs",
         "data_wait_ms",
         "augment_ms",
@@ -1291,6 +1334,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_loss_weight",
         "abstention_weight",
         "inline_false_match_mining",
+        "illumination_consistency_weight",
+        "illumination_consistency_probability",
         "gpu_util_percent",
         "gpu_mem_used_mib",
         "gpu_mem_total_mib",
@@ -1316,6 +1361,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         input_local_contrast=args.input_local_contrast,
         local_contrast_strength=args.input_local_contrast_strength,
         local_contrast_kernel=args.input_local_contrast_kernel,
+        illumination_consistency_config=illumination_consistency_config,
+        illumination_consistency_probability=args.illumination_consistency_probability,
     )
     hard_iterator: Iterator[LazyPairResult] | None = None
     if hard_specs:
@@ -1338,6 +1385,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             input_local_contrast=args.input_local_contrast,
             local_contrast_strength=args.input_local_contrast_strength,
             local_contrast_kernel=args.input_local_contrast_kernel,
+            illumination_consistency_config=illumination_consistency_config,
+            illumination_consistency_probability=args.illumination_consistency_probability,
         )
         print(f"hard_lazy_specs={len(hard_specs)} hard_variants={','.join(args.hard_variant)}", flush=True)
     static_false_matches = read_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
@@ -1380,6 +1429,11 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             augmented_pairs = [result.pair for result in results]
             augment_ms = (time.perf_counter() - augment_start) * 1000.0
             prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
+            illumination_prefetched = {
+                path.resolve(strict=False): result.illumination_pair
+                for path, result in zip(fake_paths, results)
+                if result.illumination_pair is not None
+            }
             mined_false_matches = dict(static_false_matches)
             mined_false_rows: list[dict[str, object]] = []
             false_mine_ms = 0.0
@@ -1484,6 +1538,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 training_max_image_size=0,
                 forced_pair_paths=fake_paths,
                 prefetched_pairs=prefetched,
+                illumination_consistency_pairs=illumination_prefetched,
+                illumination_consistency_weight=args.illumination_consistency_weight,
+                illumination_consistency_max_points=args.illumination_consistency_points,
+                illumination_consistency_probability=1.0,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -1513,6 +1571,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "false_match_pairs": f"{metrics.get('false_match_pairs', 0.0):.0f}",
                 "online_false_match_points": f"{metrics.get('online_false_match_points', 0.0):.0f}",
                 "online_false_match_pairs": f"{metrics.get('online_false_match_pairs', 0.0):.0f}",
+                "illumination_consistency_points": f"{metrics.get('illumination_consistency_points', 0.0):.0f}",
+                "illumination_consistency_pairs": f"{metrics.get('illumination_consistency_pairs', 0.0):.0f}",
                 "hard_lazy_pairs": hard_lazy_pairs,
                 "data_wait_ms": f"{data_wait_ms:.2f}",
                 "augment_ms": f"{augment_ms:.2f}",
@@ -1528,6 +1588,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_loss_weight": f"{args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0:.6f}",
                 "abstention_weight": f"{args.abstention_weight:.6f}",
                 "inline_false_match_mining": int(args.inline_false_match_mining),
+                "illumination_consistency_weight": f"{args.illumination_consistency_weight:.6f}",
+                "illumination_consistency_probability": f"{args.illumination_consistency_probability:.3f}",
                 **gpu,
             }
             rows.append(row)
@@ -1537,7 +1599,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 print(
                     f"train step={step}/{args.steps} loss={row['loss']} "
                     f"top1={row['top1_accuracy']} false={row['false_match_points']} "
-                    f"hard={row['hard_lazy_pairs']} data_wait={data_wait_ms:.1f}ms "
+                    f"illum={row['illumination_consistency_points']} hard={row['hard_lazy_pairs']} "
+                    f"data_wait={data_wait_ms:.1f}ms "
                     f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
                     flush=True,
                 )
@@ -1571,6 +1634,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "last_loss": rows[-1]["loss"] if rows else "-",
         "last_top1_accuracy": rows[-1]["top1_accuracy"] if rows else "-",
         "photometric_augmentation": photometric_config,
+        "illumination_consistency": {
+            "enabled": float(args.illumination_consistency_weight) > 0.0,
+            "weight": float(args.illumination_consistency_weight),
+            "probability": float(args.illumination_consistency_probability),
+            "points": int(args.illumination_consistency_points),
+            "config": vars(illumination_consistency_config),
+        },
         "gpu_monitor_enabled": bool(gpu_monitor is not None),
         "gpu_sample_interval_s": float(args.gpu_sample_interval_s),
         "last_gpu": gpu_monitor.latest() if gpu_monitor is not None else _gpu_snapshot(),
@@ -1762,6 +1832,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--photometric-gamma", type=float, default=0.45)
     parser.add_argument("--photometric-shadow", type=float, default=0.45)
     parser.add_argument("--photometric-noise", type=float, default=0.015)
+    parser.add_argument("--illumination-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--illumination-consistency-probability", type=float, default=1.0)
+    parser.add_argument("--illumination-consistency-points", type=int, default=128)
+    parser.add_argument("--illumination-consistency-brightness", type=float, default=0.22)
+    parser.add_argument("--illumination-consistency-contrast", type=float, default=0.45)
+    parser.add_argument("--illumination-consistency-gamma", type=float, default=0.75)
+    parser.add_argument("--illumination-consistency-shadow", type=float, default=0.65)
+    parser.add_argument("--illumination-consistency-noise", type=float, default=0.02)
     parser.add_argument("--train-backbone", action="store_true")
     parser.add_argument("--train-dual-fpn", action="store_true")
     parser.add_argument("--train-descriptor-head", action=argparse.BooleanOptionalAction, default=True)
@@ -1812,6 +1890,12 @@ def main() -> int:
         raise ValueError("--gpu-sample-interval-s must be positive")
     if not 0.0 <= args.photometric_probability <= 1.0:
         raise ValueError("--photometric-probability must be in [0, 1]")
+    if not 0.0 <= args.illumination_consistency_probability <= 1.0:
+        raise ValueError("--illumination-consistency-probability must be in [0, 1]")
+    if args.illumination_consistency_weight < 0.0:
+        raise ValueError("--illumination-consistency-weight must be nonnegative")
+    if args.illumination_consistency_points < 0:
+        raise ValueError("--illumination-consistency-points must be nonnegative")
     if args.visual_max_matches < 0:
         raise ValueError("--visual-max-matches must be nonnegative; use 0 to keep all matches")
     if args.visual_draw_matches < 0:
@@ -1877,6 +1961,13 @@ def main() -> int:
         "specs": len(specs),
         "target_variants": list(target_variants),
         "photometric_augmentation": vars(_photometric_config_from_args(args)),
+        "illumination_consistency": {
+            "enabled": float(args.illumination_consistency_weight) > 0.0,
+            "weight": float(args.illumination_consistency_weight),
+            "probability": float(args.illumination_consistency_probability),
+            "points": int(args.illumination_consistency_points),
+            "config": vars(_illumination_consistency_config_from_args(args)),
+        },
     }
     (args.output_dir / "input_summary.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",

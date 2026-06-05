@@ -1251,6 +1251,39 @@ def false_match_negative_loss(
     return (similarity - float(max_false_score)).clamp_min(0.0).pow(2).mean()
 
 
+def _limited_points(
+    points_xy: torch.Tensor,
+    *,
+    max_points: int,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if max_points <= 0 or points_xy.size(0) <= max_points:
+        return points_xy
+    order = torch.randperm(points_xy.size(0), generator=generator, device=points_xy.device)[:max_points]
+    return points_xy.index_select(0, order).contiguous()
+
+
+def descriptor_consistency_loss(
+    descriptors_reference: torch.Tensor,
+    descriptors_changed_light: torch.Tensor,
+    points_xy: torch.Tensor,
+    *,
+    max_points: int = 0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if descriptors_reference.shape != descriptors_changed_light.shape:
+        raise ValueError("descriptor maps must have the same shape")
+    if points_xy.dim() != 2 or points_xy.size(1) != 2:
+        raise ValueError("points_xy must have shape Nx2")
+    if points_xy.size(0) == 0:
+        return descriptors_reference.new_zeros(())
+    selected = _limited_points(points_xy, max_points=max_points, generator=generator)
+    reference = normalize_descriptor_batch(sample_descriptors(descriptors_reference, selected))
+    changed = normalize_descriptor_batch(sample_descriptors(descriptors_changed_light, selected))
+    similarity = paired_cyclic_similarity(reference, changed)
+    return (1.0 - similarity).clamp_min(0.0).pow(2).mean()
+
+
 def descriptor_map_pair_loss(
     descriptors_a: torch.Tensor,
     descriptors_b: torch.Tensor,
@@ -1915,6 +1948,10 @@ def train_step(
     online_false_match_min_score: float = -1.0,
     online_false_match_min_margin: float = 0.02,
     online_false_match_threshold_px: float = 5.0,
+    illumination_consistency_pairs: dict[Path, SyntheticPair] | None = None,
+    illumination_consistency_weight: float = 0.0,
+    illumination_consistency_max_points: int = 0,
+    illumination_consistency_probability: float = 1.0,
     pose_metadata: pose_pair_metadata.PoseMetadataIndex | None = None,
     pose_balanced_sampling: bool = False,
     pose_difficulty_loss_weight: float = 0.0,
@@ -1953,6 +1990,8 @@ def train_step(
     false_match_pairs = 0
     online_false_match_points = 0
     online_false_match_pairs = 0
+    illumination_consistency_points = 0
+    illumination_consistency_pairs_used = 0
     pose_counts = {
         "pose_easy_pairs": 0.0,
         "pose_medium_pairs": 0.0,
@@ -2183,6 +2222,47 @@ def train_step(
                         online_false_match_pairs += 1
                         false_match_points += online_false_a.size(0)
                         false_match_pairs += 1
+                if (
+                    illumination_consistency_pairs
+                    and illumination_consistency_weight > 0.0
+                    and points_a.size(0) > 0
+                    and random.random() <= max(0.0, min(1.0, float(illumination_consistency_probability)))
+                ):
+                    changed_pair = illumination_consistency_pairs.get(pair_key)
+                    if changed_pair is not None:
+                        changed_pair = move_pair_to_device(changed_pair, device=device)
+                        changed_maps = compute_student_teacher_descriptor_maps(
+                            model,
+                            changed_pair,
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            include_heatmaps=False,
+                        )
+                        changed_descriptors_a = changed_maps[0]
+                        changed_descriptors_b = changed_maps[1]
+                        consistency_loss_a = descriptor_consistency_loss(
+                            descriptors_a,
+                            changed_descriptors_a,
+                            points_a,
+                            max_points=illumination_consistency_max_points,
+                            generator=generator,
+                        )
+                        consistency_loss_b = descriptor_consistency_loss(
+                            descriptors_b,
+                            changed_descriptors_b,
+                            points_b,
+                            max_points=illumination_consistency_max_points,
+                            generator=generator,
+                        )
+                        consistency_loss = torch.stack([consistency_loss_a, consistency_loss_b]).mean()
+                        pair_losses.append(float(illumination_consistency_weight) * consistency_loss)
+                        per_view_points = (
+                            min(points_a.size(0), int(illumination_consistency_max_points))
+                            if illumination_consistency_max_points > 0
+                            else points_a.size(0)
+                        )
+                        illumination_consistency_points += int(per_view_points) * 2
+                        illumination_consistency_pairs_used += 1
                 if pair_losses:
                     losses.append(torch.stack(pair_losses).sum())
             if not losses:
@@ -2214,6 +2294,8 @@ def train_step(
         metrics["false_match_pairs"] = float(false_match_pairs)
         metrics["online_false_match_points"] = float(online_false_match_points)
         metrics["online_false_match_pairs"] = float(online_false_match_pairs)
+        metrics["illumination_consistency_points"] = float(illumination_consistency_points)
+        metrics["illumination_consistency_pairs"] = float(illumination_consistency_pairs_used)
         metrics["pose_easy_pairs"] = pose_counts["pose_easy_pairs"]
         metrics["pose_medium_pairs"] = pose_counts["pose_medium_pairs"]
         metrics["pose_hard_pairs"] = pose_counts["pose_hard_pairs"]
@@ -2237,6 +2319,8 @@ def train_step(
         "false_match_pairs": float(false_match_pairs),
         "online_false_match_points": float(online_false_match_points),
         "online_false_match_pairs": float(online_false_match_pairs),
+        "illumination_consistency_points": float(illumination_consistency_points),
+        "illumination_consistency_pairs": float(illumination_consistency_pairs_used),
         "pose_easy_pairs": pose_counts["pose_easy_pairs"],
         "pose_medium_pairs": pose_counts["pose_medium_pairs"],
         "pose_hard_pairs": pose_counts["pose_hard_pairs"],

@@ -147,6 +147,16 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "--no-gpu-monitor",
             "--gpu-sample-interval-s",
             "0.5",
+            "--illumination-consistency-weight",
+            "0.08",
+            "--illumination-consistency-probability",
+            "0.6",
+            "--illumination-consistency-points",
+            "96",
+            "--illumination-consistency-gamma",
+            "0.8",
+            "--illumination-consistency-shadow",
+            "0.7",
             "--hard-variant",
             "extreme",
             "--hard-valid-fraction-max",
@@ -168,6 +178,11 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.gpu_snapshot_every, 25)
         self.assertFalse(args.gpu_monitor)
         self.assertAlmostEqual(args.gpu_sample_interval_s, 0.5)
+        self.assertAlmostEqual(args.illumination_consistency_weight, 0.08)
+        self.assertAlmostEqual(args.illumination_consistency_probability, 0.6)
+        self.assertEqual(args.illumination_consistency_points, 96)
+        self.assertAlmostEqual(args.illumination_consistency_gamma, 0.8)
+        self.assertAlmostEqual(args.illumination_consistency_shadow, 0.7)
         self.assertEqual(args.hard_variant, ["extreme"])
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
@@ -212,6 +227,17 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["elapsed_s"], "0.000")
             self.assertEqual(rows[1]["gpu_mem_used_mib"], "12000")
+
+    def test_illumination_consistency_pair_changes_light_without_geometry(self) -> None:
+        pair = self.make_pair()
+        config = PhotometricAugmentConfig(enabled=True, probability=1.0, brightness=0.4, gamma=0.5, shadow=0.4)
+
+        changed = lazy_bench.make_illumination_consistency_pair(pair, config, seed=123)
+
+        self.assertFalse(torch.allclose(changed.view_a, pair.view_a))
+        self.assertFalse(torch.allclose(changed.view_b, pair.view_b))
+        self.assertTrue(torch.equal(changed.warp_a_to_b, pair.warp_a_to_b))
+        self.assertTrue(torch.equal(changed.valid_mask, pair.valid_mask))
 
     def test_render_manifest_uses_image_path_as_uint8_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
