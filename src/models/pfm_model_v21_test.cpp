@@ -204,6 +204,53 @@ static void pfm_v21_graph_matcher_width_pruning_restores_full_logits()
     PFM_REQUIRE((output.accept_logits.index({2, Slice()}) < -9000.0F).all().item<bool>());
 }
 
+static void pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance()
+{
+    using torch::indexing::Slice;
+
+    auto matcher = pfm::v21::PfmV21GraphMatcher(5, 16, 3, 16, 0);
+    matcher->eval();
+    torch::NoGradGuard no_grad;
+
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key().rfind("accept_head.", 0) == 0)
+        {
+            parameter.value().zero_();
+        }
+    }
+    for (auto& parameter : matcher->named_parameters(true))
+    {
+        if (parameter.key() == "accept_head.0.weight")
+        {
+            parameter.value().index_put_({0, 4}, 10.0F);
+        }
+        if (parameter.key() == "accept_head.0.bias")
+        {
+            parameter.value().index_put_({0}, -7.5F);
+        }
+        if (parameter.key() == "accept_head.2.weight")
+        {
+            parameter.value().index_put_({0, 0}, 4.0F);
+        }
+        if (parameter.key() == "accept_head.2.bias")
+        {
+            parameter.value().index_put_({0}, -4.0F);
+        }
+    }
+
+    auto descriptors = torch::eye(5, torch::kFloat32);
+    auto metadata = torch::zeros({5, 16}, torch::kFloat32);
+    metadata.index_put_({Slice(), 12}, 1.0F);
+    metadata.index_put_({4, 12}, 0.0F);
+
+    const auto output = matcher->forward(descriptors, metadata, descriptors, metadata, true, 0.8);
+
+    PFM_REQUIRE((output.accept_logits.index({Slice(0, 4), Slice(0, 4)}) > -100.0F).any().item<bool>());
+    PFM_REQUIRE((output.accept_logits.index({4, Slice()}) < -9000.0F).all().item<bool>());
+    PFM_REQUIRE((output.accept_logits.index({Slice(), 4}) < -9000.0F).all().item<bool>());
+}
+
 static void pfm_v21_graph_matcher_can_stop_attention_layers_when_confident()
 {
     auto matcher = pfm::v21::PfmV21GraphMatcher(2, 8, 3, 4);
@@ -308,6 +355,8 @@ void register_pfm_model_v21_tests()
                   pfm_v21_graph_matcher_can_disable_candidate_mask_for_training_loss);
     register_test("pfm v21 graph matcher width pruning restores full logits",
                   pfm_v21_graph_matcher_width_pruning_restores_full_logits);
+    register_test("pfm v21 graph matcher width pruning uses layer acceptance",
+                  pfm_v21_graph_matcher_width_pruning_uses_layer_acceptance);
     register_test("pfm v21 graph matcher can stop attention layers when confident",
                   pfm_v21_graph_matcher_can_stop_attention_layers_when_confident);
     register_test("pfm v21 graph matcher early stop tolerates single uncertain keypoint",

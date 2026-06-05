@@ -319,7 +319,14 @@ class PfmV21GraphMatcherImpl : public torch::nn::Module
     torch::Tensor provisionalPairLogits(const torch::Tensor& embed_a, const torch::Tensor& embed_b,
                                         const torch::Tensor& raw_similarity, const torch::Tensor& meta_a,
                                         const torch::Tensor& meta_b);
+    std::pair<torch::Tensor, torch::Tensor> provisionalPairOutputs(const torch::Tensor& embed_a,
+                                                                   const torch::Tensor& embed_b,
+                                                                   const torch::Tensor& raw_similarity,
+                                                                   const torch::Tensor& meta_a,
+                                                                   const torch::Tensor& meta_b);
     static torch::Tensor assignmentConfidence(const torch::Tensor& pair_logits);
+    static std::pair<torch::Tensor, torch::Tensor> acceptanceKeepMasks(const torch::Tensor& accept_logits,
+                                                                       double min_probability);
 
     int64_t _descriptor_dim;
     int64_t _hidden_dim;

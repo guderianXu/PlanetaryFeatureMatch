@@ -897,6 +897,13 @@ torch::Tensor PfmV21GraphMatcherImpl::provisionalPairLogits(const torch::Tensor&
                                                             const torch::Tensor& meta_a,
                                                             const torch::Tensor& meta_b)
 {
+    return provisionalPairOutputs(embed_a, embed_b, raw_similarity, meta_a, meta_b).first;
+}
+
+std::pair<torch::Tensor, torch::Tensor> PfmV21GraphMatcherImpl::provisionalPairOutputs(
+    const torch::Tensor& embed_a, const torch::Tensor& embed_b, const torch::Tensor& raw_similarity,
+    const torch::Tensor& meta_a, const torch::Tensor& meta_b)
+{
     auto projected_a = torch::nn::functional::normalize(_score_projection->forward(embed_a),
                                                         torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
     auto projected_b = torch::nn::functional::normalize(_score_projection->forward(embed_b),
@@ -907,7 +914,8 @@ torch::Tensor PfmV21GraphMatcherImpl::provisionalPairLogits(const torch::Tensor&
     auto raw_temperature = _raw_score_temperature.abs().clamp(0.03, 1.0);
     auto delta_scale = _graph_delta_scale.clamp(0.0, 2.0);
     auto accept_scale = _accept_logit_scale.clamp(0.0, 2.0);
-    return raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits;
+    auto pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits;
+    return {pair_logits, accept_logits};
 }
 
 torch::Tensor PfmV21GraphMatcherImpl::assignmentConfidence(const torch::Tensor& pair_logits)
@@ -919,6 +927,23 @@ torch::Tensor PfmV21GraphMatcherImpl::assignmentConfidence(const torch::Tensor& 
     auto row_confidence = std::get<0>(torch::softmax(pair_logits, 1).max(1));
     auto column_confidence = std::get<0>(torch::softmax(pair_logits, 0).max(0));
     return torch::minimum(row_confidence.mean(), column_confidence.mean());
+}
+
+std::pair<torch::Tensor, torch::Tensor> PfmV21GraphMatcherImpl::acceptanceKeepMasks(
+    const torch::Tensor& accept_logits, double min_probability)
+{
+    if (accept_logits.numel() == 0)
+    {
+        auto keep_a = torch::zeros({accept_logits.size(0)},
+                                   torch::TensorOptions().device(accept_logits.device()).dtype(torch::kBool));
+        auto keep_b = torch::zeros({accept_logits.size(1)},
+                                   torch::TensorOptions().device(accept_logits.device()).dtype(torch::kBool));
+        return {keep_a, keep_b};
+    }
+    auto accept_probability = torch::sigmoid(accept_logits);
+    auto keep_a = std::get<0>(accept_probability.max(1)) >= min_probability;
+    auto keep_b = std::get<0>(accept_probability.max(0)) >= min_probability;
+    return {keep_a, keep_b};
 }
 
 int64_t PfmV21GraphMatcherImpl::lastExecutedAttentionLayers() const
@@ -1012,11 +1037,39 @@ PfmV21GraphMatcherOutput PfmV21GraphMatcherImpl::forward(const torch::Tensor& de
             embed_a = refined.first;
             embed_b = refined.second;
             ++_last_executed_attention_layers;
-            if (early_stop_min_confidence > -1.0 && _last_executed_attention_layers < _attention_layer_count)
+            const bool can_adapt = _last_executed_attention_layers < _attention_layer_count;
+            if (can_adapt && (prune_enabled || early_stop_min_confidence > -1.0))
             {
-                auto provisional_pair_logits =
-                    provisionalPairLogits(embed_a, embed_b, raw_similarity, kp_work_a, kp_work_b);
-                if (assignmentConfidence(provisional_pair_logits).item<float>() >= early_stop_min_confidence)
+                auto provisional_outputs = provisionalPairOutputs(embed_a, embed_b, raw_similarity, kp_work_a,
+                                                                  kp_work_b);
+                auto provisional_pair_logits = provisional_outputs.first;
+                auto provisional_accept_logits = provisional_outputs.second;
+                if (prune_enabled)
+                {
+                    auto keep_masks = acceptanceKeepMasks(provisional_accept_logits, width_prune_min_score);
+                    auto keep_work_a = keep_masks.first;
+                    auto keep_work_b = keep_masks.second;
+                    const bool has_a = keep_work_a.any().item<bool>();
+                    const bool has_b = keep_work_b.any().item<bool>();
+                    const bool keeps_all = keep_work_a.all().item<bool>() && keep_work_b.all().item<bool>();
+                    if (has_a && has_b && !keeps_all)
+                    {
+                        auto local_indices_a = torch::nonzero(keep_work_a).flatten();
+                        auto local_indices_b = torch::nonzero(keep_work_b).flatten();
+                        indices_a = indices_a.index_select(0, local_indices_a);
+                        indices_b = indices_b.index_select(0, local_indices_b);
+                        desc_work_a = desc_work_a.index_select(0, local_indices_a);
+                        desc_work_b = desc_work_b.index_select(0, local_indices_b);
+                        kp_work_a = kp_work_a.index_select(0, local_indices_a);
+                        kp_work_b = kp_work_b.index_select(0, local_indices_b);
+                        embed_a = embed_a.index_select(0, local_indices_a);
+                        embed_b = embed_b.index_select(0, local_indices_b);
+                        raw_similarity = raw_similarity.index_select(0, local_indices_a).index_select(1,
+                                                                                                       local_indices_b);
+                    }
+                }
+                if (early_stop_min_confidence > -1.0 &&
+                    assignmentConfidence(provisional_pair_logits).item<float>() >= early_stop_min_confidence)
                 {
                     break;
                 }

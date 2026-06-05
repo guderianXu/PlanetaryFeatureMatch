@@ -119,6 +119,32 @@ class PFMModelTest(unittest.TestCase):
         self.assertTrue(torch.all(output.logits[2, :2] < -9000.0))
         self.assertTrue(torch.all(output.accept_logits[2] < -9000.0))
 
+    def test_graph_matcher_width_pruning_uses_layer_acceptance(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=5,
+            hidden_dim=16,
+            attention_layers=3,
+            keypoint_meta_dim=16,
+            candidate_topk=0,
+        )
+        with torch.no_grad():
+            for parameter in graph.accept_head.parameters():
+                parameter.zero_()
+            graph.accept_head[0].weight[0, 4] = 10.0
+            graph.accept_head[0].bias[0] = -7.5
+            graph.accept_head[2].weight[0, 0] = 4.0
+            graph.accept_head[2].bias[0] = -4.0
+        descriptors = torch.eye(5)
+        metadata = torch.zeros(5, 16)
+        metadata[:, 12] = 1.0
+        metadata[4, 12] = 0.0
+
+        output = graph(descriptors, metadata, descriptors, metadata, width_prune_min_score=0.8)
+
+        self.assertTrue(torch.any(output.accept_logits[:4, :4] > -100.0))
+        self.assertTrue(torch.all(output.accept_logits[4, :] < -9000.0))
+        self.assertTrue(torch.all(output.accept_logits[:, 4] < -9000.0))
+
     def test_graph_matcher_can_stop_attention_layers_when_confident(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=3, keypoint_meta_dim=4)
         desc = torch.tensor([[1.0, 0.0], [0.0, 1.0]])

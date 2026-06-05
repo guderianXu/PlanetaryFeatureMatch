@@ -836,6 +836,17 @@ class PlanetaryGraphMatcher(nn.Module):
         meta_a: torch.Tensor,
         meta_b: torch.Tensor,
     ) -> torch.Tensor:
+        pair_logits, _ = self._provisional_pair_outputs(embed_a, embed_b, raw_similarity, meta_a, meta_b)
+        return pair_logits
+
+    def _provisional_pair_outputs(
+        self,
+        embed_a: torch.Tensor,
+        embed_b: torch.Tensor,
+        raw_similarity: torch.Tensor,
+        meta_a: torch.Tensor,
+        meta_b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         projected_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
         projected_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
         graph_delta = (projected_a @ projected_b.transpose(0, 1)) * self.logit_scale.clamp(1.0, 100.0)
@@ -844,7 +855,8 @@ class PlanetaryGraphMatcher(nn.Module):
         raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
         delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
         accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
-        return raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
+        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
+        return pair_logits, accept_logits
 
     @staticmethod
     def _assignment_confidence(pair_logits: torch.Tensor) -> torch.Tensor:
@@ -853,6 +865,17 @@ class PlanetaryGraphMatcher(nn.Module):
         row_confidence = torch.softmax(pair_logits, dim=1).max(dim=1).values
         column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values
         return torch.minimum(row_confidence.mean(), column_confidence.mean())
+
+    @staticmethod
+    def _acceptance_keep_masks(accept_logits: torch.Tensor, min_probability: float) -> tuple[torch.Tensor, torch.Tensor]:
+        if accept_logits.numel() == 0:
+            keep_a = torch.zeros(accept_logits.size(0), dtype=torch.bool, device=accept_logits.device)
+            keep_b = torch.zeros(accept_logits.size(1), dtype=torch.bool, device=accept_logits.device)
+            return keep_a, keep_b
+        accept_probability = torch.sigmoid(accept_logits)
+        keep_a = accept_probability.max(dim=1).values >= float(min_probability)
+        keep_b = accept_probability.max(dim=0).values >= float(min_probability)
+        return keep_a, keep_b
 
     def forward(
         self,
@@ -904,15 +927,40 @@ class PlanetaryGraphMatcher(nn.Module):
             for layer in self.attention_layers:
                 embed_a, embed_b = layer(embed_a, embed_b)
                 self.last_executed_attention_layers += 1
-                if early_stop_min_confidence > -1.0 and self.last_executed_attention_layers < len(self.attention_layers):
-                    provisional_pair_logits = self._provisional_pair_logits(
+                can_adapt = self.last_executed_attention_layers < len(self.attention_layers)
+                if can_adapt and (prune_enabled or early_stop_min_confidence > -1.0):
+                    provisional_pair_logits, provisional_accept_logits = self._provisional_pair_outputs(
                         embed_a,
                         embed_b,
                         raw_similarity,
                         kp_work_a,
                         kp_work_b,
                     )
-                    if bool(self._assignment_confidence(provisional_pair_logits).ge(float(early_stop_min_confidence))):
+                    if prune_enabled:
+                        keep_work_a, keep_work_b = self._acceptance_keep_masks(
+                            provisional_accept_logits,
+                            float(width_prune_min_score),
+                        )
+                        if bool(keep_work_a.any()) and bool(keep_work_b.any()) and (
+                            not bool(keep_work_a.all()) or not bool(keep_work_b.all())
+                        ):
+                            local_indices_a = keep_work_a.nonzero(as_tuple=False).flatten()
+                            local_indices_b = keep_work_b.nonzero(as_tuple=False).flatten()
+                            indices_a = indices_a.index_select(0, local_indices_a)
+                            indices_b = indices_b.index_select(0, local_indices_b)
+                            desc_work_a = desc_work_a.index_select(0, local_indices_a)
+                            desc_work_b = desc_work_b.index_select(0, local_indices_b)
+                            kp_work_a = kp_work_a.index_select(0, local_indices_a)
+                            kp_work_b = kp_work_b.index_select(0, local_indices_b)
+                            embed_a = embed_a.index_select(0, local_indices_a)
+                            embed_b = embed_b.index_select(0, local_indices_b)
+                            raw_similarity = raw_similarity.index_select(0, local_indices_a).index_select(
+                                1,
+                                local_indices_b,
+                            )
+                    if early_stop_min_confidence > -1.0 and bool(
+                        self._assignment_confidence(provisional_pair_logits).ge(float(early_stop_min_confidence))
+                    ):
                         break
             embed_a = F.normalize(self.score_projection(embed_a), p=2, dim=1)
             embed_b = F.normalize(self.score_projection(embed_b), p=2, dim=1)
