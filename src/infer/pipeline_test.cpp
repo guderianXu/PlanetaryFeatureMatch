@@ -18,6 +18,7 @@
 #include "feature_io/feature_codec.h"
 #include "feature_io/match_codec.h"
 #include "infer/feature_extractor.h"
+#include "infer/matching_pipeline.h"
 #include "infer/pipeline.h"
 #include "tests/test_harness.h"
 #include "train/trainer.h"
@@ -36,6 +37,7 @@ FeatureSet make_descriptor_grid_feature_set_for_test(const RawFeatureMaps& maps,
                                                      const torch::Tensor& intensity_mask);
 torch::Tensor make_inference_decode_heatmap_for_test(const torch::Tensor& image, const torch::Tensor& learned_heatmap);
 FeatureDecodeConfig make_high_density_decode_config_for_test(FeatureDecodeConfig decode_config);
+GraphMatcherInferenceOptions make_graph_matcher_inference_options_for_test(const CliOptions& options);
 } // namespace pfm::testing
 
 namespace
@@ -926,6 +928,60 @@ static void pipeline_default_texture_blend_uses_empirical_rotation_setting()
     unsetenv("PFM_TEXTURE_BLEND_WEIGHT");
 }
 
+static void pipeline_graph_inference_fast_preset_sets_lightglue_thresholds()
+{
+    pfm::CliOptions options;
+    options.graph_inference_preset = "fast";
+
+    const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
+
+    PFM_REQUIRE_CLOSE(graph_options.width_prune_min_score, 0.25, 1.0e-12);
+    PFM_REQUIRE_CLOSE(graph_options.early_stop_min_confidence, 0.85, 1.0e-12);
+}
+
+static void pipeline_graph_inference_high_precision_preset_sets_filter_threshold()
+{
+    pfm::CliOptions options;
+    options.graph_inference_preset = "high_precision";
+
+    const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
+
+    PFM_REQUIRE_CLOSE(graph_options.width_prune_min_score, 0.5, 1.0e-12);
+    PFM_REQUIRE_CLOSE(graph_options.early_stop_min_confidence, 0.85, 1.0e-12);
+}
+
+static void pipeline_graph_inference_preset_allows_numeric_override()
+{
+    pfm::CliOptions options;
+    options.graph_inference_preset = "fast";
+    options.graph_width_prune_min_score = 0.7;
+
+    const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
+
+    PFM_REQUIRE_CLOSE(graph_options.width_prune_min_score, 0.7, 1.0e-12);
+    PFM_REQUIRE_CLOSE(graph_options.early_stop_min_confidence, 0.85, 1.0e-12);
+}
+
+static void pipeline_graph_inference_off_preset_disables_lightglue_thresholds()
+{
+    pfm::CliOptions options;
+    options.graph_inference_preset = "off";
+
+    const auto graph_options = pfm::testing::make_graph_matcher_inference_options_for_test(options);
+
+    PFM_REQUIRE_CLOSE(graph_options.width_prune_min_score, -1.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(graph_options.early_stop_min_confidence, -1.0, 1.0e-12);
+}
+
+static void pipeline_graph_inference_unknown_preset_throws()
+{
+    pfm::CliOptions options;
+    options.graph_inference_preset = "unknown";
+
+    PFM_REQUIRE_THROWS_AS((void)pfm::testing::make_graph_matcher_inference_options_for_test(options),
+                          std::invalid_argument);
+}
+
 static void pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base()
 {
     unsetenv("PFM_SPARSE_GEOMETRY_FILTER");
@@ -1225,6 +1281,16 @@ void register_pipeline_tests()
                   pipeline_balanced_texture_blend_requires_stable_base_and_small_gain);
     register_test("pipeline_default_texture_blend_uses_empirical_rotation_setting",
                   pipeline_default_texture_blend_uses_empirical_rotation_setting);
+    register_test("pipeline_graph_inference_fast_preset_sets_lightglue_thresholds",
+                  pipeline_graph_inference_fast_preset_sets_lightglue_thresholds);
+    register_test("pipeline_graph_inference_high_precision_preset_sets_filter_threshold",
+                  pipeline_graph_inference_high_precision_preset_sets_filter_threshold);
+    register_test("pipeline_graph_inference_preset_allows_numeric_override",
+                  pipeline_graph_inference_preset_allows_numeric_override);
+    register_test("pipeline_graph_inference_off_preset_disables_lightglue_thresholds",
+                  pipeline_graph_inference_off_preset_disables_lightglue_thresholds);
+    register_test("pipeline_graph_inference_unknown_preset_throws",
+                  pipeline_graph_inference_unknown_preset_throws);
     register_test("pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base",
                   pipeline_rotation_only_geometry_skips_expensive_sparse_alternates_after_good_base);
     register_test("pipeline_eval_writes_report_archive", pipeline_eval_writes_report_archive);

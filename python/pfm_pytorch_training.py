@@ -31,6 +31,9 @@ from patch_descriptor_training import (
 )
 
 
+GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
+
+
 @dataclass(frozen=True)
 class PseudoLabelMatches:
     points_a_xy: torch.Tensor
@@ -3037,6 +3040,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-draw-matches", type=int, default=0)
     parser.add_argument("--report-min-margin", type=float, default=0.0)
     parser.add_argument("--report-matcher-mode", choices=["raw_descriptor", "graph_matcher", "both"], default="raw_descriptor")
+    parser.add_argument("--report-graph-inference-preset", choices=GRAPH_INFERENCE_PRESET_CHOICES, default="off")
     parser.add_argument("--report-graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--report-graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--report-texture-keypoint-fraction", type=float, default=1.0)
@@ -3231,6 +3235,8 @@ def run_training_report(args: argparse.Namespace, *, pytorch_state: Path) -> Non
             matcher_mode,
             "--min-intensity",
             str(args.min_intensity),
+            "--graph-inference-preset",
+            args.report_graph_inference_preset,
             "--graph-width-prune-min-score",
             str(args.report_graph_width_prune_min_score),
             "--graph-early-stop-min-confidence",

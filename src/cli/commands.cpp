@@ -337,6 +337,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                      "Maximum sparse matches emitted by python-raw-mutual matching")
         ->check(CLI::PositiveNumber);
     match
+        ->add_option("--graph-inference-preset", options.graph_inference_preset,
+                     "Graph matcher LightGlue-style preset: off, fast, or high_precision")
+        ->check(CLI::IsMember({"off", "fast", "high_precision"}));
+    match
         ->add_option("--graph-width-prune-min-score", options.graph_width_prune_min_score,
                      "Graph matcher width pruning threshold; -1 disables LightGlue-style pruning")
         ->check(CLI::Range(-1.0, 1.0));
@@ -399,6 +403,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
         ->add_option("--max-matches", options.max_matches,
                      "Maximum sparse matches emitted by python-raw-mutual evaluation")
         ->check(CLI::PositiveNumber);
+    eval
+        ->add_option("--graph-inference-preset", options.graph_inference_preset,
+                     "Graph matcher LightGlue-style preset: off, fast, or high_precision")
+        ->check(CLI::IsMember({"off", "fast", "high_precision"}));
     eval
         ->add_option("--graph-width-prune-min-score", options.graph_width_prune_min_score,
                      "Graph matcher width pruning threshold; -1 disables LightGlue-style pruning")

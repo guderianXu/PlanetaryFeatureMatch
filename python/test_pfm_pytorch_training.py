@@ -1636,6 +1636,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.25",
             "--report-graph-early-stop-min-confidence",
             "0.85",
+            "--report-graph-inference-preset",
+            "fast",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -1650,6 +1652,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.report_min_margin, 0.01)
         self.assertEqual(args.report_graph_width_prune_min_score, 0.25)
         self.assertEqual(args.report_graph_early_stop_min_confidence, 0.85)
+        self.assertEqual(args.report_graph_inference_preset, "fast")
 
     def test_training_report_command_forwards_lightglue_graph_options(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1671,6 +1674,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 report_keypoint_cell_cap=4,
                 report_coverage_bins=8,
                 report_min_margin=0.01,
+                report_graph_inference_preset="fast",
                 report_graph_width_prune_min_score=0.25,
                 report_graph_early_stop_min_confidence=0.85,
                 min_intensity=0.01,
@@ -1682,6 +1686,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 train.run_training_report(args, pytorch_state=Path("state.pt"))
 
         command = run.call_args.args[0]
+        self.assertIn("--graph-inference-preset", command)
+        self.assertIn("fast", command)
         self.assertIn("--graph-width-prune-min-score", command)
         self.assertIn("0.25", command)
         self.assertIn("--graph-early-stop-min-confidence", command)

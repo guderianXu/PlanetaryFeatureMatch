@@ -1331,7 +1331,7 @@ def matching_config_lines(args: argparse.Namespace) -> list[str]:
         f"texture_fraction={args.texture_keypoint_fraction:.3f}, weak_texture_fraction={args.weak_texture_keypoint_fraction:.3f}, spatial_bins={args.keypoint_spatial_bins}, cell_cap={args.keypoint_cell_cap}。",
         f"min_score={args.min_score:.6f}, min_margin={args.min_margin:.6f}, threshold_px={args.threshold_px:.2f}。",
         f"graph_dustbin_delta={args.graph_dustbin_delta:.6f}, graph_acceptance_margin={args.graph_acceptance_margin:.6f}, graph_min_raw_score={args.graph_min_raw_score:.6f}, graph_min_raw_margin={args.graph_min_raw_margin:.6f}。",
-        f"graph_width_prune_min_score={args.graph_width_prune_min_score:.6f}, graph_early_stop_min_confidence={args.graph_early_stop_min_confidence:.6f}。",
+        f"graph_inference_preset={args.graph_inference_preset}, graph_width_prune_min_score={args.graph_width_prune_min_score:.6f}, graph_early_stop_min_confidence={args.graph_early_stop_min_confidence:.6f}。",
         f"training_crop_size={args.training_crop_size}, training_max_image_size={args.training_max_image_size}。",
     ]
 
@@ -1381,6 +1381,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-inference-preset", choices=sorted(match_eval.GRAPH_INFERENCE_PRESETS), default="off")
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--non-mutual", action="store_true")
@@ -1415,6 +1416,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.graph_width_prune_min_score, args.graph_early_stop_min_confidence = match_eval.graph_inference_thresholds(
+        args.graph_inference_preset,
+        args.graph_width_prune_min_score,
+        args.graph_early_stop_min_confidence,
+    )
     configure_matplotlib_fonts()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")

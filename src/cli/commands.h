@@ -58,6 +58,7 @@ struct CliOptions
     std::string sparse_geometry_filter;
     std::string sparse_match_strategy = "learned";
     int max_matches = 512;
+    std::string graph_inference_preset = "off";
     double graph_width_prune_min_score = -1.0;
     double graph_early_stop_min_confidence = -1.0;
     int epochs = 1;

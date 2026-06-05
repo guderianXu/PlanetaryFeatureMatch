@@ -222,6 +222,8 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             "0.35",
             "--graph-early-stop-min-confidence",
             "0.8",
+            "--graph-inference-preset",
+            "high_precision",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -234,6 +236,15 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(args.graph_min_raw_margin, 0.03)
         self.assertEqual(args.graph_width_prune_min_score, 0.35)
         self.assertEqual(args.graph_early_stop_min_confidence, 0.8)
+        self.assertEqual(args.graph_inference_preset, "high_precision")
+
+    def test_graph_inference_thresholds_resolve_lightglue_presets(self):
+        self.assertEqual(eval_py.graph_inference_thresholds("off", -1.0, -1.0), (-1.0, -1.0))
+        self.assertEqual(eval_py.graph_inference_thresholds("fast", -1.0, -1.0), (0.25, 0.85))
+        self.assertEqual(eval_py.graph_inference_thresholds("high_precision", -1.0, -1.0), (0.5, 0.85))
+
+    def test_graph_inference_thresholds_allow_numeric_override(self):
+        self.assertEqual(eval_py.graph_inference_thresholds("fast", 0.7, -1.0), (0.7, 0.85))
 
     def test_sample_descriptor_rows_at_keypoints_interpolates_rows(self):
         descriptors = torch.zeros(1, 2, 2, 2)

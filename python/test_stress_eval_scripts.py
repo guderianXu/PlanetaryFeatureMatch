@@ -36,6 +36,8 @@ class StressEvalScriptsTest(unittest.TestCase):
             "0.25",
             "--graph-early-stop-min-confidence",
             "0.85",
+            "--graph-inference-preset",
+            "fast",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -43,6 +45,7 @@ class StressEvalScriptsTest(unittest.TestCase):
 
         self.assertEqual(args.graph_width_prune_min_score, 0.25)
         self.assertEqual(args.graph_early_stop_min_confidence, 0.85)
+        self.assertEqual(args.graph_inference_preset, "fast")
 
     def test_lazy_visual_parse_args_defaults_to_filtered_all_match_report(self) -> None:
         argv = [

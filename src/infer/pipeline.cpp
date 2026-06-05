@@ -651,8 +651,34 @@ FeatureDecodeConfig makeFeatureDecodeConfig(const CliOptions& options)
 GraphMatcherInferenceOptions makeGraphMatcherInferenceOptions(const CliOptions& options)
 {
     GraphMatcherInferenceOptions graph_options;
-    graph_options.width_prune_min_score = options.graph_width_prune_min_score;
-    graph_options.early_stop_min_confidence = options.graph_early_stop_min_confidence;
+    if (options.graph_inference_preset == "off")
+    {
+        graph_options.width_prune_min_score = -1.0;
+        graph_options.early_stop_min_confidence = -1.0;
+    }
+    else if (options.graph_inference_preset == "fast")
+    {
+        graph_options.width_prune_min_score = 0.25;
+        graph_options.early_stop_min_confidence = 0.85;
+    }
+    else if (options.graph_inference_preset == "high_precision")
+    {
+        graph_options.width_prune_min_score = 0.5;
+        graph_options.early_stop_min_confidence = 0.85;
+    }
+    else
+    {
+        throw std::invalid_argument("graph_inference_preset must be one of: off, fast, high_precision");
+    }
+
+    if (options.graph_width_prune_min_score > -1.0)
+    {
+        graph_options.width_prune_min_score = options.graph_width_prune_min_score;
+    }
+    if (options.graph_early_stop_min_confidence > -1.0)
+    {
+        graph_options.early_stop_min_confidence = options.graph_early_stop_min_confidence;
+    }
     return graph_options;
 }
 
@@ -1305,6 +1331,11 @@ torch::Tensor make_inference_decode_heatmap_for_test(const torch::Tensor& image,
 FeatureDecodeConfig make_high_density_decode_config_for_test(FeatureDecodeConfig decode_config)
 {
     return makeHighDensityDecodeConfig(decode_config);
+}
+
+GraphMatcherInferenceOptions make_graph_matcher_inference_options_for_test(const CliOptions& options)
+{
+    return makeGraphMatcherInferenceOptions(options);
 }
 
 } // namespace testing

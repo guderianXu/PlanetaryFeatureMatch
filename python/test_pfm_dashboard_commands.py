@@ -33,6 +33,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--learning-rate 3e-05", script)
         self.assertIn("--generate-training-report", script)
         self.assertIn("--report-matcher-mode graph_matcher", script)
+        self.assertIn("--report-graph-inference-preset fast", script)
         self.assertIn("--report-graph-width-prune-min-score 0.25", script)
         self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
 
@@ -50,6 +51,7 @@ class DashboardCommandsTest(unittest.TestCase):
             runs = create_training_runs(request)
 
         script = runs[0].script_text
+        self.assertIn("--report-graph-inference-preset high_precision", script)
         self.assertIn("--report-graph-width-prune-min-score 0.5", script)
         self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
 

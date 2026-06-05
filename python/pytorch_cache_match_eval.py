@@ -20,6 +20,36 @@ import pfm_pytorch_training
 from patch_descriptor_training import SyntheticPair, discover_pair_archives, load_libtorch_pair_archive
 
 
+GRAPH_INFERENCE_PRESETS: dict[str, tuple[float, float]] = {
+    "off": (-1.0, -1.0),
+    "fast": (0.25, 0.85),
+    "high_precision": (0.5, 0.85),
+}
+
+
+def graph_inference_thresholds(
+    preset: str,
+    graph_width_prune_min_score: float,
+    graph_early_stop_min_confidence: float,
+) -> tuple[float, float]:
+    """解析 LightGlue 风格命名预设，并允许显式数字阈值覆盖。"""
+
+    try:
+        width_prune_min_score, early_stop_min_confidence = GRAPH_INFERENCE_PRESETS[preset]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(GRAPH_INFERENCE_PRESETS))
+        raise ValueError(f"graph_inference_preset must be one of: {allowed}") from exc
+    if graph_width_prune_min_score < -1.0 or graph_width_prune_min_score > 1.0:
+        raise ValueError("graph_width_prune_min_score must be in [-1, 1]")
+    if graph_early_stop_min_confidence < -1.0 or graph_early_stop_min_confidence > 1.0:
+        raise ValueError("graph_early_stop_min_confidence must be in [-1, 1]")
+    if graph_width_prune_min_score > -1.0:
+        width_prune_min_score = float(graph_width_prune_min_score)
+    if graph_early_stop_min_confidence > -1.0:
+        early_stop_min_confidence = float(graph_early_stop_min_confidence)
+    return width_prune_min_score, early_stop_min_confidence
+
+
 @dataclass(frozen=True)
 class MatchEvalResult:
     matches: int
@@ -1290,6 +1320,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-inference-preset", choices=sorted(GRAPH_INFERENCE_PRESETS), default="off")
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--min-target-gradient", type=float, default=0.0)
@@ -1340,10 +1371,11 @@ def main() -> int:
     args = parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
-    if args.graph_width_prune_min_score < -1.0:
-        raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
-    if args.graph_early_stop_min_confidence < -1.0:
-        raise ValueError("--graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
+    args.graph_width_prune_min_score, args.graph_early_stop_min_confidence = graph_inference_thresholds(
+        args.graph_inference_preset,
+        args.graph_width_prune_min_score,
+        args.graph_early_stop_min_confidence,
+    )
     model = load_model(args)
     model.eval()
     device = torch.device(args.device)

@@ -176,6 +176,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
                 "--generate-training-report",
                 "--report-matcher-mode",
                 "graph_matcher",
+                "--report-graph-inference-preset",
+                request.graph_inference_preset,
                 "--report-graph-width-prune-min-score",
                 str(width_prune_min_score),
                 "--report-graph-early-stop-min-confidence",
