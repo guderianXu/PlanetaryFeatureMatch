@@ -93,6 +93,13 @@ struct CliOptions
     double graph_matcher_prune_ranking_margin = 0.25;
     double graph_matcher_stop_confidence_weight = 0.05;
     double graph_matcher_stop_confidence_margin = 0.5;
+    double graph_matcher_raw_preservation_weight = 0.0;
+    double graph_matcher_raw_preservation_margin = 1.0;
+    double graph_matcher_raw_preservation_raw_margin = 0.05;
+    double graph_matcher_hard_negative_dustbin_weight = 0.0;
+    int graph_matcher_hard_negative_dustbin_topk = 8;
+    double graph_matcher_hard_negative_dustbin_margin = 0.25;
+    double graph_matcher_hard_negative_dustbin_spatial_min_distance = 0.0;
     bool train_backbone = false;
     bool train_dual_fpn = false;
     bool freeze_descriptor_head = false;

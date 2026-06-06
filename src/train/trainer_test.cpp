@@ -214,6 +214,15 @@ torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatch
                                                       int64_t meta_dim, double accept_weight,
                                                       double prune_ranking_weight, double prune_ranking_margin,
                                                       double stop_confidence_weight);
+torch::Tensor make_python_compare_graph_loss_with_raw_preservation_for_test(
+    pfm::v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, double raw_preservation_weight,
+    double raw_preservation_margin, double raw_preservation_raw_margin);
+torch::Tensor make_python_compare_graph_loss_with_hard_negative_dustbin_for_test(
+    pfm::v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim,
+    double hard_negative_dustbin_weight, int64_t hard_negative_dustbin_topk,
+    double hard_negative_dustbin_margin, double hard_negative_dustbin_spatial_min_distance);
 torch::Tensor make_python_compare_graph_metadata_for_test(const torch::Tensor& points, int64_t meta_dim,
                                                           const std::string& metadata_mode);
 torch::Tensor make_python_compare_graph_loss_with_attention_budget_for_test(
@@ -446,6 +455,13 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_stop_confidence_weight, 0.05, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_stop_confidence_margin, 0.5, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_raw_preservation_weight, 0.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_raw_preservation_margin, 1.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_raw_preservation_raw_margin, 0.05, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_hard_negative_dustbin_weight, 0.0, 1.0e-12);
+    PFM_REQUIRE(config.graph_matcher_hard_negative_dustbin_topk == 8);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_hard_negative_dustbin_margin, 0.25, 1.0e-12);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_hard_negative_dustbin_spatial_min_distance, 0.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.learning_rate, 3.0e-4, 1.0e-9);
     PFM_REQUIRE(config.lr_warmup_steps == 0);
     PFM_REQUIRE_CLOSE(config.min_learning_rate_ratio, 0.01, 1.0e-12);
@@ -723,6 +739,34 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument()
     auto invalid_width_keep = config;
     invalid_width_keep.graph_matcher_train_width_keep_ratio = 0.0;
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_width_keep));
+
+    auto invalid_raw_preservation_weight = config;
+    invalid_raw_preservation_weight.graph_matcher_raw_preservation_weight = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_raw_preservation_weight));
+
+    auto invalid_raw_preservation_margin = config;
+    invalid_raw_preservation_margin.graph_matcher_raw_preservation_margin = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_raw_preservation_margin));
+
+    auto invalid_raw_preservation_raw_margin = config;
+    invalid_raw_preservation_raw_margin.graph_matcher_raw_preservation_raw_margin = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_raw_preservation_raw_margin));
+
+    auto invalid_hard_negative_dustbin_weight = config;
+    invalid_hard_negative_dustbin_weight.graph_matcher_hard_negative_dustbin_weight = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_hard_negative_dustbin_weight));
+
+    auto invalid_hard_negative_dustbin_topk = config;
+    invalid_hard_negative_dustbin_topk.graph_matcher_hard_negative_dustbin_topk = -1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_hard_negative_dustbin_topk));
+
+    auto invalid_hard_negative_dustbin_margin = config;
+    invalid_hard_negative_dustbin_margin.graph_matcher_hard_negative_dustbin_margin = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_hard_negative_dustbin_margin));
+
+    auto invalid_hard_negative_dustbin_distance = config;
+    invalid_hard_negative_dustbin_distance.graph_matcher_hard_negative_dustbin_spatial_min_distance = -0.1;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_hard_negative_dustbin_distance));
 
     auto invalid_training_profile = config;
     invalid_training_profile.training_profile = "wide-open";
@@ -2011,6 +2055,42 @@ static void trainer_python_compare_graph_loss_can_train_stop_confidence_score_pa
         }
     }
     PFM_REQUIRE(saw_score_grad);
+}
+
+static void trainer_python_compare_graph_loss_adds_raw_preservation_margin()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->eval();
+    torch::manual_seed(20260606);
+
+    auto descriptors_a = torch::eye(4, 8, torch::kFloat32);
+    auto descriptors_b = descriptors_a.clone();
+    auto points = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, torch::kFloat32);
+
+    const auto base_loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a,
+                                                                                 descriptors_b, points, points, 16);
+    const auto preserved_loss = pfm::testing::make_python_compare_graph_loss_with_raw_preservation_for_test(
+        *matcher, descriptors_a, descriptors_b, points, points, 16, 1.0, 100.0, 0.05);
+
+    PFM_REQUIRE(preserved_loss.item<float>() > base_loss.item<float>() + 1.0F);
+}
+
+static void trainer_python_compare_graph_loss_adds_hard_negative_dustbin_margin()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->eval();
+    torch::manual_seed(20260606);
+
+    auto descriptors_a = torch::eye(4, 8, torch::kFloat32);
+    auto descriptors_b = descriptors_a.clone();
+    auto points = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}}, torch::kFloat32);
+
+    const auto base_loss = pfm::testing::make_python_compare_graph_loss_for_test(*matcher, descriptors_a,
+                                                                                 descriptors_b, points, points, 16);
+    const auto dustbin_loss = pfm::testing::make_python_compare_graph_loss_with_hard_negative_dustbin_for_test(
+        *matcher, descriptors_a, descriptors_b, points, points, 16, 1.0, 2, 8.0, 0.0);
+
+    PFM_REQUIRE(dustbin_loss.item<float>() > base_loss.item<float>() + 1.0F);
 }
 
 static void trainer_descriptor_candidates_do_not_repeat_positive_target()
@@ -3502,6 +3582,10 @@ void register_trainer_tests()
                   trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head);
     register_test("trainer python compare graph loss can train stop confidence score path",
                   trainer_python_compare_graph_loss_can_train_stop_confidence_score_path);
+    register_test("trainer python compare graph loss adds raw preservation margin",
+                  trainer_python_compare_graph_loss_adds_raw_preservation_margin);
+    register_test("trainer python compare graph loss adds hard negative dustbin margin",
+                  trainer_python_compare_graph_loss_adds_hard_negative_dustbin_margin);
     register_test("trainer_descriptor_candidates_do_not_repeat_positive_target",
                   trainer_descriptor_candidates_do_not_repeat_positive_target);
     register_test("trainer_descriptor_candidates_exclude_spatial_near_positives",

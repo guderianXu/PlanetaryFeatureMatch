@@ -66,6 +66,20 @@ struct TrainConfig
     double graph_matcher_stop_confidence_weight = 0.05;
     /// Python 对齐训练中早停置信校准所需的安全 logit 间隔。
     double graph_matcher_stop_confidence_margin = 0.5;
+    /// Python 对齐训练中保持原始描述子正负间隔的辅助 loss 权重。
+    double graph_matcher_raw_preservation_weight = 0.0;
+    /// GraphMatcher logits 应继承原始描述子优势的目标间隔。
+    double graph_matcher_raw_preservation_margin = 1.0;
+    /// 原始描述子正样本比最难负样本至少高出该间隔时才启用保持项。
+    double graph_matcher_raw_preservation_raw_margin = 0.05;
+    /// Python 对齐训练中把高相似错误候选推向 dustbin 的辅助 loss 权重。
+    double graph_matcher_hard_negative_dustbin_weight = 0.0;
+    /// hard-negative dustbin loss 每行使用的困难负例数量。
+    int graph_matcher_hard_negative_dustbin_topk = 8;
+    /// hard-negative logits 应低于 dustbin floor 的安全间隔。
+    double graph_matcher_hard_negative_dustbin_margin = 0.25;
+    /// hard-negative dustbin loss 采样负例时排除的最小目标点距离。
+    double graph_matcher_hard_negative_dustbin_spatial_min_distance = 0.0;
     /// Python 对齐训练时是否训练 backbone。
     bool train_backbone = false;
     /// Python 对齐训练时是否训练 dual FPN。

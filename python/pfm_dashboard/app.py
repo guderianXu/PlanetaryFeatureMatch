@@ -747,6 +747,28 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>训练宽度保留比例 <input type="number" name="graph_matcher_train_width_keep_ratio" value="1" min="0.05" max="1" step="0.05"></label>
       <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
       <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
+      <label>原始间隔保持权重
+        <input type="number" name="graph_matcher_raw_preservation_weight" value="0" min="0" step="0.01">
+      </label>
+      <label>原始间隔目标
+        <input type="number" name="graph_matcher_raw_preservation_margin" value="1" min="0" step="0.05">
+      </label>
+      <label>原始描述子阈值
+        <input type="number" name="graph_matcher_raw_preservation_raw_margin" value="0.05" min="0" step="0.01">
+      </label>
+      <label>困难负例 Dustbin 权重
+        <input type="number" name="graph_matcher_hard_negative_dustbin_weight" value="0" min="0" step="0.01">
+      </label>
+      <label>困难负例 TopK
+        <input type="number" name="graph_matcher_hard_negative_dustbin_topk" value="8" min="0">
+      </label>
+      <label>Dustbin 安全间隔
+        <input type="number" name="graph_matcher_hard_negative_dustbin_margin" value="0.25" min="0" step="0.05">
+      </label>
+      <label>困难负例最小距离
+        <input type="number" name="graph_matcher_hard_negative_dustbin_spatial_min_distance"
+               value="0" min="0" step="0.5">
+      </label>
     </div>
     <div class="quick-presets">
       <button type="button" data-preset="smoke">冒烟测试</button>
@@ -976,6 +998,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_matcher_train_width_keep_ratio=float(value("graph_matcher_train_width_keep_ratio", "1")),
             graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
             graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
+            graph_matcher_raw_preservation_weight=float(value("graph_matcher_raw_preservation_weight", "0")),
+            graph_matcher_raw_preservation_margin=float(value("graph_matcher_raw_preservation_margin", "1")),
+            graph_matcher_raw_preservation_raw_margin=float(
+                value("graph_matcher_raw_preservation_raw_margin", "0.05")
+            ),
+            graph_matcher_hard_negative_dustbin_weight=float(
+                value("graph_matcher_hard_negative_dustbin_weight", "0")
+            ),
+            graph_matcher_hard_negative_dustbin_topk=int(value("graph_matcher_hard_negative_dustbin_topk", "8")),
+            graph_matcher_hard_negative_dustbin_margin=float(
+                value("graph_matcher_hard_negative_dustbin_margin", "0.25")
+            ),
+            graph_matcher_hard_negative_dustbin_spatial_min_distance=float(
+                value("graph_matcher_hard_negative_dustbin_spatial_min_distance", "0")
+            ),
         )
         try:
             generated = create_training_runs(request)

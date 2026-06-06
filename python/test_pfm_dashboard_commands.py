@@ -29,6 +29,13 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_train_width_keep_ratio=0.5,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
+                graph_matcher_raw_preservation_weight=0.11,
+                graph_matcher_raw_preservation_margin=0.9,
+                graph_matcher_raw_preservation_raw_margin=0.04,
+                graph_matcher_hard_negative_dustbin_weight=0.13,
+                graph_matcher_hard_negative_dustbin_topk=5,
+                graph_matcher_hard_negative_dustbin_margin=0.3,
+                graph_matcher_hard_negative_dustbin_spatial_min_distance=2.5,
                 graph_min_accept_probability=0.7,
                 graph_max_attention_work_fraction=0.55,
                 graph_width_prune_keep_ratio=0.4,
@@ -55,6 +62,13 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
+        self.assertIn("--graph-matcher-raw-preservation-weight 0.11", script)
+        self.assertIn("--graph-matcher-raw-preservation-margin 0.9", script)
+        self.assertIn("--graph-matcher-raw-preservation-raw-margin 0.04", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-weight 0.13", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-topk 5", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-margin 0.3", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-spatial-min-distance 2.5", script)
         self.assertIn("--generate-training-report", script)
         self.assertIn("--report-matcher-mode graph_matcher", script)
         self.assertIn("--report-graph-inference-preset fast", script)
@@ -73,6 +87,13 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("graph_matcher_train_max_attention_work_fraction=0.5", run_html)
         self.assertIn("graph_matcher_train_width_keep_ratio=0.5", run_html)
         self.assertIn("graph_matcher_stop_confidence_weight=0.07", run_html)
+        self.assertIn("graph_matcher_raw_preservation_weight=0.11", run_html)
+        self.assertIn("graph_matcher_raw_preservation_margin=0.9", run_html)
+        self.assertIn("graph_matcher_raw_preservation_raw_margin=0.04", run_html)
+        self.assertIn("graph_matcher_hard_negative_dustbin_weight=0.13", run_html)
+        self.assertIn("graph_matcher_hard_negative_dustbin_topk=5", run_html)
+        self.assertIn("graph_matcher_hard_negative_dustbin_margin=0.3", run_html)
+        self.assertIn("graph_matcher_hard_negative_dustbin_spatial_min_distance=2.5", run_html)
 
     def test_create_python_training_run_accepts_high_precision_graph_report_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -111,6 +132,13 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_train_width_keep_ratio=0.5,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
+                graph_matcher_raw_preservation_weight=0.11,
+                graph_matcher_raw_preservation_margin=0.9,
+                graph_matcher_raw_preservation_raw_margin=0.04,
+                graph_matcher_hard_negative_dustbin_weight=0.13,
+                graph_matcher_hard_negative_dustbin_topk=5,
+                graph_matcher_hard_negative_dustbin_margin=0.3,
+                graph_matcher_hard_negative_dustbin_spatial_min_distance=2.5,
             )
 
             runs = create_training_runs(request)
@@ -133,6 +161,13 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
+        self.assertIn("--graph-matcher-raw-preservation-weight 0.11", script)
+        self.assertIn("--graph-matcher-raw-preservation-margin 0.9", script)
+        self.assertIn("--graph-matcher-raw-preservation-raw-margin 0.04", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-weight 0.13", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-topk 5", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-margin 0.3", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-spatial-min-distance 2.5", script)
         self.assertIn("--train-backbone", script)
         self.assertIn("--train-blended-descriptors", script)
         self.assertIn("--train-graph-matcher", script)

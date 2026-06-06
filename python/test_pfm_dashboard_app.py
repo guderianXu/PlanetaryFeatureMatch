@@ -59,6 +59,13 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_matcher_train_width_keep_ratio"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_weight"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_margin"', train_html)
+                self.assertIn('name="graph_matcher_raw_preservation_weight"', train_html)
+                self.assertIn('name="graph_matcher_raw_preservation_margin"', train_html)
+                self.assertIn('name="graph_matcher_raw_preservation_raw_margin"', train_html)
+                self.assertIn('name="graph_matcher_hard_negative_dustbin_weight"', train_html)
+                self.assertIn('name="graph_matcher_hard_negative_dustbin_topk"', train_html)
+                self.assertIn('name="graph_matcher_hard_negative_dustbin_margin"', train_html)
+                self.assertIn('name="graph_matcher_hard_negative_dustbin_spatial_min_distance"', train_html)
                 self.assertIn("LightGlue 快速剪枝", train_html)
                 self.assertNotIn("Python + C++ 对比", train_html)
                 self.assertNotIn('name="align_python_compare"', train_html)
@@ -129,6 +136,13 @@ class DashboardAppTest(unittest.TestCase):
                     "graph_matcher_train_random_attention_layers": "on",
                     "graph_matcher_train_max_attention_work_fraction": "0.5",
                     "graph_matcher_train_width_keep_ratio": "0.5",
+                    "graph_matcher_raw_preservation_weight": "0.11",
+                    "graph_matcher_raw_preservation_margin": "0.9",
+                    "graph_matcher_raw_preservation_raw_margin": "0.04",
+                    "graph_matcher_hard_negative_dustbin_weight": "0.13",
+                    "graph_matcher_hard_negative_dustbin_topk": "5",
+                    "graph_matcher_hard_negative_dustbin_margin": "0.3",
+                    "graph_matcher_hard_negative_dustbin_spatial_min_distance": "2.5",
                 }
                 data = urllib.parse.urlencode(form).encode("utf-8")
                 urllib.request.urlopen(base + "/train", data=data, timeout=5).read()
@@ -145,6 +159,13 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--graph-matcher-train-random-attention-layers", script)
                 self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
                 self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
+                self.assertIn("--graph-matcher-raw-preservation-weight 0.11", script)
+                self.assertIn("--graph-matcher-raw-preservation-margin 0.9", script)
+                self.assertIn("--graph-matcher-raw-preservation-raw-margin 0.04", script)
+                self.assertIn("--graph-matcher-hard-negative-dustbin-weight 0.13", script)
+                self.assertIn("--graph-matcher-hard-negative-dustbin-topk 5", script)
+                self.assertIn("--graph-matcher-hard-negative-dustbin-margin 0.3", script)
+                self.assertIn("--graph-matcher-hard-negative-dustbin-spatial-min-distance 2.5", script)
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
                 self.assertIn("graph_matcher_metadata_mode=no_xy", report)
                 self.assertIn("graph_matcher_no_match_points=24", report)
@@ -152,6 +173,13 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("graph_matcher_train_random_attention_layers=True", report)
                 self.assertIn("graph_matcher_train_max_attention_work_fraction=0.5", report)
                 self.assertIn("graph_matcher_train_width_keep_ratio=0.5", report)
+                self.assertIn("graph_matcher_raw_preservation_weight=0.11", report)
+                self.assertIn("graph_matcher_raw_preservation_margin=0.9", report)
+                self.assertIn("graph_matcher_raw_preservation_raw_margin=0.04", report)
+                self.assertIn("graph_matcher_hard_negative_dustbin_weight=0.13", report)
+                self.assertIn("graph_matcher_hard_negative_dustbin_topk=5", report)
+                self.assertIn("graph_matcher_hard_negative_dustbin_margin=0.3", report)
+                self.assertIn("graph_matcher_hard_negative_dustbin_spatial_min_distance=2.5", report)
                 self.assertIn("graph_width_prune_keep_ratio=0.4", report)
             finally:
                 server.shutdown()

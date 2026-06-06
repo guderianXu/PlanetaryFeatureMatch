@@ -53,6 +53,13 @@ class TrainingRequest:
     graph_matcher_train_width_keep_ratio: float = 1.0
     graph_matcher_stop_confidence_weight: float = 0.05
     graph_matcher_stop_confidence_margin: float = 0.5
+    graph_matcher_raw_preservation_weight: float = 0.0
+    graph_matcher_raw_preservation_margin: float = 1.0
+    graph_matcher_raw_preservation_raw_margin: float = 0.05
+    graph_matcher_hard_negative_dustbin_weight: float = 0.0
+    graph_matcher_hard_negative_dustbin_topk: int = 8
+    graph_matcher_hard_negative_dustbin_margin: float = 0.25
+    graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0
     temperature: float = 0.07
     min_intensity: float = 0.01
     seed: int = 20260603
@@ -90,6 +97,7 @@ def _unique_run_dir(root: Path, name: str) -> Path:
 
 def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_path: Path) -> None:
     cache_items = "".join(f"<li><code>{html.escape(cache)}</code></li>" for cache in request.cache_dirs)
+    hard_negative_distance = request.graph_matcher_hard_negative_dustbin_spatial_min_distance
     content = f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>{html.escape(request.experiment_name)} {backend}</title></head>
@@ -118,6 +126,13 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_matcher_train_width_keep_ratio={request.graph_matcher_train_width_keep_ratio}</li>
 <li>graph_matcher_stop_confidence_weight={request.graph_matcher_stop_confidence_weight}</li>
 <li>graph_matcher_stop_confidence_margin={request.graph_matcher_stop_confidence_margin}</li>
+<li>graph_matcher_raw_preservation_weight={request.graph_matcher_raw_preservation_weight}</li>
+<li>graph_matcher_raw_preservation_margin={request.graph_matcher_raw_preservation_margin}</li>
+<li>graph_matcher_raw_preservation_raw_margin={request.graph_matcher_raw_preservation_raw_margin}</li>
+<li>graph_matcher_hard_negative_dustbin_weight={request.graph_matcher_hard_negative_dustbin_weight}</li>
+<li>graph_matcher_hard_negative_dustbin_topk={request.graph_matcher_hard_negative_dustbin_topk}</li>
+<li>graph_matcher_hard_negative_dustbin_margin={request.graph_matcher_hard_negative_dustbin_margin}</li>
+<li>graph_matcher_hard_negative_dustbin_spatial_min_distance={hard_negative_distance}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 <li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
 <li>graph_max_attention_work_fraction={request.graph_max_attention_work_fraction}</li>
@@ -187,8 +202,20 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         str(request.graph_matcher_stop_confidence_weight),
         "--graph-matcher-stop-confidence-margin",
         str(request.graph_matcher_stop_confidence_margin),
-        "--graph-matcher-metadata-mode",
-        "full",
+        "--graph-matcher-raw-preservation-weight",
+        str(request.graph_matcher_raw_preservation_weight),
+        "--graph-matcher-raw-preservation-margin",
+        str(request.graph_matcher_raw_preservation_margin),
+        "--graph-matcher-raw-preservation-raw-margin",
+        str(request.graph_matcher_raw_preservation_raw_margin),
+        "--graph-matcher-hard-negative-dustbin-weight",
+        str(request.graph_matcher_hard_negative_dustbin_weight),
+        "--graph-matcher-hard-negative-dustbin-topk",
+        str(request.graph_matcher_hard_negative_dustbin_topk),
+        "--graph-matcher-hard-negative-dustbin-margin",
+        str(request.graph_matcher_hard_negative_dustbin_margin),
+        "--graph-matcher-hard-negative-dustbin-spatial-min-distance",
+        str(request.graph_matcher_hard_negative_dustbin_spatial_min_distance),
         "--temperature",
         str(request.temperature),
         "--min-intensity",
@@ -304,6 +331,20 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.graph_matcher_stop_confidence_weight),
         "--graph-matcher-stop-confidence-margin",
         str(request.graph_matcher_stop_confidence_margin),
+        "--graph-matcher-raw-preservation-weight",
+        str(request.graph_matcher_raw_preservation_weight),
+        "--graph-matcher-raw-preservation-margin",
+        str(request.graph_matcher_raw_preservation_margin),
+        "--graph-matcher-raw-preservation-raw-margin",
+        str(request.graph_matcher_raw_preservation_raw_margin),
+        "--graph-matcher-hard-negative-dustbin-weight",
+        str(request.graph_matcher_hard_negative_dustbin_weight),
+        "--graph-matcher-hard-negative-dustbin-topk",
+        str(request.graph_matcher_hard_negative_dustbin_topk),
+        "--graph-matcher-hard-negative-dustbin-margin",
+        str(request.graph_matcher_hard_negative_dustbin_margin),
+        "--graph-matcher-hard-negative-dustbin-spatial-min-distance",
+        str(request.graph_matcher_hard_negative_dustbin_spatial_min_distance),
         "--temperature",
         str(request.temperature),
         "--learning-rate",
@@ -394,6 +435,20 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_matcher_stop_confidence_weight must be nonnegative")
     if request.graph_matcher_stop_confidence_margin < 0.0:
         raise ValueError("graph_matcher_stop_confidence_margin must be nonnegative")
+    if request.graph_matcher_raw_preservation_weight < 0.0:
+        raise ValueError("graph_matcher_raw_preservation_weight must be nonnegative")
+    if request.graph_matcher_raw_preservation_margin < 0.0:
+        raise ValueError("graph_matcher_raw_preservation_margin must be nonnegative")
+    if request.graph_matcher_raw_preservation_raw_margin < 0.0:
+        raise ValueError("graph_matcher_raw_preservation_raw_margin must be nonnegative")
+    if request.graph_matcher_hard_negative_dustbin_weight < 0.0:
+        raise ValueError("graph_matcher_hard_negative_dustbin_weight must be nonnegative")
+    if request.graph_matcher_hard_negative_dustbin_topk < 0:
+        raise ValueError("graph_matcher_hard_negative_dustbin_topk must be nonnegative")
+    if request.graph_matcher_hard_negative_dustbin_margin < 0.0:
+        raise ValueError("graph_matcher_hard_negative_dustbin_margin must be nonnegative")
+    if request.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0:
+        raise ValueError("graph_matcher_hard_negative_dustbin_spatial_min_distance must be nonnegative")
     backends = [request.backend]
     if any(backend not in {"python", "cpp"} for backend in backends):
         raise ValueError("backend must be python or cpp")

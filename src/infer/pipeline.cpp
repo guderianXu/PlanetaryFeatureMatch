@@ -814,6 +814,14 @@ int run_train_command(const CliOptions& options)
         config.graph_matcher_prune_ranking_margin = options.graph_matcher_prune_ranking_margin;
         config.graph_matcher_stop_confidence_weight = options.graph_matcher_stop_confidence_weight;
         config.graph_matcher_stop_confidence_margin = options.graph_matcher_stop_confidence_margin;
+        config.graph_matcher_raw_preservation_weight = options.graph_matcher_raw_preservation_weight;
+        config.graph_matcher_raw_preservation_margin = options.graph_matcher_raw_preservation_margin;
+        config.graph_matcher_raw_preservation_raw_margin = options.graph_matcher_raw_preservation_raw_margin;
+        config.graph_matcher_hard_negative_dustbin_weight = options.graph_matcher_hard_negative_dustbin_weight;
+        config.graph_matcher_hard_negative_dustbin_topk = options.graph_matcher_hard_negative_dustbin_topk;
+        config.graph_matcher_hard_negative_dustbin_margin = options.graph_matcher_hard_negative_dustbin_margin;
+        config.graph_matcher_hard_negative_dustbin_spatial_min_distance =
+            options.graph_matcher_hard_negative_dustbin_spatial_min_distance;
         config.train_backbone = options.train_backbone;
         config.train_dual_fpn = options.train_dual_fpn;
         config.freeze_descriptor_head = options.freeze_descriptor_head;

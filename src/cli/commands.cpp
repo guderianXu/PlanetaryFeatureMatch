@@ -185,6 +185,37 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_option("--graph-matcher-stop-confidence-margin", options.graph_matcher_stop_confidence_margin,
                       "Python-compatible early-stop confidence safe logit margin")
         ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-raw-preservation-weight", options.graph_matcher_raw_preservation_weight,
+                      "Python-compatible graph raw descriptor preservation loss weight")
+        ->check(CLI::NonNegativeNumber);
+    train->add_option("--graph-matcher-raw-preservation-margin", options.graph_matcher_raw_preservation_margin,
+                      "Target logit margin for graph raw descriptor preservation")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--graph-matcher-raw-preservation-raw-margin",
+                     options.graph_matcher_raw_preservation_raw_margin,
+                     "Raw descriptor margin threshold for enabling graph preservation loss")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--graph-matcher-hard-negative-dustbin-weight",
+                     options.graph_matcher_hard_negative_dustbin_weight,
+                     "Python-compatible graph hard-negative dustbin loss weight")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--graph-matcher-hard-negative-dustbin-topk",
+                     options.graph_matcher_hard_negative_dustbin_topk,
+                     "Hard negatives per row for graph hard-negative dustbin loss")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--graph-matcher-hard-negative-dustbin-margin",
+                     options.graph_matcher_hard_negative_dustbin_margin,
+                     "Safety margin above dustbin floor for graph hard negatives")
+        ->check(CLI::NonNegativeNumber);
+    train
+        ->add_option("--graph-matcher-hard-negative-dustbin-spatial-min-distance",
+                     options.graph_matcher_hard_negative_dustbin_spatial_min_distance,
+                     "Minimum target-point distance for graph hard-negative dustbin candidates")
+        ->check(CLI::NonNegativeNumber);
     train->add_flag("--train-backbone", options.train_backbone, "Python-compatible: train backbone parameters");
     train->add_flag("--train-dual-fpn", options.train_dual_fpn, "Python-compatible: train dual FPN parameters");
     train->add_flag("--freeze-descriptor-head", options.freeze_descriptor_head,

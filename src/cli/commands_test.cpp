@@ -192,6 +192,20 @@ static void parse_train_command()
         "0.07",
         "--graph-matcher-stop-confidence-margin",
         "0.6",
+        "--graph-matcher-raw-preservation-weight",
+        "0.11",
+        "--graph-matcher-raw-preservation-margin",
+        "0.9",
+        "--graph-matcher-raw-preservation-raw-margin",
+        "0.04",
+        "--graph-matcher-hard-negative-dustbin-weight",
+        "0.13",
+        "--graph-matcher-hard-negative-dustbin-topk",
+        "5",
+        "--graph-matcher-hard-negative-dustbin-margin",
+        "0.3",
+        "--graph-matcher-hard-negative-dustbin-spatial-min-distance",
+        "2.5",
         "--training-texture-blend-weight",
         "0.75",
         "--synthetic-pair-cache-dir",
@@ -295,6 +309,13 @@ static void parse_train_command()
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.4, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_stop_confidence_weight, 0.07, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_stop_confidence_margin, 0.6, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_weight, 0.11, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_margin, 0.9, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_raw_margin, 0.04, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_weight, 0.13, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_matcher_hard_negative_dustbin_topk == 5);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_margin, 0.3, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_spatial_min_distance, 2.5, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.training_texture_blend_weight, 0.75, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_keypoint_intensity, 0.08, 1.0e-6);
     PFM_REQUIRE(parsed.synthetic_pair_cache_dir == "pair_cache");
@@ -390,6 +411,13 @@ static void parse_train_python_compare_profile_options()
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_stop_confidence_weight, 0.05, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_stop_confidence_margin, 0.5, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_weight, 0.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_margin, 1.0, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_raw_preservation_raw_margin, 0.05, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_weight, 0.0, 1.0e-12);
+    PFM_REQUIRE(parsed.graph_matcher_hard_negative_dustbin_topk == 8);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_margin, 0.25, 1.0e-12);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_hard_negative_dustbin_spatial_min_distance, 0.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.temperature, 0.07, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.min_learning_rate_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE(parsed.seed == 20260603);

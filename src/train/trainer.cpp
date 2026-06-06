@@ -440,6 +440,41 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_stop_confidence_margin must be non-negative and finite");
     }
+    if (!std::isfinite(config.graph_matcher_raw_preservation_weight) ||
+        config.graph_matcher_raw_preservation_weight < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_raw_preservation_weight must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_raw_preservation_margin) ||
+        config.graph_matcher_raw_preservation_margin < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_raw_preservation_margin must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_raw_preservation_raw_margin) ||
+        config.graph_matcher_raw_preservation_raw_margin < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_raw_preservation_raw_margin must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_hard_negative_dustbin_weight) ||
+        config.graph_matcher_hard_negative_dustbin_weight < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_hard_negative_dustbin_weight must be non-negative and finite");
+    }
+    if (config.graph_matcher_hard_negative_dustbin_topk < 0)
+    {
+        throw std::invalid_argument("graph_matcher_hard_negative_dustbin_topk must be non-negative");
+    }
+    if (!std::isfinite(config.graph_matcher_hard_negative_dustbin_margin) ||
+        config.graph_matcher_hard_negative_dustbin_margin < 0.0)
+    {
+        throw std::invalid_argument("graph_matcher_hard_negative_dustbin_margin must be non-negative and finite");
+    }
+    if (!std::isfinite(config.graph_matcher_hard_negative_dustbin_spatial_min_distance) ||
+        config.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0)
+    {
+        throw std::invalid_argument(
+            "graph_matcher_hard_negative_dustbin_spatial_min_distance must be non-negative and finite");
+    }
     if (!std::isfinite(config.training_texture_blend_weight) || config.training_texture_blend_weight < 0.0)
     {
         throw std::invalid_argument("training_texture_blend_weight must be non-negative and finite");
@@ -4708,6 +4743,130 @@ torch::Tensor make_python_compare_graph_stop_confidence_loss(const v21::PfmV21Gr
     return binary_cross_entropy_probability_mean(confidence, target);
 }
 
+torch::Tensor make_python_compare_graph_raw_preservation_loss(const torch::Tensor& logits,
+                                                              const torch::Tensor& desc_a,
+                                                              const torch::Tensor& desc_b,
+                                                              double target_margin,
+                                                              double raw_margin_threshold)
+{
+    const auto count = std::min<int64_t>({desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1});
+    if (count <= 1)
+    {
+        return logits.new_zeros({});
+    }
+
+    auto normalized_a = torch::nn::functional::normalize(
+        desc_a.narrow(0, 0, count), torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto normalized_b = torch::nn::functional::normalize(
+        desc_b.narrow(0, 0, count), torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto raw_similarity = torch::matmul(normalized_a, normalized_b.transpose(0, 1));
+    auto pair_logits = logits.narrow(0, 0, count).narrow(1, 0, count);
+    auto diagonal_mask = torch::eye(count, torch::TensorOptions().dtype(torch::kBool).device(pair_logits.device()));
+    auto raw_diag = raw_similarity.diagonal();
+    auto masked_raw = raw_similarity.masked_fill(diagonal_mask, -std::numeric_limits<float>::infinity());
+    auto raw_row_hard = std::get<0>(masked_raw.max(1));
+    auto raw_col_hard = std::get<0>(masked_raw.max(0));
+    auto raw_margin_tensor = torch::full({}, static_cast<float>(raw_margin_threshold), raw_similarity.options());
+    auto confident = (raw_diag - raw_row_hard >= raw_margin_tensor).logical_and(
+        raw_diag - raw_col_hard >= raw_margin_tensor);
+    if (!confident.any().item<bool>())
+    {
+        return logits.new_zeros({});
+    }
+
+    auto logit_diag = pair_logits.diagonal();
+    auto masked_logits = pair_logits.masked_fill(diagonal_mask, -std::numeric_limits<float>::infinity());
+    auto row_hard = std::get<0>(masked_logits.max(1));
+    auto col_hard = std::get<0>(masked_logits.max(0));
+    auto target_margin_tensor = torch::full({}, static_cast<float>(target_margin), pair_logits.options());
+    auto row_loss = torch::relu(target_margin_tensor - (logit_diag - row_hard)).pow(2);
+    auto col_loss = torch::relu(target_margin_tensor - (logit_diag - col_hard)).pow(2);
+    return 0.5 * (row_loss.index({confident}).mean() + col_loss.index({confident}).mean());
+}
+
+torch::Tensor make_python_compare_graph_hard_negative_dustbin_loss(
+    const torch::Tensor& logits, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    int64_t positive_count, int64_t negative_topk, double margin, const torch::Tensor& points_b,
+    double spatial_min_distance)
+{
+    const auto count =
+        std::min<int64_t>({positive_count, desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1});
+    if (count <= 1 || negative_topk <= 0)
+    {
+        return logits.new_zeros({});
+    }
+
+    auto normalized_a = torch::nn::functional::normalize(
+        desc_a.narrow(0, 0, count), torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto normalized_b = torch::nn::functional::normalize(
+        desc_b.narrow(0, 0, count), torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    auto raw_similarity = torch::matmul(normalized_a, normalized_b.transpose(0, 1));
+    auto diagonal_mask =
+        torch::eye(count, torch::TensorOptions().dtype(torch::kBool).device(raw_similarity.device()));
+    auto masked_similarity = raw_similarity.masked_fill(diagonal_mask, -std::numeric_limits<float>::infinity());
+
+    torch::Tensor row_indices;
+    if (points_b.defined() && spatial_min_distance > 0.0)
+    {
+        if (points_b.dim() != 2 || points_b.size(1) != 2)
+        {
+            throw std::invalid_argument("points_b must have shape Nx2");
+        }
+        if (points_b.size(0) < count)
+        {
+            throw std::invalid_argument("points_b must contain at least positive_count rows");
+        }
+        auto target_points = points_b.narrow(0, 0, count).to(raw_similarity.device(), raw_similarity.dtype());
+        auto target_distance = torch::cdist(target_points, target_points, 2.0);
+        auto far_enough = target_distance.ge(spatial_min_distance);
+        masked_similarity = masked_similarity.masked_fill(far_enough.logical_not(),
+                                                          -std::numeric_limits<float>::infinity());
+        auto valid_rows = torch::isfinite(masked_similarity).any(1);
+        if (!valid_rows.any().item<bool>())
+        {
+            return logits.new_zeros({});
+        }
+        row_indices = torch::nonzero(valid_rows).flatten();
+        masked_similarity = masked_similarity.index_select(0, row_indices);
+    }
+    else
+    {
+        row_indices = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(raw_similarity.device()));
+    }
+
+    auto k = std::min<int64_t>(negative_topk, count - 1);
+    auto finite_per_row = torch::isfinite(masked_similarity).sum(1);
+    k = std::min<int64_t>(k, finite_per_row.max().item<int64_t>());
+    if (k <= 0)
+    {
+        return logits.new_zeros({});
+    }
+    auto topk_result = masked_similarity.topk(k, 1);
+    auto hard_indices = std::get<1>(topk_result);
+    auto finite_hard = torch::isfinite(masked_similarity.gather(1, hard_indices));
+
+    auto pair_logits = logits.narrow(0, 0, count).narrow(1, 0, count);
+    auto selected_pair_logits = pair_logits.index_select(0, row_indices.to(pair_logits.device()));
+    auto hard_logits = selected_pair_logits.gather(1, hard_indices.to(pair_logits.device()));
+    auto row_dustbin = logits.narrow(0, 0, count)
+                           .select(1, logits.size(1) - 1)
+                           .index_select(0, row_indices.to(logits.device()))
+                           .unsqueeze(1)
+                           .expand_as(hard_logits);
+    auto flattened_hard_indices = hard_indices.reshape({-1}).to(logits.device());
+    auto col_dustbin =
+        logits.select(0, logits.size(0) - 1).narrow(0, 0, count).index_select(0, flattened_hard_indices).view_as(
+            hard_logits);
+    auto dustbin_floor = torch::minimum(row_dustbin, col_dustbin);
+    auto margin_tensor = torch::full({}, static_cast<float>(margin), hard_logits.options());
+    auto loss = torch::relu(hard_logits - dustbin_floor + margin_tensor).pow(2);
+    if (!finite_hard.any().item<bool>())
+    {
+        return logits.new_zeros({});
+    }
+    return loss.index({finite_hard.to(loss.device())}).mean();
+}
+
 int64_t resolve_python_compare_graph_attention_budget(int64_t max_attention_layers, bool random_attention_layers,
                                                       const torch::Device& device,
                                                       std::optional<at::Generator>* generator)
@@ -4738,7 +4897,14 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
                                              double width_keep_ratio = 1.0,
                                              int64_t* selected_positive_count = nullptr,
                                              double max_attention_work_fraction = 1.0,
-                                             const std::string& metadata_mode = "full")
+                                             const std::string& metadata_mode = "full",
+                                             double raw_preservation_weight = 0.0,
+                                             double raw_preservation_margin = 1.0,
+                                             double raw_preservation_raw_margin = 0.05,
+                                             double hard_negative_dustbin_weight = 0.0,
+                                             int64_t hard_negative_dustbin_topk = 8,
+                                             double hard_negative_dustbin_margin = 0.25,
+                                             double hard_negative_dustbin_spatial_min_distance = 0.0)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4855,6 +5021,21 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
         loss = loss + static_cast<float>(stop_confidence_weight) *
                           make_python_compare_graph_stop_confidence_loss(output, count, stop_confidence_margin);
     }
+    if (raw_preservation_weight > 0.0)
+    {
+        loss = loss + static_cast<float>(raw_preservation_weight) *
+                          make_python_compare_graph_raw_preservation_loss(
+                              output.logits, active_desc_a.narrow(0, 0, count), active_desc_b.narrow(0, 0, count),
+                              raw_preservation_margin, raw_preservation_raw_margin);
+    }
+    if (hard_negative_dustbin_weight > 0.0)
+    {
+        loss = loss + static_cast<float>(hard_negative_dustbin_weight) *
+                          make_python_compare_graph_hard_negative_dustbin_loss(
+                              output.logits, active_desc_a.narrow(0, 0, count), active_desc_b.narrow(0, 0, count),
+                              count, hard_negative_dustbin_topk, hard_negative_dustbin_margin,
+                              active_points_b.narrow(0, 0, count), hard_negative_dustbin_spatial_min_distance);
+    }
     return loss;
 }
 
@@ -4940,7 +5121,11 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 config.graph_matcher_stop_confidence_margin, train_max_attention_layers,
                 config.graph_matcher_train_random_attention_layers, &generator, sample.points_a.size(0),
                 config.graph_matcher_train_width_keep_ratio, nullptr,
-                config.graph_matcher_train_max_attention_work_fraction, config.graph_matcher_metadata_mode));
+                config.graph_matcher_train_max_attention_work_fraction, config.graph_matcher_metadata_mode,
+                config.graph_matcher_raw_preservation_weight, config.graph_matcher_raw_preservation_margin,
+                config.graph_matcher_raw_preservation_raw_margin, config.graph_matcher_hard_negative_dustbin_weight,
+                config.graph_matcher_hard_negative_dustbin_topk, config.graph_matcher_hard_negative_dustbin_margin,
+                config.graph_matcher_hard_negative_dustbin_spatial_min_distance));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6923,6 +7108,30 @@ torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImp
 {
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight,
                                           8, prune_ranking_weight, prune_ranking_margin, stop_confidence_weight, 0.5);
+}
+
+torch::Tensor make_python_compare_graph_loss_with_raw_preservation_for_test(
+    v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, double raw_preservation_weight,
+    double raw_preservation_margin, double raw_preservation_raw_margin)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
+                                          0.25, 0.0, 0.5, 0, false, nullptr, -1, 1.0, nullptr, 1.0, "full",
+                                          raw_preservation_weight, raw_preservation_margin,
+                                          raw_preservation_raw_margin);
+}
+
+torch::Tensor make_python_compare_graph_loss_with_hard_negative_dustbin_for_test(
+    v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim,
+    double hard_negative_dustbin_weight, int64_t hard_negative_dustbin_topk,
+    double hard_negative_dustbin_margin, double hard_negative_dustbin_spatial_min_distance)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
+                                          0.25, 0.0, 0.5, 0, false, nullptr, -1, 1.0, nullptr, 1.0, "full",
+                                          0.0, 1.0, 0.05, hard_negative_dustbin_weight,
+                                          hard_negative_dustbin_topk, hard_negative_dustbin_margin,
+                                          hard_negative_dustbin_spatial_min_distance);
 }
 
 torch::Tensor make_python_compare_graph_metadata_for_test(const torch::Tensor& points, int64_t meta_dim,
