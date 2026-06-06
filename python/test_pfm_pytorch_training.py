@@ -1353,6 +1353,34 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.dustbin_bias.grad)
 
+    def test_graph_matcher_correspondence_loss_can_use_extra_online_no_match_points(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))
+        descriptors_b = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))
+        points = torch.tensor([[1.0, 1.0], [3.0, 3.0], [5.0, 5.0]], dtype=torch.float32)
+        false_a = torch.tensor([[0.0, 6.0], [7.0, 1.0]], dtype=torch.float32)
+        false_b = torch.tensor([[6.0, 0.0], [1.0, 7.0]], dtype=torch.float32)
+
+        loss, components = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            metadata_mode="descriptor_only",
+            no_match_weight=0.5,
+            assignment_weight=0.2,
+            extra_no_match_points_a_xy=false_a,
+            extra_no_match_points_b_xy=false_b,
+            return_components=True,
+        )
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(components["graph_matcher_no_match_loss"].detach()), 0.0)
+        self.assertEqual(int(components["graph_matcher_extra_no_match_points"].item()), 4)
+        self.assertIsNotNone(model.graph_matcher.dustbin_bias.grad)
+
     def test_graph_matcher_correspondence_loss_can_use_semi_dense_no_match_candidates(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 8, 8))
@@ -1771,6 +1799,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "24",
             "--graph-matcher-semi-dense-min-score",
             "0.02",
+            "--graph-matcher-online-false-no-match",
             "--training-weak-texture-fraction",
             "0.25",
             "--training-spatial-bins",
@@ -1805,6 +1834,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_spatial_min_distance, 4.5)
         self.assertEqual(args.graph_matcher_semi_dense_no_match_points, 24)
         self.assertAlmostEqual(args.graph_matcher_semi_dense_min_score, 0.02)
+        self.assertTrue(args.graph_matcher_online_false_no_match)
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.training_spatial_bins, 8)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
@@ -2890,6 +2920,85 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(metrics["online_false_match_points"], 4.0)
         self.assertEqual(metrics["online_false_match_pairs"], 1.0)
         self.assertEqual(metrics["false_match_points"], 4.0)
+
+    def test_train_step_passes_online_false_matches_to_graph_no_match(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_graph_false.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        false_a = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)
+        false_b = torch.tensor([[1.0, 1.0], [0.0, 0.0]], dtype=torch.float32)
+
+        def fake_graph_loss(*_args, **kwargs):
+            self.assertTrue(kwargs.get("return_components"))
+            self.assertTrue(torch.equal(kwargs["extra_no_match_points_a_xy"], false_a))
+            self.assertTrue(torch.equal(kwargs["extra_no_match_points_b_xy"], false_b))
+            return parameter * 3.0, {
+                "graph_matcher_total_loss": torch.tensor(3.0),
+                "graph_matcher_ce_loss": torch.tensor(0.0),
+                "graph_matcher_assignment_loss": torch.tensor(1.0),
+                "graph_matcher_no_match_loss": torch.tensor(2.0),
+                "graph_matcher_accept_loss": torch.tensor(0.0),
+                "graph_matcher_prune_ranking_loss": torch.tensor(0.0),
+                "graph_matcher_stop_confidence_loss": torch.tensor(0.0),
+                "graph_matcher_raw_preservation_loss": torch.tensor(0.0),
+                "graph_matcher_hard_negative_dustbin_loss": torch.tensor(0.0),
+                "graph_matcher_extra_no_match_points": torch.tensor(4.0),
+            }
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(
+                train,
+                "online_false_match_feature_correspondences",
+                return_value=(false_a, false_b),
+            ),
+            mock.patch.object(train, "graph_matcher_correspondence_loss", side_effect=fake_graph_loss),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                synthetic_loss_weight=0.0,
+                graph_matcher_loss_weight=1.0,
+                graph_matcher_assignment_weight=0.25,
+                graph_matcher_online_false_no_match=True,
+                online_false_match_max_points=2,
+                online_false_match_max_keypoints=8,
+            )
+
+        self.assertAlmostEqual(float(parameter.detach()), 0.7, places=5)
+        self.assertEqual(metrics["online_false_match_points"], 2.0)
+        self.assertEqual(metrics["online_false_match_pairs"], 1.0)
+        self.assertEqual(metrics["graph_matcher_extra_no_match_points"], 4.0)
 
     def test_train_step_passes_pseudo_and_false_pools_separately_to_sampler(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))

@@ -71,6 +71,33 @@ class TrainingVisualReportTest(unittest.TestCase):
         self.assertIn("graph_pruned_keypoint_fraction", text)
         self.assertIn(",2,8,10,4,5,4,5,40,80,0.500000,0.500000,0.500000", text)
 
+    def test_plot_graph_matcher_curves_writes_dustbin_diagnostic_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "run"
+            output_dir = Path(temp) / "out"
+            run_dir.mkdir()
+            output_dir.mkdir()
+            (run_dir / "metrics.csv").write_text(
+                "\n".join(
+                    [
+                        "step,graph_matcher_total_loss,graph_matcher_assignment_loss,"
+                        "graph_matcher_no_match_loss,graph_matcher_hard_negative_dustbin_loss,"
+                        "graph_matcher_accept_loss,graph_matcher_prune_ranking_loss,"
+                        "graph_matcher_stop_confidence_loss,graph_matcher_positive_pairs,"
+                        "graph_matcher_extra_no_match_points,online_false_match_points",
+                        "1,8.0,4.0,6.0,10.0,0.8,0.6,0.5,128,0,0",
+                        "2,5.0,2.5,3.0,4.0,0.5,0.4,0.3,128,16,8",
+                        "3,3.0,1.0,1.5,1.2,0.3,0.2,0.1,128,24,12",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            created = report.plot_graph_matcher_curves(run_dir, output_dir)
+
+            self.assertTrue(created)
+            self.assertTrue((output_dir / "graph_matcher_curves.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1226,6 +1226,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_train_random_attention_layers",
         "graph_matcher_train_max_attention_work_fraction",
         "graph_matcher_train_width_keep_ratio",
+        "graph_matcher_online_false_no_match",
         "graph_matcher_total_loss",
         "graph_matcher_ce_loss",
         "graph_matcher_assignment_loss",
@@ -1238,6 +1239,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_executed_attention_layers",
         "graph_matcher_attention_work_fraction",
         "graph_matcher_positive_pairs",
+        "graph_matcher_extra_no_match_points",
         "abstention_weight",
         "inline_false_match_mining",
         "illumination_consistency_weight",
@@ -1457,6 +1459,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                graph_matcher_online_false_no_match=args.graph_matcher_online_false_no_match,
                 graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
                 graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
@@ -1541,6 +1544,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_train_width_keep_ratio": (
                     f"{args.graph_matcher_train_width_keep_ratio if args.train_graph_matcher else 1.0:.6f}"
                 ),
+                "graph_matcher_online_false_no_match": int(
+                    bool(args.graph_matcher_online_false_no_match and args.train_graph_matcher)
+                ),
                 "graph_matcher_total_loss": f"{metrics.get('graph_matcher_total_loss', 0.0):.6f}",
                 "graph_matcher_ce_loss": f"{metrics.get('graph_matcher_ce_loss', 0.0):.6f}",
                 "graph_matcher_assignment_loss": f"{metrics.get('graph_matcher_assignment_loss', 0.0):.6f}",
@@ -1559,6 +1565,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     f"{metrics.get('graph_matcher_attention_work_fraction', 0.0):.6f}"
                 ),
                 "graph_matcher_positive_pairs": f"{metrics.get('graph_matcher_positive_pairs', 0.0):.0f}",
+                "graph_matcher_extra_no_match_points": (
+                    f"{metrics.get('graph_matcher_extra_no_match_points', 0.0):.0f}"
+                ),
                 "abstention_weight": f"{args.abstention_weight:.6f}",
                 "inline_false_match_mining": int(args.inline_false_match_mining),
                 "illumination_consistency_weight": f"{args.illumination_consistency_weight:.6f}",
@@ -1719,6 +1728,7 @@ def _save_training_state(
                     args.graph_matcher_train_max_attention_work_fraction
                 ),
                 "graph_matcher_train_width_keep_ratio": float(args.graph_matcher_train_width_keep_ratio),
+                "graph_matcher_online_false_no_match": bool(args.graph_matcher_online_false_no_match),
                 "abstention_weight": float(args.abstention_weight),
                 "warp_hard_negative_weight": float(args.warp_hard_negative_weight),
             },
@@ -1812,6 +1822,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-online-false-no-match", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--training-spatial-bins", type=int, default=0)
     parser.add_argument("--hard-variant", action="append", default=[])
     parser.add_argument("--hard-valid-fraction-max", type=float, default=0.0)

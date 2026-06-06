@@ -140,6 +140,7 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.5",
             "--graph-matcher-train-width-keep-ratio",
             "0.75",
+            "--graph-matcher-online-false-no-match",
             "--graph-matcher-accept-weight",
             "0.2",
             "--graph-matcher-prune-ranking-weight",
@@ -198,6 +199,7 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertTrue(args.graph_matcher_train_random_attention_layers)
         self.assertAlmostEqual(args.graph_matcher_train_max_attention_work_fraction, 0.5)
         self.assertAlmostEqual(args.graph_matcher_train_width_keep_ratio, 0.75)
+        self.assertTrue(args.graph_matcher_online_false_no_match)
         self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.15)
         self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.07)

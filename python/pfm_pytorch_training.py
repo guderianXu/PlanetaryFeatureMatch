@@ -45,6 +45,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_executed_attention_layers",
     "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
+    "graph_matcher_extra_no_match_points",
 )
 
 
@@ -1389,6 +1390,8 @@ def graph_matcher_correspondence_loss(
     hard_negative_dustbin_spatial_min_distance: float = 0.0,
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
+    extra_no_match_points_a_xy: torch.Tensor | None = None,
+    extra_no_match_points_b_xy: torch.Tensor | None = None,
     max_attention_layers: int = 0,
     random_attention_layers: bool = False,
     max_attention_work_fraction: float = 1.0,
@@ -1409,6 +1412,7 @@ def graph_matcher_correspondence_loss(
         executed_attention_layers: torch.Tensor,
         attention_work_fraction: torch.Tensor,
         positive_pairs: torch.Tensor,
+        extra_no_match_points: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {
             "graph_matcher_total_loss": total_loss,
@@ -1423,6 +1427,7 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_executed_attention_layers": executed_attention_layers,
             "graph_matcher_attention_work_fraction": attention_work_fraction,
             "graph_matcher_positive_pairs": positive_pairs,
+            "graph_matcher_extra_no_match_points": extra_no_match_points,
         }
 
     if (
@@ -1436,7 +1441,7 @@ def graph_matcher_correspondence_loss(
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1511,6 +1516,29 @@ def graph_matcher_correspondence_loss(
             )
             points_a_xy = torch.cat([points_a_xy, semi_a_points.to(points_a_xy.device)], dim=0)
             points_b_xy = torch.cat([points_b_xy, semi_b_points.to(points_b_xy.device)], dim=0)
+    extra_no_match_count = 0
+    if extra_no_match_points_a_xy is not None:
+        if extra_no_match_points_a_xy.dim() != 2 or extra_no_match_points_a_xy.size(1) != 2:
+            raise ValueError("extra_no_match_points_a_xy must have shape Nx2")
+        extra_a = extra_no_match_points_a_xy.to(device=descriptors_a.device, dtype=points_a_xy.dtype)
+        if extra_a.numel() > 0:
+            desc_a = torch.cat(
+                [desc_a, normalize_descriptor_batch(sample_descriptors(descriptors_a, extra_a))],
+                dim=0,
+            )
+            points_a_xy = torch.cat([points_a_xy, extra_a.to(points_a_xy.device)], dim=0)
+            extra_no_match_count += int(extra_a.size(0))
+    if extra_no_match_points_b_xy is not None:
+        if extra_no_match_points_b_xy.dim() != 2 or extra_no_match_points_b_xy.size(1) != 2:
+            raise ValueError("extra_no_match_points_b_xy must have shape Nx2")
+        extra_b = extra_no_match_points_b_xy.to(device=descriptors_b.device, dtype=points_b_xy.dtype)
+        if extra_b.numel() > 0:
+            desc_b = torch.cat(
+                [desc_b, normalize_descriptor_batch(sample_descriptors(descriptors_b, extra_b))],
+                dim=0,
+            )
+            points_b_xy = torch.cat([points_b_xy, extra_b.to(points_b_xy.device)], dim=0)
+            extra_no_match_count += int(extra_b.size(0))
     meta_a = pfm_model.prepare_graph_keypoint_metadata(
         points_a_xy,
         meta_dim=model.config.graph_keypoint_meta_dim,
@@ -1619,6 +1647,7 @@ def graph_matcher_correspondence_loss(
         executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
         attention_work_fraction = output.logits.new_tensor(float(getattr(output, "attention_work_fraction", 0.0)))
         positive_pairs = output.logits.new_tensor(float(count))
+        extra_no_match_points = output.logits.new_tensor(float(extra_no_match_count))
         return loss, components(
             loss,
             match_ce_loss,
@@ -1632,6 +1661,7 @@ def graph_matcher_correspondence_loss(
             executed_attention_layers,
             attention_work_fraction,
             positive_pairs,
+            extra_no_match_points,
         )
     return loss
 
@@ -2258,6 +2288,7 @@ def train_step(
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
+    graph_matcher_online_false_no_match: bool = False,
     graph_matcher_train_max_attention_layers: int = 0,
     graph_matcher_train_random_attention_layers: bool = False,
     graph_matcher_train_max_attention_work_fraction: float = 1.0,
@@ -2350,6 +2381,40 @@ def train_step(
                     spatial_bins=training_spatial_bins,
                     generator=generator,
                 )
+                online_false_a = descriptors_a.new_empty((0, 2))
+                online_false_b = descriptors_b.new_empty((0, 2))
+                graph_online_false_can_train = (
+                    graph_matcher_online_false_no_match
+                    and graph_matcher_loss_weight > 0.0
+                    and (
+                        graph_matcher_no_match_weight > 0.0
+                        or graph_matcher_assignment_weight > 0.0
+                        or graph_matcher_accept_weight > 0.0
+                        or graph_matcher_prune_ranking_weight > 0.0
+                    )
+                )
+                needs_online_false_mining = online_false_match_weight > 0.0 or graph_online_false_can_train
+                if needs_online_false_mining:
+                    online_false_a, online_false_b = online_false_match_feature_correspondences(
+                        pair,
+                        descriptors_a,
+                        descriptors_b,
+                        max_keypoints=online_false_match_max_keypoints,
+                        max_matches=online_false_match_max_matches,
+                        min_intensity=min_intensity,
+                        min_score=online_false_match_min_score,
+                        min_margin=online_false_match_min_margin,
+                        threshold_px=online_false_match_threshold_px,
+                        max_points=online_false_match_max_points,
+                        generator=generator,
+                        keypoint_scores_a=heatmap_a,
+                        keypoint_scores_b=heatmap_b,
+                    )
+                    if online_false_a.size(0) > 0:
+                        online_false_match_points += online_false_a.size(0)
+                        online_false_match_pairs += 1
+                        false_match_points += online_false_a.size(0)
+                        false_match_pairs += 1
                 pair_losses: list[torch.Tensor] = []
                 if points_a.size(0) > 0 and (synthetic_loss_weight > 0.0 or graph_matcher_loss_weight > 0.0):
                     pose_multiplier = pose_difficulty_loss_multiplier(
@@ -2385,6 +2450,7 @@ def train_step(
                         desc_b = normalize_descriptor_batch(sample_descriptors(descriptors_b, points_b))
                         metrics = paired_descriptor_metrics(desc_a.detach(), desc_b.detach())
                     if graph_matcher_loss_weight > 0.0:
+                        graph_online_false_enabled = graph_online_false_can_train and online_false_a.size(0) > 0
                         graph_loss, graph_components = graph_matcher_correspondence_loss(
                             model,
                             descriptors_a,
@@ -2411,6 +2477,8 @@ def train_step(
                             hard_negative_dustbin_spatial_min_distance=graph_matcher_hard_negative_dustbin_spatial_min_distance,
                             semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
+                            extra_no_match_points_a_xy=online_false_a if graph_online_false_enabled else None,
+                            extra_no_match_points_b_xy=online_false_b if graph_online_false_enabled else None,
                             max_attention_layers=graph_matcher_train_max_attention_layers,
                             random_attention_layers=graph_matcher_train_random_attention_layers,
                             max_attention_work_fraction=graph_matcher_train_max_attention_work_fraction,
@@ -2506,35 +2574,15 @@ def train_step(
                         pair_losses.append(float(false_match_weight) * negative_loss)
                         false_match_points += false_a.size(0)
                         false_match_pairs += 1
-                if online_false_match_weight > 0.0:
-                    online_false_a, online_false_b = online_false_match_feature_correspondences(
-                        pair,
+                if online_false_match_weight > 0.0 and online_false_a.size(0) > 0:
+                    online_negative_loss = false_match_negative_loss(
                         descriptors_a,
                         descriptors_b,
-                        max_keypoints=online_false_match_max_keypoints,
-                        max_matches=online_false_match_max_matches,
-                        min_intensity=min_intensity,
-                        min_score=online_false_match_min_score,
-                        min_margin=online_false_match_min_margin,
-                        threshold_px=online_false_match_threshold_px,
-                        max_points=online_false_match_max_points,
-                        generator=generator,
-                        keypoint_scores_a=heatmap_a,
-                        keypoint_scores_b=heatmap_b,
+                        online_false_a,
+                        online_false_b,
+                        max_false_score=online_false_match_max_score,
                     )
-                    if online_false_a.size(0) > 0:
-                        online_negative_loss = false_match_negative_loss(
-                            descriptors_a,
-                            descriptors_b,
-                            online_false_a,
-                            online_false_b,
-                            max_false_score=online_false_match_max_score,
-                        )
-                        pair_losses.append(float(online_false_match_weight) * online_negative_loss)
-                        online_false_match_points += online_false_a.size(0)
-                        online_false_match_pairs += 1
-                        false_match_points += online_false_a.size(0)
-                        false_match_pairs += 1
+                    pair_losses.append(float(online_false_match_weight) * online_negative_loss)
                 if (
                     illumination_consistency_pairs
                     and illumination_consistency_weight > 0.0
@@ -3362,6 +3410,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-online-false-no-match", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -3847,6 +3896,7 @@ def main() -> int:
                 "graph_matcher_train_random_attention_layers",
                 "graph_matcher_train_max_attention_work_fraction",
                 "graph_matcher_train_width_keep_ratio",
+                "graph_matcher_online_false_no_match",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -3865,6 +3915,7 @@ def main() -> int:
                 "graph_matcher_executed_attention_layers",
                 "graph_matcher_attention_work_fraction",
                 "graph_matcher_positive_pairs",
+                "graph_matcher_extra_no_match_points",
                 "points",
                 "pseudo_label_points",
                 "pseudo_keypoint_points",
@@ -4001,6 +4052,7 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                graph_matcher_online_false_no_match=args.graph_matcher_online_false_no_match,
                 graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
                 graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
@@ -4049,6 +4101,9 @@ def main() -> int:
                     "graph_matcher_train_width_keep_ratio": args.graph_matcher_train_width_keep_ratio
                     if args.train_graph_matcher
                     else 1.0,
+                    "graph_matcher_online_false_no_match": int(
+                        bool(args.graph_matcher_online_false_no_match and args.train_graph_matcher)
+                    ),
                     **metrics,
                 }
             )

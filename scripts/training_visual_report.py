@@ -384,6 +384,13 @@ def smooth(values: np.ndarray, window: int) -> np.ndarray:
     return np.divide(summed, np.maximum(weights, 1.0))
 
 
+def smoothing_window(row_count: int) -> int:
+    if row_count <= 0:
+        return 1
+    preferred = max(5, min(75, row_count // 20 if row_count >= 100 else 5))
+    return max(1, min(row_count, preferred))
+
+
 def plot_training_curves(run_dir: Path, output_dir: Path) -> None:
     metrics_path = run_dir / "metrics.csv"
     eval_path = run_dir / "eval_summary.csv"
@@ -392,7 +399,7 @@ def plot_training_curves(run_dir: Path, output_dir: Path) -> None:
     steps = series(rows, "step")
     if not np.isfinite(steps).any():
         steps = np.arange(1, len(rows) + 1, dtype=np.float64)
-    window = max(5, min(75, len(rows) // 20 if len(rows) >= 100 else 5))
+    window = smoothing_window(len(rows))
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
     fig.suptitle(run_dir.name, fontsize=14)
@@ -467,6 +474,97 @@ def plot_training_curves(run_dir: Path, output_dir: Path) -> None:
 
     fig.savefig(output_dir / "training_curves.png", dpi=180)
     plt.close(fig)
+
+
+def plot_graph_matcher_curves(run_dir: Path, output_dir: Path) -> bool:
+    metrics_path = run_dir / "metrics.csv"
+    if not metrics_path.exists():
+        return False
+    rows = read_float_csv(metrics_path)
+    if not rows:
+        return False
+    graph_keys = (
+        "graph_matcher_total_loss",
+        "graph_matcher_ce_loss",
+        "graph_matcher_assignment_loss",
+        "graph_matcher_no_match_loss",
+        "graph_matcher_hard_negative_dustbin_loss",
+        "graph_matcher_accept_loss",
+        "graph_matcher_prune_ranking_loss",
+        "graph_matcher_stop_confidence_loss",
+        "graph_matcher_extra_no_match_points",
+    )
+
+    def has_signal(key: str) -> bool:
+        values = series(rows, key)
+        finite = values[np.isfinite(values)]
+        return finite.size > 0 and float(np.abs(finite).max(initial=0.0)) > 1.0e-12
+
+    if not any(has_signal(key) for key in graph_keys):
+        return False
+    steps = series(rows, "step")
+    if not np.isfinite(steps).any():
+        steps = np.arange(1, len(rows) + 1, dtype=np.float64)
+    window = smoothing_window(len(rows))
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10), constrained_layout=True)
+    fig.suptitle(f"{run_dir.name} GraphMatcher no-match / dustbin 训练曲线", fontsize=14)
+
+    def draw_line(ax, key: str, label: str, *, raw: bool = False) -> bool:
+        values = series(rows, key)
+        if not np.isfinite(values).any():
+            return False
+        if raw:
+            ax.plot(steps, values, color="#94a3b8", linewidth=0.5, alpha=0.25)
+        ax.plot(steps, smooth(values, window), linewidth=1.8, label=label)
+        return True
+
+    ax = axes[0, 0]
+    has_line = False
+    has_line |= draw_line(ax, "graph_matcher_total_loss", "total", raw=True)
+    has_line |= draw_line(ax, "graph_matcher_ce_loss", "ce")
+    if has_line:
+        ax.legend()
+    ax.set_title("GraphMatcher 总损失 / 正样本匹配")
+    ax.set_xlabel("step")
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[0, 1]
+    has_line = False
+    has_line |= draw_line(ax, "graph_matcher_assignment_loss", "assignment")
+    has_line |= draw_line(ax, "graph_matcher_no_match_loss", "no-match")
+    has_line |= draw_line(ax, "graph_matcher_hard_negative_dustbin_loss", "hard-dustbin")
+    if has_line:
+        ax.legend()
+    ax.set_title("Dustbin 拒配监督")
+    ax.set_xlabel("step")
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[1, 0]
+    has_line = False
+    has_line |= draw_line(ax, "graph_matcher_accept_loss", "accept")
+    has_line |= draw_line(ax, "graph_matcher_prune_ranking_loss", "prune")
+    has_line |= draw_line(ax, "graph_matcher_stop_confidence_loss", "stop")
+    if has_line:
+        ax.legend()
+    ax.set_title("接受头 / 剪枝 / 提前停止")
+    ax.set_xlabel("step")
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[1, 1]
+    has_line = False
+    has_line |= draw_line(ax, "graph_matcher_positive_pairs", "positive pairs")
+    has_line |= draw_line(ax, "graph_matcher_extra_no_match_points", "online false endpoints")
+    has_line |= draw_line(ax, "online_false_match_points", "online false pairs")
+    if has_line:
+        ax.legend()
+    ax.set_title("训练批次中的正样本和在线拒配样本")
+    ax.set_xlabel("step")
+    ax.grid(True, alpha=0.25)
+
+    fig.savefig(output_dir / "graph_matcher_curves.png", dpi=180)
+    plt.close(fig)
+    return True
 
 
 def image_to_array(image: torch.Tensor) -> np.ndarray:
@@ -1312,6 +1410,7 @@ def create_pdf_report(
             ],
         )
         _add_image_page(pdf, output_dir / "training_curves.png", "训练曲线与验证指标")
+        _add_image_page(pdf, output_dir / "graph_matcher_curves.png", "GraphMatcher no-match / dustbin 训练曲线")
         _add_image_page(pdf, output_dir / "matching_summary.png", "抽样匹配正确/错误数量")
         _add_image_page(pdf, output_dir / "matching_diagnostics.png", "匹配质量分布诊断")
         _add_image_page(pdf, output_dir / "coverage_diagnostics.png", "匹配点覆盖与弱纹理诊断")
@@ -1339,6 +1438,7 @@ def make_markdown_report(
         "",
         f"- `{pdf_path.name}`：中文 PDF 报告。",
         "- `training_curves.png`：训练曲线和训练前后验证指标。",
+        "- `graph_matcher_curves.png`：GraphMatcher assignment/no-match/dustbin/accept/prune 指标曲线；仅在训练日志包含有效 GraphMatcher 指标时生成。",
         "- `matching_summary.png`：抽样验证对的正确/错误匹配数量。",
         "- `matching_diagnostics.png`：误差、score、难度分组和正确点数量诊断。",
         "- `coverage_diagnostics.png`：匹配点空间覆盖、局部热点和弱纹理占比。",
@@ -1526,6 +1626,7 @@ def main() -> int:
     match_dir.mkdir(parents=True, exist_ok=True)
 
     plot_training_curves(args.run_dir, args.output_dir)
+    plot_graph_matcher_curves(args.run_dir, args.output_dir)
     model, _ = pfm_model.load_pytorch_state(args.pytorch_state, device=args.device)
     model.eval()
     device = torch.device(args.device)
