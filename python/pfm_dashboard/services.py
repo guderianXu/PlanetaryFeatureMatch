@@ -78,6 +78,23 @@ def _script_option(script_path: Path, *names: str) -> float | None:
     return None
 
 
+def _run_script_paths(run_path: Path) -> list[Path]:
+    """Return launch scripts associated with a run directory.
+
+    Dashboard 直接启动的任务使用 runs/<name>/train.sh；命令行长任务历史上常用
+    runs/<name>.sh。两种形式都参与进度总步数解析。
+    """
+    return [run_path / "train.sh", run_path.with_suffix(".sh")]
+
+
+def _run_script_option(run_path: Path, *names: str) -> float | None:
+    for script_path in _run_script_paths(run_path):
+        value = _script_option(script_path, *names)
+        if value is not None:
+            return value
+    return None
+
+
 def _cache_generation_progress(run_path: Path) -> tuple[float, str] | None:
     log_path = run_path / "train.log"
     if not log_path.exists():
@@ -102,7 +119,6 @@ def _cache_generation_progress(run_path: Path) -> tuple[float, str] | None:
 
 def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoint_count: int) -> tuple[float, str]:
     latest = metrics.latest
-    script_path = run_path / "train.sh"
     current_step = (
         _number(latest.get("step"))
         or _number(latest.get("global_step"))
@@ -114,13 +130,13 @@ def infer_progress(run_path: Path, metrics: MetricSeries, status: str, checkpoin
         percent = min(100.0, max(0.0, current_step / total_iterations * 100.0))
         return percent, f"{int(current_step)}/{int(total_iterations)} 步"
 
-    target_steps = _script_option(script_path, "--max-train-batches", "--steps")
+    target_steps = _run_script_option(run_path, "--max-train-batches", "--steps")
     if current_step is not None and target_steps and target_steps > 0:
         percent = min(100.0, max(0.0, current_step / target_steps * 100.0))
         return percent, f"{int(current_step)}/{int(target_steps)} 步"
 
     current_epoch = _number(latest.get("epoch"))
-    target_epochs = _script_option(script_path, "--epochs")
+    target_epochs = _run_script_option(run_path, "--epochs")
     if current_epoch is not None and target_epochs and target_epochs > 0:
         percent = min(100.0, max(0.0, current_epoch / target_epochs * 100.0))
         return percent, f"{int(current_epoch)}/{int(target_epochs)} 轮"
@@ -173,10 +189,73 @@ def _file_mtimes(paths: list[Path]) -> list[float]:
     return mtimes
 
 
+def _read_process_cmdline(pid_dir: Path) -> list[str]:
+    try:
+        raw = (pid_dir / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _read_process_cwd(pid_dir: Path) -> Path | None:
+    try:
+        return (pid_dir / "cwd").resolve()
+    except OSError:
+        return None
+
+
+def _active_training_output_dirs() -> set[Path]:
+    """Find output directories from currently running training commands.
+
+    训练不一定由 Dashboard 启动，可能没有 train.pid。这里读取 /proc 的 cmdline，
+    根据 --output-dir / --output_root / --output-root 映射到 run 目录。
+    """
+    script_names = {
+        "benchmark_lazy_pose_pairs.py",
+        "pfm_pytorch_training.py",
+        "batch_pose_sim_dataset.py",
+        "pfm_cli",
+    }
+    option_names = {"--output-dir", "--output_root", "--output-root", "--run-dir", "--run_dir"}
+    active_dirs: set[Path] = set()
+    for pid_dir in Path("/proc").iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        args = _read_process_cmdline(pid_dir)
+        if not args:
+            continue
+        if not any(any(script_name in arg for script_name in script_names) for arg in args):
+            continue
+        cwd = _read_process_cwd(pid_dir)
+        for index, arg in enumerate(args):
+            value: str | None = None
+            if arg in option_names and index + 1 < len(args):
+                value = args[index + 1]
+            else:
+                for option_name in option_names:
+                    prefix = f"{option_name}="
+                    if arg.startswith(prefix):
+                        value = arg[len(prefix):]
+                        break
+            if not value:
+                continue
+            output_path = Path(value)
+            if not output_path.is_absolute():
+                if cwd is None:
+                    continue
+                output_path = cwd / output_path
+            try:
+                active_dirs.add(output_path.resolve())
+            except OSError:
+                active_dirs.add(output_path.absolute())
+    return active_dirs
+
+
 def run_created_at(run_path: Path) -> float:
     candidates = [
         run_path / "run.html",
         run_path / "train.sh",
+        run_path.with_suffix(".sh"),
         run_path / "metrics.csv",
         run_path / "train_metrics.csv",
         run_path / "train.log",
@@ -211,11 +290,18 @@ def run_completed_at(run_path: Path, status: str, checkpoint_count: int) -> floa
 def discover_runs(root: Path) -> list[RunSummary]:
     if not root.exists():
         return []
+    active_output_dirs = _active_training_output_dirs()
     summaries: list[RunSummary] = []
     for run_path in sorted((path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")), key=lambda path: path.stat().st_mtime, reverse=True):
         metrics = read_metrics_csv(run_metrics_path(run_path))
         checkpoints = list(run_path.glob("*.pt")) + list((run_path / "checkpoints").glob("*.pt"))
         status = pid_status(run_path / "train.pid")
+        try:
+            active_external = run_path.resolve() in active_output_dirs
+        except OSError:
+            active_external = run_path.absolute() in active_output_dirs
+        if status in {"missing", "invalid", "stopped"} and active_external:
+            status = "running"
         if status == "missing" and (run_path / "train.log").exists():
             status = "logged"
         progress_percent, progress_label = infer_progress(run_path, metrics, status, len(checkpoints))
@@ -231,7 +317,7 @@ def discover_runs(root: Path) -> list[RunSummary]:
                 checkpoint_count=len(checkpoints),
                 has_report=(run_path / "run.html").exists() or (run_path / "report").exists(),
                 has_log=(run_path / "train.log").exists(),
-                can_start=(run_path / "train.sh").exists() and status != "running",
+                can_start=any(script_path.exists() for script_path in _run_script_paths(run_path)) and status != "running",
                 can_stop=status == "running",
                 can_delete=status != "running",
                 created_at=run_created_at(run_path),
@@ -279,7 +365,7 @@ def summarize_dataset(path: Path) -> DatasetSummary:
 
 
 def active_training_processes() -> list[str]:
-    patterns = "pfm_pytorch_training.py|pfm_cli train|batch_pose_sim_dataset.py|sat_sim_cuda"
+    patterns = "benchmark_lazy_pose_pairs.py|pfm_pytorch_training.py|pfm_cli train|batch_pose_sim_dataset.py|sat_sim_cuda"
     stream = os.popen(f"pgrep -af '{patterns}' || true")
     try:
         return [line.strip() for line in stream.readlines() if line.strip()]

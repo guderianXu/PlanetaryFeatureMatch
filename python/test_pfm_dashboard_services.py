@@ -4,7 +4,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from pfm_dashboard import services as dashboard_services
 from pfm_dashboard.services import (
     dataset_split_counts,
     delete_run,
@@ -87,6 +89,27 @@ class DashboardServicesTest(unittest.TestCase):
         self.assertEqual(runs[0].progress_percent, 40.0)
         self.assertEqual(runs[0].progress_label, "4/10 步")
         self.assertTrue(runs[0].can_start)
+
+    def test_discover_runs_marks_external_output_dir_process_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "python_external"
+            run.mkdir()
+            (run / "train_metrics.csv").write_text("step,loss\n30,2.0\n", encoding="utf-8")
+            (root / "python_external.sh").write_text(
+                "#!/usr/bin/env bash\npython scripts/benchmark_lazy_pose_pairs.py --steps 100\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(dashboard_services, "_active_training_output_dirs", return_value={run.resolve()}):
+                runs = dashboard_services.discover_runs(root)
+
+        self.assertEqual(runs[0].status, "running")
+        self.assertEqual(runs[0].progress_percent, 30.0)
+        self.assertEqual(runs[0].progress_label, "30/100 步")
+        self.assertTrue(runs[0].can_stop)
+        self.assertFalse(runs[0].can_delete)
+        self.assertIsNone(runs[0].completed_at)
 
     def test_discover_runs_infers_cpp_iteration_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
