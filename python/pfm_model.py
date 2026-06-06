@@ -332,18 +332,12 @@ class SparseHead(nn.Module):
         self.descriptor_attention = nn.Conv2d(input_channels * 3, descriptor_dim, 1)
         self.descriptor_viewpoint_context = nn.Conv2d(input_channels * 5, descriptor_dim, 1)
         self.descriptor_viewpoint_attention = nn.Conv2d(input_channels * 5, descriptor_dim, 1)
-        self.descriptor_orientation_alignment = nn.Conv2d(descriptor_dim, descriptor_dim, 1)
         self.descriptor_dilated_context = nn.Conv2d(descriptor_dim, descriptor_dim, 3, padding=2, dilation=2)
-        self.descriptor_branch_quality = nn.Conv2d(descriptor_dim, 1, 1)
-        self.descriptor_rotation_fusion = nn.Conv2d(descriptor_dim * 2, descriptor_dim, 1)
         _zero_module(self.heatmap_viewpoint_context)
         _zero_module(self.keypoint_offsets)
         _zero_module(self.descriptor_viewpoint_context)
         _zero_module(self.descriptor_viewpoint_attention)
-        _zero_module(self.descriptor_orientation_alignment)
         _zero_module(self.descriptor_dilated_context)
-        _zero_module(self.descriptor_branch_quality)
-        _init_concat_identity_projection(self.descriptor_rotation_fusion, descriptor_dim)
         self.descriptor_skip = nn.Conv2d(input_channels, descriptor_dim, 1)
         self.scale = nn.Conv2d(input_channels, 1, 1)
         self.orientation = nn.Conv2d(input_channels, 2, 1)
@@ -393,36 +387,8 @@ class SparseHead(nn.Module):
             feature,
             descriptor_feature,
         )
-        descriptor_branches = [
-            descriptor_gated
-            + self.descriptor_orientation_alignment(descriptor_gated)
-            + self.descriptor_dilated_context(descriptor_gated),
-        ]
-        for turns in range(1, 4):
-            rotated_feature = _rotate_feature_map(feature, turns)
-            rotated_descriptor_feature = _rotate_feature_map(
-                descriptor_feature if descriptor_feature is not None else feature,
-                turns,
-            )
-            _, rotated_heatmap, rotated_descriptor_gated, _ = self._descriptor_branch(
-                rotated_feature,
-                rotated_descriptor_feature,
-            )
-            heatmap_sum = heatmap_sum + _rotate_feature_map(rotated_heatmap, -turns)
-            rotated_descriptor = _rotate_feature_map(rotated_descriptor_gated, -turns)
-            orientation_aligned = _align_descriptor_orientation_channels(rotated_descriptor, turns)
-            descriptor_branches.append(
-                rotated_descriptor
-                + self.descriptor_orientation_alignment(orientation_aligned)
-                + self.descriptor_dilated_context(rotated_descriptor),
-            )
-        descriptor_stack = torch.stack(descriptor_branches, dim=1)
-        quality_logits = torch.stack([self.descriptor_branch_quality(branch) for branch in descriptor_branches], dim=1)
-        branch_weights = torch.softmax(quality_logits, dim=1)
-        descriptor_invariant = (descriptor_stack * branch_weights).sum(dim=1)
-        descriptor_equivariant = descriptor_branches[0]
-        descriptor_sum = self.descriptor_rotation_fusion(torch.cat([descriptor_invariant, descriptor_equivariant], dim=1))
-        heatmap = torch.sigmoid(heatmap_sum / 4.0)
+        descriptor_sum = descriptor_gated + self.descriptor_dilated_context(descriptor_gated)
+        heatmap = torch.sigmoid(heatmap_sum)
         descriptors = _normalize_channels(descriptor_sum)
         scale = torch.exp(torch.clamp(self.scale(geometry_context), min=-2.0, max=2.0))
         orientation = _normalize_channels(self.orientation(geometry_context))
@@ -477,16 +443,25 @@ def geometry_aware_descriptor_pool(
         return F.grid_sample(descriptors, grid, mode="bilinear", padding_mode="border", align_corners=True)
 
     step = clamped_scale * float(radius)
+    diagonal_step = step * 0.70710678118
     zero = torch.zeros_like(step)
+    tangent_x = tangent[:, 0:1]
+    tangent_y = tangent[:, 1:2]
+    normal_x = normal[:, 0:1]
+    normal_y = normal[:, 1:2]
     offsets = [
-        (zero, zero),
-        (tangent[:, 0:1] * step, tangent[:, 1:2] * step),
-        (-tangent[:, 0:1] * step, -tangent[:, 1:2] * step),
-        (normal[:, 0:1] * step, normal[:, 1:2] * step),
-        (-normal[:, 0:1] * step, -normal[:, 1:2] * step),
+        (zero, zero, 0.30),
+        (tangent_x * step, tangent_y * step, 0.16),
+        (-tangent_x * step, -tangent_y * step, 0.16),
+        (normal_x * step, normal_y * step, 0.09),
+        (-normal_x * step, -normal_y * step, 0.09),
+        ((tangent_x + normal_x) * diagonal_step, (tangent_y + normal_y) * diagonal_step, 0.05),
+        (-(tangent_x + normal_x) * diagonal_step, -(tangent_y + normal_y) * diagonal_step, 0.05),
+        ((tangent_x - normal_x) * diagonal_step, (tangent_y - normal_y) * diagonal_step, 0.05),
+        (-(tangent_x - normal_x) * diagonal_step, -(tangent_y - normal_y) * diagonal_step, 0.05),
     ]
-    pooled = torch.stack([sample(dx, dy) for dx, dy in offsets], dim=0).mean(dim=0)
-    return _normalize_channels(0.5 * descriptors + 0.5 * pooled)
+    pooled = sum(sample(dx, dy) * weight for dx, dy, weight in offsets)
+    return _normalize_channels(0.45 * descriptors + 0.55 * pooled)
 
 
 def _shifted_feature(feature: torch.Tensor, dy: int, dx: int) -> torch.Tensor:

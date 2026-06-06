@@ -40,6 +40,39 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(output.heatmap.shape), (2, 1, 16, 20))
         self.assertEqual(tuple(output.descriptors.shape), (2, 16, 16, 20))
 
+    def test_sparse_head_no_longer_uses_c4_rotated_branches(self):
+        head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16)
+        original = pfm_model._rotate_feature_map
+
+        def fail_if_called(tensor: torch.Tensor, turns: int) -> torch.Tensor:
+            raise AssertionError("SparseHead.forward must not use the old C4 rotated branches")
+
+        pfm_model._rotate_feature_map = fail_if_called
+        try:
+            output = head(torch.randn(1, 8, 16, 20), torch.randn(1, 8, 16, 20))
+        finally:
+            pfm_model._rotate_feature_map = original
+
+        self.assertEqual(tuple(output.descriptors.shape), (1, 16, 16, 20))
+        self.assertFalse(hasattr(head, "descriptor_branch_quality"))
+        self.assertFalse(hasattr(head, "descriptor_rotation_fusion"))
+
+    def test_canonical_descriptor_pool_changes_with_orientation(self):
+        descriptors = pfm_model.normalize_channels_stable(torch.randn(1, 8, 9, 9))
+        scale = torch.ones(1, 1, 9, 9)
+        affine = torch.tensor([1.0, 0.0, 0.0, 1.0]).view(1, 4, 1, 1).expand(1, 4, 9, 9)
+        orientation_x = torch.zeros(1, 2, 9, 9)
+        orientation_x[:, 0] = 1.0
+        orientation_y = torch.zeros(1, 2, 9, 9)
+        orientation_y[:, 1] = 1.0
+
+        pooled_x = pfm_model.geometry_aware_descriptor_pool(descriptors, orientation_x, scale, affine)
+        pooled_y = pfm_model.geometry_aware_descriptor_pool(descriptors, orientation_y, scale, affine)
+
+        self.assertEqual(tuple(pooled_x.shape), tuple(descriptors.shape))
+        self.assertTrue(torch.allclose(pooled_x.norm(dim=1), torch.ones(1, 9, 9), atol=1.0e-5))
+        self.assertFalse(torch.allclose(pooled_x, pooled_y, atol=1.0e-4))
+
     def test_dual_fpn_lite_returns_separate_p2_features(self):
         backbone = pfm_model.Backbone(input_channels=1, base_channels=4)
         fpn = pfm_model.DualFPNLite(base_channels=4)

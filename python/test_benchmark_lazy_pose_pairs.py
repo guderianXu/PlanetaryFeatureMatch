@@ -219,6 +219,31 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
 
+    def test_parse_args_accepts_multiple_render_and_uint8_manifests(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "fov090/render_manifest.csv",
+            "fov110/render_manifest.csv",
+            "--uint8-manifest",
+            "fov090/images_u8/uint8_manifest.csv",
+            "fov110/images_u8/uint8_manifest.csv",
+            "--output-dir",
+            "run",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertEqual(
+            args.render_manifest,
+            [Path("fov090/render_manifest.csv"), Path("fov110/render_manifest.csv")],
+        )
+        self.assertEqual(
+            args.uint8_manifest,
+            [Path("fov090/images_u8/uint8_manifest.csv"), Path("fov110/images_u8/uint8_manifest.csv")],
+        )
+
     def test_gpu_snapshot_interval_collects_first_and_interval_steps(self) -> None:
         self.assertTrue(lazy_bench._should_collect_gpu_snapshot(1, 25))
         self.assertFalse(lazy_bench._should_collect_gpu_snapshot(2, 25))

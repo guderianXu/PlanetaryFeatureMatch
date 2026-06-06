@@ -133,6 +133,19 @@ def _cache_get(cache: "OrderedDict[str, object]", key: Path, loader):
     return value
 
 
+def _path_list(value: Path | list[Path] | tuple[Path, ...] | None) -> list[Path]:
+    if value is None:
+        return []
+    if isinstance(value, Path):
+        return [value]
+    return list(value)
+
+
+def _first_path(value: Path | list[Path] | tuple[Path, ...] | None) -> Path | None:
+    paths = _path_list(value)
+    return paths[0] if paths else None
+
+
 def _read_uint8_manifest(path: Path | None) -> dict[str, Path]:
     if path is None or not path.exists():
         return {}
@@ -147,7 +160,14 @@ def _read_uint8_manifest(path: Path | None) -> dict[str, Path]:
     return mapping
 
 
-def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[RenderRecord]:
+def _read_uint8_manifests(paths: list[Path]) -> dict[str, Path]:
+    mapping: dict[str, Path] = {}
+    for path in paths:
+        mapping.update(_read_uint8_manifest(path))
+    return mapping
+
+
+def _read_render_manifest(path: Path, uint8_paths: dict[str, Path], *, dataset_prefix: str | None = None) -> list[RenderRecord]:
     records: list[RenderRecord] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -158,10 +178,13 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
             uint8_path = uint8_paths.get(str(image_path))
             if uint8_path is None and image_path.is_file():
                 uint8_path = image_path
+            base_id = row["base_id"]
+            if dataset_prefix:
+                base_id = f"{dataset_prefix}:{base_id}"
             records.append(
                 RenderRecord(
                     pose_id=pose_id,
-                    base_id=row["base_id"],
+                    base_id=base_id,
                     variant=row["variant"],
                     split=row["split"],
                     tsai_path=Path(row["tsai_path"]),
@@ -170,6 +193,21 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
                     depth_path=Path(row["depth_path"]),
                 )
             )
+    return records
+
+
+def _dataset_prefix_for_manifest(path: Path, index: int) -> str:
+    parent_name = path.parent.name
+    return parent_name if parent_name else f"dataset_{index:03d}"
+
+
+def _read_all_render_records(render_manifests: list[Path], uint8_manifests: list[Path]) -> list[RenderRecord]:
+    uint8_paths = _read_uint8_manifests(uint8_manifests)
+    use_prefix = len(render_manifests) > 1
+    records: list[RenderRecord] = []
+    for index, render_manifest in enumerate(render_manifests):
+        prefix = _dataset_prefix_for_manifest(render_manifest, index) if use_prefix else None
+        records.extend(_read_render_manifest(render_manifest, uint8_paths, dataset_prefix=prefix))
     return records
 
 
@@ -937,7 +975,9 @@ pre {{ white-space: pre-wrap; background: #101b24; border: 1px solid #26394a; bo
 def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path | None:
     if not args.auto_visual_report:
         return None
-    if args.uint8_manifest is None:
+    render_manifest = _first_path(args.render_manifest)
+    uint8_manifest = _first_path(args.uint8_manifest)
+    if render_manifest is None or uint8_manifest is None:
         return None
     report_dir = args.output_dir / "visual_report"
     script_path = PROJECT_ROOT / "scripts" / "visualize_lazy_pose_matches.py"
@@ -945,9 +985,9 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         sys.executable,
         str(script_path),
         "--render-manifest",
-        str(args.render_manifest),
+        str(render_manifest),
         "--uint8-manifest",
-        str(args.uint8_manifest),
+        str(uint8_manifest),
         "--pytorch-state",
         str(checkpoint_path),
         "--output-dir",
@@ -1688,8 +1728,10 @@ def _save_training_state(
                 "crop_size": int(args.crop_size),
                 "batch_pairs": int(args.batch_pairs),
                 "samples_per_pair": int(args.samples_per_pair),
-                "render_manifest": str(args.render_manifest),
-                "uint8_manifest": str(args.uint8_manifest) if args.uint8_manifest is not None else "",
+                "render_manifest": str(_first_path(args.render_manifest) or ""),
+                "uint8_manifest": str(_first_path(args.uint8_manifest) or ""),
+                "render_manifests": [str(path) for path in _path_list(args.render_manifest)],
+                "uint8_manifests": [str(path) for path in _path_list(args.uint8_manifest)],
                 "init_pytorch_state": str(args.init_pytorch_state),
                 "photometric_augment": bool(args.photometric_augment),
                 "photometric_probability": float(args.photometric_probability),
@@ -1739,8 +1781,8 @@ def _save_training_state(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--render-manifest", type=Path, required=True)
-    parser.add_argument("--uint8-manifest", type=Path, default=None)
+    parser.add_argument("--render-manifest", type=Path, nargs="+", required=True)
+    parser.add_argument("--uint8-manifest", type=Path, nargs="*", default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--mode", choices=["preprocess", "train"], default="preprocess")
     parser.add_argument("--split", default="train")
@@ -2042,8 +2084,9 @@ def main() -> int:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
-    uint8_paths = _read_uint8_manifest(args.uint8_manifest)
-    records = _read_render_manifest(args.render_manifest, uint8_paths)
+    render_manifests = _path_list(args.render_manifest)
+    uint8_manifests = _path_list(args.uint8_manifest)
+    records = _read_all_render_records(render_manifests, uint8_manifests)
     target_variants = tuple(args.target_variant) if args.target_variant else DEFAULT_TARGET_VARIANTS
     specs = build_pair_specs(
         records,
@@ -2059,8 +2102,10 @@ def main() -> int:
         raise RuntimeError("no lazy pair specs found")
 
     metadata = {
-        "render_manifest": str(args.render_manifest),
-        "uint8_manifest": str(args.uint8_manifest) if args.uint8_manifest is not None else "",
+        "render_manifest": str(_first_path(args.render_manifest) or ""),
+        "uint8_manifest": str(_first_path(args.uint8_manifest) or ""),
+        "render_manifests": [str(path) for path in render_manifests],
+        "uint8_manifests": [str(path) for path in uint8_manifests],
         "records": len(records),
         "specs": len(specs),
         "target_variants": list(target_variants),
