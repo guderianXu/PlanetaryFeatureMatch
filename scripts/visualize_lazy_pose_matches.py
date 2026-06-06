@@ -520,6 +520,11 @@ def image_data_uri(path: Path) -> str:
     return f"data:image/png;base64,{payload}"
 
 
+def display_image_path(record) -> str:
+    path = record.uint8_path if record.uint8_path is not None else record.image_path
+    return str(path)
+
+
 def read_metric_rows(path: Path) -> list[dict[str, float]]:
     if not path.exists():
         return []
@@ -723,11 +728,17 @@ def write_html_report(
     cards = []
     for result in selected:
         image_path = image_paths[result.image_name]
+        reference_path = display_image_path(result.spec.reference)
+        target_path = display_image_path(result.spec.target)
         cards.append(
             f"""
 <article class="card">
   <h2>{html.escape(result.label)}：{html.escape(result.spec.reference.base_id)} -> {html.escape(result.spec.target.variant)}</h2>
   <p>匹配 {result.matches}，正确 {result.correct_count}，错误 {result.wrong_count}，正确率 {result.precision:.3f}，中位误差 {result.median_error:.2f}px，有效重叠 {result.valid_fraction:.3f}</p>
+  <dl class="paths">
+    <div><dt>A图文件</dt><dd><code>{html.escape(reference_path)}</code></dd></div>
+    <div><dt>B图文件</dt><dd><code>{html.escape(target_path)}</code></dd></div>
+  </dl>
   <img src="{image_data_uri(image_path)}" alt="{html.escape(result.image_name)}">
 </article>
 """
@@ -775,6 +786,11 @@ pre {{ background: #101b24; border: 1px solid #223545; border-radius: 8px; paddi
 .card {{ margin: 18px 0; padding: 16px; background: #101923; border: 1px solid #26394a; border-radius: 8px; }}
 .card h2 {{ margin: 0 0 8px; font-size: 18px; }}
 .card p {{ margin: 0 0 12px; color: #a9bac8; }}
+.paths {{ display: grid; gap: 6px; margin: 0 0 14px; color: #b8c8d6; font-size: 13px; }}
+.paths div {{ display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; align-items: start; }}
+.paths dt {{ color: #72dce3; font-weight: 700; }}
+.paths dd {{ margin: 0; min-width: 0; }}
+.paths code {{ display: block; padding: 6px 8px; border: 1px solid #203242; border-radius: 4px; background: #0a121a; color: #dcebf7; white-space: normal; overflow-wrap: anywhere; word-break: break-all; }}
 img {{ display: block; width: 100%; border-radius: 6px; border: 1px solid #1f303e; background: #050a0f; }}
 table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }}
 th, td {{ border-bottom: 1px solid #223545; padding: 8px; text-align: left; }}

@@ -4,6 +4,8 @@ import torch
 
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -194,6 +196,70 @@ class StressEvalScriptsTest(unittest.TestCase):
         )
 
         self.assertEqual(selected_draw_indices(visual, 0).tolist(), [0, 1, 2, 3, 4])
+
+    def test_lazy_visual_html_report_shows_source_image_paths(self) -> None:
+        reference = RenderRecord(
+            pose_id="pose_a",
+            base_id="base_001",
+            variant="nadir",
+            split="val",
+            tsai_path=Path("a.tsai"),
+            image_path=Path("/raw/a.tif"),
+            uint8_path=Path("/uint8/a.png"),
+            depth_path=Path("a_depth.tif"),
+        )
+        target = RenderRecord(
+            pose_id="pose_b",
+            base_id="base_001",
+            variant="extreme_03",
+            split="val",
+            tsai_path=Path("b.tsai"),
+            image_path=Path("/raw/b.tif"),
+            uint8_path=Path("/uint8/b.png"),
+            depth_path=Path("b_depth.tif"),
+        )
+        spec = LazyPairSpec(pair_index=1, split="val", reference=reference, target=target)
+        pair = SyntheticPair(
+            view_a=torch.zeros(1, 4, 4),
+            view_b=torch.zeros(1, 4, 4),
+            warp_a_to_b=torch.zeros(4, 4, 2),
+            valid_mask=torch.ones(4, 4, dtype=torch.bool),
+        )
+        visual = LazyMatchVisual(
+            label="测试",
+            spec=spec,
+            pair=pair,
+            valid_fraction=1.0,
+            points_a=torch.zeros(1, 2).numpy(),
+            points_b=torch.zeros(1, 2).numpy(),
+            scores=torch.ones(1).numpy(),
+            errors=torch.zeros(1).numpy(),
+            correct=torch.ones(1, dtype=torch.bool).numpy(),
+            image_name="pair.png",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            image_path = tmp_path / "pair.png"
+            image_path.write_bytes(b"fake-png")
+            html_path = tmp_path / "index.html"
+
+            visual_mod.write_html_report(
+                html_path,
+                args=SimpleNamespace(pytorch_state=Path("state.pt")),
+                all_results=[visual],
+                selected=[visual],
+                image_paths={"pair.png": image_path},
+                artifact_paths={},
+                elapsed_s=1.0,
+            )
+
+            html_text = html_path.read_text(encoding="utf-8")
+
+        self.assertIn("A图文件", html_text)
+        self.assertIn("B图文件", html_text)
+        self.assertIn("/uint8/a.png", html_text)
+        self.assertIn("/uint8/b.png", html_text)
 
     def test_lazy_visual_geometry_filter_removes_outlier_matches(self) -> None:
         record = RenderRecord(
