@@ -99,6 +99,14 @@ class LazyPairSpec:
 
 
 @dataclass(frozen=True)
+class CropWindow:
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+
+
+@dataclass(frozen=True)
 class LazyPairResult:
     spec: LazyPairSpec
     pair: SyntheticPair
@@ -106,6 +114,8 @@ class LazyPairResult:
     valid_pixels: int
     attempt_count: int
     elapsed_ms: float
+    crop_a: CropWindow | None = None
+    crop_b: CropWindow | None = None
     illumination_pair: SyntheticPair | None = None
     illumination_match_pair: SyntheticPair | None = None
 
@@ -317,7 +327,7 @@ def _project_crop_pair(
     absolute_depth_tolerance_m: float,
     relative_depth_tolerance: float,
     rng: random.Random,
-) -> tuple[SyntheticPair, float, int]:
+) -> tuple[SyntheticPair, float, int, CropWindow, CropWindow]:
     if depth_a.shape != depth_b.shape:
         raise ValueError(f"depth shape mismatch: {depth_a.shape} vs {depth_b.shape}")
     _, height_a, width_a = view_a.shape
@@ -403,7 +413,13 @@ def _project_crop_pair(
     )
     valid_pixels = int(valid_mask_np.sum())
     valid_fraction = float(valid_pixels) / float(max(1, crop_h_a * crop_w_a))
-    return pair, valid_fraction, valid_pixels
+    return (
+        pair,
+        valid_fraction,
+        valid_pixels,
+        CropWindow(x0=ax0, y0=ay0, x1=ax1, y1=ay1),
+        CropWindow(x0=bx0, y0=by0, x1=bx1, y1=by1),
+    )
 
 
 def generate_lazy_pair(
@@ -435,11 +451,11 @@ def generate_lazy_pair(
     camera_a = _cached_camera(spec.reference.tsai_path)
     camera_b = _cached_camera(spec.target.tsai_path)
 
-    best: tuple[SyntheticPair, float, int] | None = None
+    best: tuple[SyntheticPair, float, int, CropWindow, CropWindow] | None = None
     attempts = max(1, int(max_attempts))
     for attempt in range(attempts):
         rng = random.Random(seed + spec.pair_index * 1009 + attempt * 9176)
-        pair, valid_fraction, valid_pixels = _project_crop_pair(
+        pair, valid_fraction, valid_pixels, crop_a, crop_b = _project_crop_pair(
             view_a,
             view_b,
             depth_a,
@@ -452,7 +468,7 @@ def generate_lazy_pair(
             rng=rng,
         )
         if best is None or valid_fraction > best[1]:
-            best = (pair, valid_fraction, valid_pixels)
+            best = (pair, valid_fraction, valid_pixels, crop_a, crop_b)
         if valid_fraction >= min_valid_fraction:
             break
     if best is None:
@@ -495,6 +511,8 @@ def generate_lazy_pair(
         valid_pixels=best[2],
         attempt_count=attempt + 1,
         elapsed_ms=elapsed_ms,
+        crop_a=best[3],
+        crop_b=best[4],
         illumination_pair=illumination_pair,
         illumination_match_pair=illumination_match_pair,
     )

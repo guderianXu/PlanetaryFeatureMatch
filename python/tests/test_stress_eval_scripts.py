@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from patch_descriptor_training import SyntheticPair
 from continuous_rotation_stress_eval import rotate_pair_from_view
 from illumination_stress_eval import make_illumination_variants
-from benchmark_lazy_pose_pairs import LazyPairSpec, LazyPairResult, RenderRecord
+from benchmark_lazy_pose_pairs import CropWindow, LazyPairSpec, LazyPairResult, RenderRecord
 import visualize_lazy_pose_matches as visual_mod
 import training_visual_report as training_report_mod
 from visualize_lazy_pose_matches import (
@@ -236,6 +236,8 @@ class StressEvalScriptsTest(unittest.TestCase):
             errors=torch.zeros(1).numpy(),
             correct=torch.ones(1, dtype=torch.bool).numpy(),
             image_name="pair.png",
+            crop_a=CropWindow(x0=10, y0=20, x1=778, y1=788),
+            crop_b=CropWindow(x0=30, y0=40, x1=798, y1=808),
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,8 +260,12 @@ class StressEvalScriptsTest(unittest.TestCase):
 
         self.assertIn("A图文件", html_text)
         self.assertIn("B图文件", html_text)
+        self.assertIn("A图 crop", html_text)
+        self.assertIn("B图 crop", html_text)
         self.assertIn("/uint8/a.png", html_text)
         self.assertIn("/uint8/b.png", html_text)
+        self.assertIn("x=10, y=20, w=768, h=768", html_text)
+        self.assertIn("x=30, y=40, w=768, h=768", html_text)
 
     def test_lazy_visual_geometry_filter_removes_outlier_matches(self) -> None:
         record = RenderRecord(

@@ -34,6 +34,7 @@ import pfm_model  # noqa: E402
 import pfm_pytorch_training  # noqa: E402
 import pytorch_cache_match_eval as match_eval  # noqa: E402
 from benchmark_lazy_pose_pairs import (  # noqa: E402
+    CropWindow,
     DEFAULT_TARGET_VARIANTS,
     LazyPairResult,
     LazyPairSpec,
@@ -60,6 +61,8 @@ class LazyMatchVisual:
     errors: np.ndarray
     correct: np.ndarray
     image_name: str = ""
+    crop_a: CropWindow | None = None
+    crop_b: CropWindow | None = None
 
     @property
     def matches(self) -> int:
@@ -265,6 +268,8 @@ def compute_visual(
                 scores=np.empty((0,), dtype=np.float32),
                 errors=np.empty((0,), dtype=np.float32),
                 correct=np.empty((0,), dtype=bool),
+                crop_a=result.crop_a,
+                crop_b=result.crop_b,
             )
         _, image_height_a, image_width_a = pair.view_a.shape
         _, image_height_b, image_width_b = pair.view_b.shape
@@ -295,6 +300,8 @@ def compute_visual(
             scores=scores.detach().cpu().numpy(),
             errors=errors.detach().cpu().numpy(),
             correct=correct.detach().cpu().numpy().astype(bool, copy=False),
+            crop_a=result.crop_a,
+            crop_b=result.crop_b,
         )
         if geometry_filter != "none":
             return filter_visual_matches(visual, geometry_filter=geometry_filter, threshold_px=threshold_px, label=label)
@@ -320,6 +327,8 @@ def filter_visual_matches(
             errors=result.errors.copy(),
             correct=result.correct.copy(),
             image_name=result.image_name,
+            crop_a=result.crop_a,
+            crop_b=result.crop_b,
         )
     points_a = torch.from_numpy(result.points_a).to(torch.float32)
     points_b = torch.from_numpy(result.points_b).to(torch.float32)
@@ -358,6 +367,8 @@ def filter_visual_matches(
         errors=result.errors[keep],
         correct=result.correct[keep],
         image_name=result.image_name,
+        crop_a=result.crop_a,
+        crop_b=result.crop_b,
     )
 
 
@@ -446,6 +457,8 @@ def choose_representatives(results: list[LazyMatchVisual], count: int) -> list[L
                     scores=result.scores,
                     errors=result.errors,
                     correct=result.correct,
+                    crop_a=result.crop_a,
+                    crop_b=result.crop_b,
                 )
             )
     return picks
@@ -472,6 +485,8 @@ def make_illumination_stress_lazy_results(selected: list[LazyMatchVisual]) -> li
                         valid_pixels=int(pair.valid_mask.sum().item()),
                         attempt_count=1,
                         elapsed_ms=0.0,
+                        crop_a=visual.crop_a,
+                        crop_b=visual.crop_b,
                     ),
                 )
             )
@@ -523,6 +538,17 @@ def image_data_uri(path: Path) -> str:
 def display_image_path(record) -> str:
     path = record.uint8_path if record.uint8_path is not None else record.image_path
     return str(path)
+
+
+def format_crop_window(window: CropWindow | None) -> str:
+    if window is None:
+        return "未记录"
+    width = max(0, int(window.x1) - int(window.x0))
+    height = max(0, int(window.y1) - int(window.y0))
+    return (
+        f"x={int(window.x0)}, y={int(window.y0)}, w={width}, h={height} "
+        f"(x1={int(window.x1)}, y1={int(window.y1)}, 右下开区间)"
+    )
 
 
 def read_metric_rows(path: Path) -> list[dict[str, float]]:
@@ -730,6 +756,8 @@ def write_html_report(
         image_path = image_paths[result.image_name]
         reference_path = display_image_path(result.spec.reference)
         target_path = display_image_path(result.spec.target)
+        reference_crop = format_crop_window(result.crop_a)
+        target_crop = format_crop_window(result.crop_b)
         cards.append(
             f"""
 <article class="card">
@@ -737,7 +765,9 @@ def write_html_report(
   <p>匹配 {result.matches}，正确 {result.correct_count}，错误 {result.wrong_count}，正确率 {result.precision:.3f}，中位误差 {result.median_error:.2f}px，有效重叠 {result.valid_fraction:.3f}</p>
   <dl class="paths">
     <div><dt>A图文件</dt><dd><code>{html.escape(reference_path)}</code></dd></div>
+    <div><dt>A图 crop</dt><dd><code>{html.escape(reference_crop)}</code></dd></div>
     <div><dt>B图文件</dt><dd><code>{html.escape(target_path)}</code></dd></div>
+    <div><dt>B图 crop</dt><dd><code>{html.escape(target_crop)}</code></dd></div>
   </dl>
   <img src="{image_data_uri(image_path)}" alt="{html.escape(result.image_name)}">
 </article>
@@ -992,6 +1022,8 @@ def main() -> int:
                 valid_pixels=int(pair.valid_mask.sum().item()),
                 attempt_count=1,
                 elapsed_ms=0.0,
+                crop_a=result.crop_a,
+                crop_b=result.crop_b,
             )
             filtered_selected.append(
                 compute_visual(
@@ -1041,6 +1073,8 @@ def main() -> int:
             errors=result.errors,
             correct=result.correct,
             image_name=image_name,
+            crop_a=result.crop_a,
+            crop_b=result.crop_b,
         )
         selected[index - 1] = result_with_name
         draw_match_image(result_with_name, image_path, draw_matches=args.draw_matches)
