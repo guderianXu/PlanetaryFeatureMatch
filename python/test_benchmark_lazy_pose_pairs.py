@@ -131,6 +131,21 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "64",
             "--graph-matcher-no-match-weight",
             "0.2",
+            "--graph-matcher-assignment-weight",
+            "0.35",
+            "--graph-matcher-train-max-attention-layers",
+            "2",
+            "--graph-matcher-train-random-attention-layers",
+            "--graph-matcher-train-max-attention-work-fraction",
+            "0.5",
+            "--graph-matcher-train-width-keep-ratio",
+            "0.75",
+            "--graph-matcher-accept-weight",
+            "0.2",
+            "--graph-matcher-prune-ranking-weight",
+            "0.15",
+            "--graph-matcher-stop-confidence-weight",
+            "0.07",
             "--abstention-weight",
             "0.3",
             "--warp-hard-negative-weight",
@@ -178,6 +193,14 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
 
         self.assertTrue(args.train_graph_matcher)
         self.assertEqual(args.graph_matcher_no_match_points, 64)
+        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.35)
+        self.assertEqual(args.graph_matcher_train_max_attention_layers, 2)
+        self.assertTrue(args.graph_matcher_train_random_attention_layers)
+        self.assertAlmostEqual(args.graph_matcher_train_max_attention_work_fraction, 0.5)
+        self.assertAlmostEqual(args.graph_matcher_train_width_keep_ratio, 0.75)
+        self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
+        self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.15)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.07)
         self.assertEqual(args.false_match_csv, [Path("false.csv")])
         self.assertEqual(args.false_match_mine_every, 4)
         self.assertEqual(args.gpu_snapshot_every, 25)
@@ -277,6 +300,35 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             records = lazy_bench._read_render_manifest(manifest, {})
 
         self.assertEqual(records[0].uint8_path, image_path)
+
+    def test_build_pair_specs_rejects_uint8_directory_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            depth_path = root / "depth.tif"
+            tsai_path = root / "sample.tsai"
+            depth_path.write_bytes(b"x")
+            tsai_path.write_text("x", encoding="utf-8")
+            manifest = root / "render_manifest.csv"
+            manifest.write_text(
+                "pose_id,base_id,variant,split,tsai_path,image_path,depth_path\n"
+                f"p0,b0,nadir,train,{tsai_path},{root},{depth_path}\n"
+                f"p1,b0,small_01,train,{tsai_path},{root},{depth_path}\n",
+                encoding="utf-8",
+            )
+            records = lazy_bench._read_render_manifest(manifest, {})
+
+            specs = lazy_bench.build_pair_specs(
+                records,
+                split="train",
+                reference_variant="nadir",
+                target_variants=("small_01",),
+                image_source="uint8",
+                limit_pairs=0,
+                seed=123,
+                shuffle=False,
+            )
+
+        self.assertEqual(specs, [])
 
     def test_streaming_csv_rows_flushes_after_each_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1487,6 +1487,34 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(int(components["graph_matcher_positive_pairs"].item()), 3)
 
+    def test_graph_matcher_assignment_loss_uses_dual_softmax_and_dustbin(self):
+        good_logits = torch.zeros(4, 4)
+        good_logits[0, 0] = 10.0
+        good_logits[1, 1] = 10.0
+        good_logits[2, 3] = 10.0
+        good_logits[3, 2] = 10.0
+        bad_logits = torch.zeros(4, 4)
+        bad_logits[0, 1] = 10.0
+        bad_logits[1, 0] = 10.0
+        bad_logits[2, 2] = 10.0
+        bad_logits[3, 3] = 10.0
+        good = pfm_model.GraphMatcherOutput(
+            logits=good_logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+        )
+        bad = pfm_model.GraphMatcherOutput(
+            logits=bad_logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+        )
+
+        good_loss = train.graph_matcher_assignment_loss(good, positive_count=2)
+        bad_loss = train.graph_matcher_assignment_loss(bad, positive_count=2)
+
+        self.assertLess(float(good_loss), 0.1)
+        self.assertGreater(float(bad_loss), 5.0)
+
     def test_graph_matcher_prune_ranking_loss_penalizes_hard_negative_accept_scores(self):
         logits = torch.zeros(4, 4)
         accept_logits = torch.tensor(
@@ -1542,6 +1570,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             points,
             accept_weight=0.5,
             accept_negative_topk=2,
+            assignment_weight=0.25,
             prune_ranking_weight=0.25,
             prune_ranking_margin=0.5,
             stop_confidence_weight=0.1,
@@ -1551,6 +1580,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(loss))
         self.assertGreater(float(components["graph_matcher_ce_loss"].detach()), 0.0)
+        self.assertGreater(float(components["graph_matcher_assignment_loss"].detach()), 0.0)
         self.assertGreater(float(components["graph_matcher_accept_loss"].detach()), 0.0)
         self.assertIn("graph_matcher_prune_ranking_loss", components)
         self.assertIn("graph_matcher_stop_confidence_loss", components)
@@ -1711,6 +1741,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.5",
             "--graph-matcher-accept-weight",
             "0.2",
+            "--graph-matcher-assignment-weight",
+            "0.35",
             "--graph-matcher-accept-negative-topk",
             "6",
             "--graph-matcher-prune-ranking-weight",
@@ -1758,6 +1790,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_train_max_attention_work_fraction, 0.5)
         self.assertAlmostEqual(args.graph_matcher_train_width_keep_ratio, 0.5)
         self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.2)
+        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.35)
         self.assertEqual(args.graph_matcher_accept_negative_topk, 6)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.15)
         self.assertAlmostEqual(args.graph_matcher_prune_ranking_margin, 0.4)
@@ -2213,6 +2246,11 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             mock.patch.object(train, "compute_student_teacher_descriptor_maps", return_value=descriptors),
             mock.patch.object(
                 train,
+                "compute_student_teacher_descriptor_map_single",
+                return_value=(descriptors[1], descriptors[3]),
+            ),
+            mock.patch.object(
+                train,
                 "sample_feature_correspondences",
                 return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
             ),
@@ -2348,6 +2386,11 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             mock.patch.object(train, "compute_student_teacher_descriptor_maps", return_value=descriptors),
             mock.patch.object(
                 train,
+                "compute_student_teacher_descriptor_map_single",
+                return_value=(descriptors[1], descriptors[3]),
+            ),
+            mock.patch.object(
+                train,
                 "sample_feature_correspondences",
                 return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
             ),
@@ -2373,6 +2416,82 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(float(parameter.detach()), 0.7, places=5)
         self.assertEqual(metrics["illumination_match_pairs"], 1.0)
         self.assertEqual(metrics["illumination_match_points"], 2.0)
+
+    def test_train_step_reuses_unchanged_source_view_for_illumination_match_pair_loss(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_a.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        changed_pair = SyntheticPair(
+            view_a=pair.view_a,
+            view_b=torch.ones(1, 2, 2) * 0.25,
+            warp_a_to_b=pair.warp_a_to_b,
+            valid_mask=pair.valid_mask,
+        )
+        base_descriptors = (
+            torch.full((1, 1, 2, 2), 1.0),
+            torch.full((1, 1, 2, 2), 2.0),
+            torch.full((1, 1, 2, 2), 3.0),
+            torch.full((1, 1, 2, 2), 4.0),
+        )
+        changed_b_descriptors = (
+            torch.full((1, 1, 2, 2), 5.0),
+            torch.full((1, 1, 2, 2), 6.0),
+        )
+
+        def fake_descriptor_loss(*_args, **_kwargs):
+            return parameter * 2.0, {
+                "top1_accuracy": 1.0,
+                "top5_accuracy": 1.0,
+                "top10_accuracy": 1.0,
+                "mean_positive_rank": 1.0,
+                "mean_positive_score": 1.0,
+                "mean_negative_score": 0.0,
+            }
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps", return_value=base_descriptors) as full_maps,
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_map_single",
+                return_value=changed_b_descriptors,
+                create=True,
+            ) as single_map,
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss", side_effect=fake_descriptor_loss) as descriptor_loss,
+        ):
+            train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.25,
+                illumination_match_pairs={pair_path.resolve(strict=False): changed_pair},
+                illumination_match_weight=0.5,
+                illumination_match_probability=1.0,
+            )
+
+        self.assertEqual(full_maps.call_count, 1)
+        self.assertEqual(single_map.call_count, 1)
+        self.assertTrue(torch.equal(single_map.call_args.args[1], changed_pair.view_b.unsqueeze(0)))
+        self.assertIs(descriptor_loss.call_args.kwargs["teacher_descriptors_a"], base_descriptors[2])
+        self.assertIs(descriptor_loss.call_args.kwargs["teacher_descriptors_b"], changed_b_descriptors[1])
 
     def test_train_step_adds_weighted_pseudo_label_loss(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))

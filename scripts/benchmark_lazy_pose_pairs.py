@@ -156,7 +156,7 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path]) -> list[Rend
                 continue
             image_path = Path(row["image_path"])
             uint8_path = uint8_paths.get(str(image_path))
-            if uint8_path is None and image_path.exists():
+            if uint8_path is None and image_path.is_file():
                 uint8_path = image_path
             records.append(
                 RenderRecord(
@@ -226,7 +226,7 @@ def build_pair_specs(
         if image_source == "uint8" and record.uint8_path is None:
             continue
         image_path = _selected_image_path(record, image_source)
-        if image_path.exists() and record.depth_path.exists() and record.tsai_path.exists():
+        if image_path.is_file() and record.depth_path.is_file() and record.tsai_path.is_file():
             by_base[record.base_id][record.variant] = record
 
     specs: list[LazyPairSpec] = []
@@ -1218,6 +1218,26 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "photometric_probability",
         "input_local_contrast",
         "graph_matcher_loss_weight",
+        "graph_matcher_assignment_weight",
+        "graph_matcher_accept_weight",
+        "graph_matcher_prune_ranking_weight",
+        "graph_matcher_stop_confidence_weight",
+        "graph_matcher_train_max_attention_layers",
+        "graph_matcher_train_random_attention_layers",
+        "graph_matcher_train_max_attention_work_fraction",
+        "graph_matcher_train_width_keep_ratio",
+        "graph_matcher_total_loss",
+        "graph_matcher_ce_loss",
+        "graph_matcher_assignment_loss",
+        "graph_matcher_no_match_loss",
+        "graph_matcher_accept_loss",
+        "graph_matcher_prune_ranking_loss",
+        "graph_matcher_stop_confidence_loss",
+        "graph_matcher_raw_preservation_loss",
+        "graph_matcher_hard_negative_dustbin_loss",
+        "graph_matcher_executed_attention_layers",
+        "graph_matcher_attention_work_fraction",
+        "graph_matcher_positive_pairs",
         "abstention_weight",
         "inline_false_match_mining",
         "illumination_consistency_weight",
@@ -1419,8 +1439,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 graph_matcher_no_match_points=args.graph_matcher_no_match_points,
                 graph_matcher_no_match_weight=args.graph_matcher_no_match_weight,
                 graph_matcher_no_match_min_distance=args.graph_matcher_no_match_min_distance,
+                graph_matcher_assignment_weight=args.graph_matcher_assignment_weight,
                 graph_matcher_accept_weight=args.graph_matcher_accept_weight,
                 graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
+                graph_matcher_prune_ranking_weight=args.graph_matcher_prune_ranking_weight,
+                graph_matcher_prune_ranking_margin=args.graph_matcher_prune_ranking_margin,
+                graph_matcher_stop_confidence_weight=args.graph_matcher_stop_confidence_weight,
+                graph_matcher_stop_confidence_margin=args.graph_matcher_stop_confidence_margin,
                 graph_matcher_raw_preservation_weight=args.graph_matcher_raw_preservation_weight,
                 graph_matcher_raw_preservation_margin=args.graph_matcher_raw_preservation_margin,
                 graph_matcher_raw_preservation_raw_margin=args.graph_matcher_raw_preservation_raw_margin,
@@ -1432,6 +1457,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
+                graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
+                graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
+                graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
+                graph_matcher_train_width_keep_ratio=args.graph_matcher_train_width_keep_ratio,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=0,
                 training_max_image_size=0,
@@ -1490,6 +1519,46 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "photometric_probability": f"{photometric_config.probability:.3f}",
                 "input_local_contrast": int(args.input_local_contrast),
                 "graph_matcher_loss_weight": f"{args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0:.6f}",
+                "graph_matcher_assignment_weight": (
+                    f"{args.graph_matcher_assignment_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_accept_weight": f"{args.graph_matcher_accept_weight if args.train_graph_matcher else 0.0:.6f}",
+                "graph_matcher_prune_ranking_weight": (
+                    f"{args.graph_matcher_prune_ranking_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_stop_confidence_weight": (
+                    f"{args.graph_matcher_stop_confidence_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_train_max_attention_layers": (
+                    args.graph_matcher_train_max_attention_layers if args.train_graph_matcher else 0
+                ),
+                "graph_matcher_train_random_attention_layers": int(
+                    bool(args.graph_matcher_train_random_attention_layers and args.train_graph_matcher)
+                ),
+                "graph_matcher_train_max_attention_work_fraction": (
+                    f"{args.graph_matcher_train_max_attention_work_fraction if args.train_graph_matcher else 1.0:.6f}"
+                ),
+                "graph_matcher_train_width_keep_ratio": (
+                    f"{args.graph_matcher_train_width_keep_ratio if args.train_graph_matcher else 1.0:.6f}"
+                ),
+                "graph_matcher_total_loss": f"{metrics.get('graph_matcher_total_loss', 0.0):.6f}",
+                "graph_matcher_ce_loss": f"{metrics.get('graph_matcher_ce_loss', 0.0):.6f}",
+                "graph_matcher_assignment_loss": f"{metrics.get('graph_matcher_assignment_loss', 0.0):.6f}",
+                "graph_matcher_no_match_loss": f"{metrics.get('graph_matcher_no_match_loss', 0.0):.6f}",
+                "graph_matcher_accept_loss": f"{metrics.get('graph_matcher_accept_loss', 0.0):.6f}",
+                "graph_matcher_prune_ranking_loss": f"{metrics.get('graph_matcher_prune_ranking_loss', 0.0):.6f}",
+                "graph_matcher_stop_confidence_loss": f"{metrics.get('graph_matcher_stop_confidence_loss', 0.0):.6f}",
+                "graph_matcher_raw_preservation_loss": f"{metrics.get('graph_matcher_raw_preservation_loss', 0.0):.6f}",
+                "graph_matcher_hard_negative_dustbin_loss": (
+                    f"{metrics.get('graph_matcher_hard_negative_dustbin_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_executed_attention_layers": (
+                    f"{metrics.get('graph_matcher_executed_attention_layers', 0.0):.0f}"
+                ),
+                "graph_matcher_attention_work_fraction": (
+                    f"{metrics.get('graph_matcher_attention_work_fraction', 0.0):.6f}"
+                ),
+                "graph_matcher_positive_pairs": f"{metrics.get('graph_matcher_positive_pairs', 0.0):.0f}",
                 "abstention_weight": f"{args.abstention_weight:.6f}",
                 "inline_false_match_mining": int(args.inline_false_match_mining),
                 "illumination_consistency_weight": f"{args.illumination_consistency_weight:.6f}",
@@ -1505,6 +1574,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 print(
                     f"train step={step}/{args.steps} loss={row['loss']} "
                     f"top1={row['top1_accuracy']} false={row['false_match_points']} "
+                    f"gassign={row['graph_matcher_assignment_loss']} gnomatch={row['graph_matcher_no_match_loss']} "
                     f"illum={row['illumination_consistency_points']} "
                     f"illum_match={row['illumination_match_points']} hard={row['hard_lazy_pairs']} "
                     f"data_wait={data_wait_ms:.1f}ms "
@@ -1638,6 +1708,17 @@ def _save_training_state(
                 "graph_matcher_loss_weight": float(args.graph_matcher_loss_weight),
                 "graph_matcher_no_match_points": int(args.graph_matcher_no_match_points),
                 "graph_matcher_no_match_weight": float(args.graph_matcher_no_match_weight),
+                "graph_matcher_no_match_min_distance": float(args.graph_matcher_no_match_min_distance),
+                "graph_matcher_assignment_weight": float(args.graph_matcher_assignment_weight),
+                "graph_matcher_accept_weight": float(args.graph_matcher_accept_weight),
+                "graph_matcher_prune_ranking_weight": float(args.graph_matcher_prune_ranking_weight),
+                "graph_matcher_stop_confidence_weight": float(args.graph_matcher_stop_confidence_weight),
+                "graph_matcher_train_max_attention_layers": int(args.graph_matcher_train_max_attention_layers),
+                "graph_matcher_train_random_attention_layers": bool(args.graph_matcher_train_random_attention_layers),
+                "graph_matcher_train_max_attention_work_fraction": float(
+                    args.graph_matcher_train_max_attention_work_fraction
+                ),
+                "graph_matcher_train_width_keep_ratio": float(args.graph_matcher_train_width_keep_ratio),
                 "abstention_weight": float(args.abstention_weight),
                 "warp_hard_negative_weight": float(args.warp_hard_negative_weight),
             },
@@ -1711,8 +1792,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
+    parser.add_argument("--graph-matcher-assignment-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
+    parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
+    parser.add_argument("--graph-matcher-train-max-attention-work-fraction", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-train-width-keep-ratio", type=float, default=1.0)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-prune-ranking-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-stop-confidence-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-stop-confidence-margin", type=float, default=0.5)
     parser.add_argument("--graph-matcher-raw-preservation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-raw-preservation-margin", type=float, default=1.0)
     parser.add_argument("--graph-matcher-raw-preservation-raw-margin", type=float, default=0.05)
@@ -1863,6 +1953,60 @@ def main() -> int:
         raise ValueError("--false-match-mine-every must be positive")
     if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
         raise ValueError("--input-local-contrast-strength must be in [0, 1]")
+    if args.graph_matcher_loss_weight < 0.0:
+        raise ValueError("--graph-matcher-loss-weight must be non-negative")
+    if args.graph_matcher_no_match_points < 0:
+        raise ValueError("--graph-matcher-no-match-points must be non-negative")
+    if args.graph_matcher_no_match_weight < 0.0:
+        raise ValueError("--graph-matcher-no-match-weight must be non-negative")
+    if args.graph_matcher_no_match_min_distance < 0.0:
+        raise ValueError("--graph-matcher-no-match-min-distance must be non-negative")
+    if args.graph_matcher_assignment_weight < 0.0:
+        raise ValueError("--graph-matcher-assignment-weight must be non-negative")
+    if args.graph_matcher_train_max_attention_layers < 0:
+        raise ValueError("--graph-matcher-train-max-attention-layers must be non-negative")
+    if (
+        not math.isfinite(float(args.graph_matcher_train_max_attention_work_fraction))
+        or args.graph_matcher_train_max_attention_work_fraction < 0.0
+        or args.graph_matcher_train_max_attention_work_fraction > 1.0
+    ):
+        raise ValueError("--graph-matcher-train-max-attention-work-fraction must be in [0, 1]")
+    if (
+        not math.isfinite(float(args.graph_matcher_train_width_keep_ratio))
+        or args.graph_matcher_train_width_keep_ratio <= 0.0
+        or args.graph_matcher_train_width_keep_ratio > 1.0
+    ):
+        raise ValueError("--graph-matcher-train-width-keep-ratio must be in (0, 1]")
+    if args.graph_matcher_accept_weight < 0.0:
+        raise ValueError("--graph-matcher-accept-weight must be non-negative")
+    if args.graph_matcher_accept_negative_topk < 0:
+        raise ValueError("--graph-matcher-accept-negative-topk must be non-negative")
+    if args.graph_matcher_prune_ranking_weight < 0.0:
+        raise ValueError("--graph-matcher-prune-ranking-weight must be non-negative")
+    if args.graph_matcher_prune_ranking_margin < 0.0:
+        raise ValueError("--graph-matcher-prune-ranking-margin must be non-negative")
+    if args.graph_matcher_stop_confidence_weight < 0.0:
+        raise ValueError("--graph-matcher-stop-confidence-weight must be non-negative")
+    if args.graph_matcher_stop_confidence_margin < 0.0:
+        raise ValueError("--graph-matcher-stop-confidence-margin must be non-negative")
+    if args.graph_matcher_raw_preservation_weight < 0.0:
+        raise ValueError("--graph-matcher-raw-preservation-weight must be non-negative")
+    if args.graph_matcher_raw_preservation_margin < 0.0:
+        raise ValueError("--graph-matcher-raw-preservation-margin must be non-negative")
+    if args.graph_matcher_raw_preservation_raw_margin < 0.0:
+        raise ValueError("--graph-matcher-raw-preservation-raw-margin must be non-negative")
+    if args.graph_matcher_hard_negative_dustbin_weight < 0.0:
+        raise ValueError("--graph-matcher-hard-negative-dustbin-weight must be non-negative")
+    if args.graph_matcher_hard_negative_dustbin_topk < 0:
+        raise ValueError("--graph-matcher-hard-negative-dustbin-topk must be non-negative")
+    if args.graph_matcher_hard_negative_dustbin_margin < 0.0:
+        raise ValueError("--graph-matcher-hard-negative-dustbin-margin must be non-negative")
+    if args.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0:
+        raise ValueError("--graph-matcher-hard-negative-dustbin-spatial-min-distance must be non-negative")
+    if args.graph_matcher_semi_dense_no_match_points < 0:
+        raise ValueError("--graph-matcher-semi-dense-no-match-points must be non-negative")
+    if args.graph_matcher_semi_dense_min_score < 0.0:
+        raise ValueError("--graph-matcher-semi-dense-min-score must be non-negative")
     for name in (
         "photometric_brightness",
         "photometric_contrast",

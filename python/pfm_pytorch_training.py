@@ -35,6 +35,7 @@ GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
 GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_total_loss",
     "graph_matcher_ce_loss",
+    "graph_matcher_assignment_loss",
     "graph_matcher_no_match_loss",
     "graph_matcher_accept_loss",
     "graph_matcher_prune_ranking_loss",
@@ -1372,6 +1373,7 @@ def graph_matcher_correspondence_loss(
     no_match_points: int = 0,
     no_match_weight: float = 0.0,
     no_match_min_distance: float = 4.0,
+    assignment_weight: float = 0.0,
     accept_weight: float = 0.0,
     accept_negative_topk: int = 8,
     prune_ranking_weight: float = 0.0,
@@ -1397,6 +1399,7 @@ def graph_matcher_correspondence_loss(
     def components(
         total_loss: torch.Tensor,
         ce_loss: torch.Tensor,
+        assignment_loss: torch.Tensor,
         no_match_loss: torch.Tensor,
         accept_loss: torch.Tensor,
         prune_ranking_loss: torch.Tensor,
@@ -1410,6 +1413,7 @@ def graph_matcher_correspondence_loss(
         return {
             "graph_matcher_total_loss": total_loss,
             "graph_matcher_ce_loss": ce_loss,
+            "graph_matcher_assignment_loss": assignment_loss,
             "graph_matcher_no_match_loss": no_match_loss,
             "graph_matcher_accept_loss": accept_loss,
             "graph_matcher_prune_ranking_loss": prune_ranking_loss,
@@ -1432,7 +1436,7 @@ def graph_matcher_correspondence_loss(
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1543,6 +1547,7 @@ def graph_matcher_correspondence_loss(
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
     col_loss = F.cross_entropy(output.logits[:, :count].T, targets)
     match_ce_loss = 0.5 * (row_loss + col_loss)
+    assignment_loss = output.logits.new_zeros(())
     no_match_loss = output.logits.new_zeros(())
     accept_loss = output.logits.new_zeros(())
     prune_ranking_loss = output.logits.new_zeros(())
@@ -1563,6 +1568,9 @@ def graph_matcher_correspondence_loss(
         if no_match_terms:
             no_match_loss = torch.stack(no_match_terms).mean()
             loss = loss + float(no_match_weight) * no_match_loss
+    if assignment_weight > 0.0:
+        assignment_loss = graph_matcher_assignment_loss(output, positive_count=count)
+        loss = loss + float(assignment_weight) * assignment_loss
     if accept_weight > 0.0:
         accept_loss = graph_matcher_acceptance_loss(
             output,
@@ -1614,6 +1622,7 @@ def graph_matcher_correspondence_loss(
         return loss, components(
             loss,
             match_ce_loss,
+            assignment_loss,
             no_match_loss,
             accept_loss,
             prune_ranking_loss,
@@ -1625,6 +1634,34 @@ def graph_matcher_correspondence_loss(
             positive_pairs,
         )
     return loss
+
+
+def graph_matcher_assignment_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+) -> torch.Tensor:
+    """按推理时的双向 soft assignment 训练匹配和 dustbin 拒配。"""
+
+    logits = output.logits
+    total_a = logits.size(0) - 1
+    total_b = logits.size(1) - 1
+    count = min(int(positive_count), total_a, total_b)
+    if count <= 0:
+        return logits.new_zeros(())
+
+    eps = torch.finfo(logits.dtype).eps
+    row_prob_full = torch.softmax(logits[:total_a, :], dim=1)
+    col_prob_full = torch.softmax(logits[:, :total_b], dim=0)
+    dual_prob = (row_prob_full[:, :total_b] * col_prob_full[:total_a, :]).clamp_min(eps)
+    terms: list[torch.Tensor] = [
+        -dual_prob[:count, :count].diagonal().log().mean(),
+    ]
+    if total_a > count:
+        terms.append(-row_prob_full[count:total_a, total_b].clamp_min(eps).log().mean())
+    if total_b > count:
+        terms.append(-col_prob_full[total_a, count:total_b].clamp_min(eps).log().mean())
+    return torch.stack(terms).mean()
 
 
 def graph_matcher_acceptance_loss(
@@ -1925,6 +1962,24 @@ def compute_training_descriptor_map(
     return descriptors
 
 
+def compute_student_teacher_descriptor_map_single(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    image: torch.Tensor,
+    *,
+    train_blended_descriptors: bool = False,
+    texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    student = compute_training_descriptor_map(
+        model,
+        image,
+        train_blended_descriptors=train_blended_descriptors,
+        texture_blend_weight=texture_blend_weight,
+    )
+    with torch.no_grad():
+        teacher = model.texture_descriptor_map_single(image)
+    return student, teacher
+
+
 def compute_student_teacher_descriptor_maps(
     model: pfm_model.PlanetaryFeatureMatcher,
     pair: SyntheticPair,
@@ -2187,6 +2242,7 @@ def train_step(
     graph_matcher_no_match_points: int = 0,
     graph_matcher_no_match_weight: float = 0.0,
     graph_matcher_no_match_min_distance: float = 4.0,
+    graph_matcher_assignment_weight: float = 0.0,
     graph_matcher_accept_weight: float = 0.0,
     graph_matcher_accept_negative_topk: int = 8,
     graph_matcher_prune_ranking_weight: float = 0.0,
@@ -2339,6 +2395,7 @@ def train_step(
                             no_match_points=graph_matcher_no_match_points,
                             no_match_weight=graph_matcher_no_match_weight,
                             no_match_min_distance=graph_matcher_no_match_min_distance,
+                            assignment_weight=graph_matcher_assignment_weight,
                             accept_weight=graph_matcher_accept_weight,
                             accept_negative_topk=graph_matcher_accept_negative_topk,
                             prune_ranking_weight=graph_matcher_prune_ranking_weight,
@@ -2531,14 +2588,45 @@ def train_step(
                     changed_match_pair = illumination_match_pairs.get(pair_key)
                     if changed_match_pair is not None:
                         changed_match_pair = move_pair_to_device(changed_match_pair, device=device)
-                        changed_maps = compute_student_teacher_descriptor_maps(
-                            model,
-                            changed_match_pair,
-                            train_blended_descriptors=train_blended_descriptors,
-                            texture_blend_weight=texture_blend_weight,
-                            include_heatmaps=False,
+                        # 单侧光照扰动时复用未变化视图，避免重复 full forward 占满显存。
+                        view_a_unchanged = changed_match_pair.view_a.shape == pair.view_a.shape and torch.equal(
+                            changed_match_pair.view_a,
+                            pair.view_a,
                         )
-                        changed_descriptors_a, changed_descriptors_b, changed_teacher_a, changed_teacher_b = changed_maps[:4]
+                        view_b_unchanged = changed_match_pair.view_b.shape == pair.view_b.shape and torch.equal(
+                            changed_match_pair.view_b,
+                            pair.view_b,
+                        )
+                        if view_a_unchanged and view_b_unchanged:
+                            changed_descriptors_a, changed_descriptors_b = descriptors_a, descriptors_b
+                            changed_teacher_a, changed_teacher_b = teacher_a, teacher_b
+                        elif view_a_unchanged:
+                            changed_descriptors_a, changed_teacher_a = descriptors_a, teacher_a
+                            changed_descriptors_b, changed_teacher_b = compute_student_teacher_descriptor_map_single(
+                                model,
+                                changed_match_pair.view_b.unsqueeze(0),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                            )
+                        elif view_b_unchanged:
+                            changed_descriptors_b, changed_teacher_b = descriptors_b, teacher_b
+                            changed_descriptors_a, changed_teacher_a = compute_student_teacher_descriptor_map_single(
+                                model,
+                                changed_match_pair.view_a.unsqueeze(0),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                            )
+                        else:
+                            changed_maps = compute_student_teacher_descriptor_maps(
+                                model,
+                                changed_match_pair,
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                include_heatmaps=False,
+                            )
+                            changed_descriptors_a, changed_descriptors_b, changed_teacher_a, changed_teacher_b = (
+                                changed_maps[:4]
+                            )
                         match_loss, match_metrics = descriptor_map_pair_loss(
                             changed_descriptors_a,
                             changed_descriptors_b,
@@ -3254,6 +3342,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
+    parser.add_argument("--graph-matcher-assignment-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
     parser.add_argument("--graph-matcher-train-max-attention-work-fraction", type=float, default=1.0)
@@ -3359,6 +3448,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-no-match-weight must be nonnegative")
     if args.graph_matcher_no_match_min_distance < 0.0:
         parser.error("--graph-matcher-no-match-min-distance must be nonnegative")
+    if args.graph_matcher_assignment_weight < 0.0:
+        parser.error("--graph-matcher-assignment-weight must be nonnegative")
     if args.graph_matcher_train_max_attention_layers < 0:
         parser.error("--graph-matcher-train-max-attention-layers must be nonnegative")
     if (
@@ -3748,9 +3839,14 @@ def main() -> int:
                 "diversity_weight",
                 "abstention_weight",
                 "graph_matcher_loss_weight",
+                "graph_matcher_assignment_weight",
                 "graph_matcher_accept_weight",
                 "graph_matcher_prune_ranking_weight",
                 "graph_matcher_stop_confidence_weight",
+                "graph_matcher_train_max_attention_layers",
+                "graph_matcher_train_random_attention_layers",
+                "graph_matcher_train_max_attention_work_fraction",
+                "graph_matcher_train_width_keep_ratio",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -3759,12 +3855,16 @@ def main() -> int:
                 "mean_negative_score",
                 "graph_matcher_total_loss",
                 "graph_matcher_ce_loss",
+                "graph_matcher_assignment_loss",
                 "graph_matcher_no_match_loss",
                 "graph_matcher_accept_loss",
                 "graph_matcher_prune_ranking_loss",
                 "graph_matcher_stop_confidence_loss",
                 "graph_matcher_raw_preservation_loss",
                 "graph_matcher_hard_negative_dustbin_loss",
+                "graph_matcher_executed_attention_layers",
+                "graph_matcher_attention_work_fraction",
+                "graph_matcher_positive_pairs",
                 "points",
                 "pseudo_label_points",
                 "pseudo_keypoint_points",
@@ -3885,6 +3985,7 @@ def main() -> int:
                 graph_matcher_no_match_points=args.graph_matcher_no_match_points,
                 graph_matcher_no_match_weight=args.graph_matcher_no_match_weight,
                 graph_matcher_no_match_min_distance=args.graph_matcher_no_match_min_distance,
+                graph_matcher_assignment_weight=args.graph_matcher_assignment_weight,
                 graph_matcher_accept_weight=args.graph_matcher_accept_weight,
                 graph_matcher_accept_negative_topk=args.graph_matcher_accept_negative_topk,
                 graph_matcher_prune_ranking_weight=args.graph_matcher_prune_ranking_weight,
@@ -3926,6 +4027,9 @@ def main() -> int:
                     "diversity_weight": diversity_weight,
                     "abstention_weight": args.abstention_weight,
                     "graph_matcher_loss_weight": args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0,
+                    "graph_matcher_assignment_weight": args.graph_matcher_assignment_weight
+                    if args.train_graph_matcher
+                    else 0.0,
                     "graph_matcher_accept_weight": args.graph_matcher_accept_weight if args.train_graph_matcher else 0.0,
                     "graph_matcher_prune_ranking_weight": args.graph_matcher_prune_ranking_weight
                     if args.train_graph_matcher
@@ -3963,6 +4067,8 @@ def main() -> int:
                     f"hn={hard_negative_weight:.3f} div={diversity_weight:.3f} "
                     f"abst={args.abstention_weight:.3f} "
                     f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
+                    f"gassign={metrics.get('graph_matcher_assignment_loss', 0.0):.6f} "
+                    f"gnomatch={metrics.get('graph_matcher_no_match_loss', 0.0):.6f} "
                     f"gacc={metrics.get('graph_matcher_accept_loss', 0.0):.6f} "
                     f"gprune={metrics.get('graph_matcher_prune_ranking_loss', 0.0):.6f} "
                     f"gstop={metrics.get('graph_matcher_stop_confidence_loss', 0.0):.6f} "
