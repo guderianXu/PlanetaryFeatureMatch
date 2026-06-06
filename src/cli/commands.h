@@ -86,6 +86,7 @@ struct CliOptions
     double graph_matcher_no_match_min_distance = 4.0;
     int graph_matcher_train_max_attention_layers = 0;
     bool graph_matcher_train_random_attention_layers = false;
+    double graph_matcher_train_max_attention_work_fraction = 1.0;
     double graph_matcher_train_width_keep_ratio = 1.0;
     double graph_matcher_prune_ranking_weight = 0.1;
     double graph_matcher_prune_ranking_margin = 0.25;

@@ -52,6 +52,8 @@ struct TrainConfig
     int graph_matcher_train_max_attention_layers = 0;
     /// Python 对齐训练中是否随机采样 GraphMatcher 注意力层数，增强中间层监督。
     bool graph_matcher_train_random_attention_layers = false;
+    /// Python 对齐训练中 GraphMatcher 最多使用的 attention 工作量比例；1 表示不限制。
+    double graph_matcher_train_max_attention_work_fraction = 1.0;
     /// Python 对齐训练中随机保留的正匹配 token 比例；1 表示不做宽度 dropout。
     double graph_matcher_train_width_keep_ratio = 1.0;
     /// Python 对齐训练中 LightGlue 式剪枝排序 loss 权重。

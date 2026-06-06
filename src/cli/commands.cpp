@@ -162,6 +162,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
     train->add_flag("--graph-matcher-train-random-attention-layers",
                     options.graph_matcher_train_random_attention_layers,
                     "Randomize GraphMatcher training attention layer budget for intermediate-layer supervision");
+    train->add_option("--graph-matcher-train-max-attention-work-fraction",
+                      options.graph_matcher_train_max_attention_work_fraction,
+                      "GraphMatcher training attention work budget; 1 uses full attention work")
+        ->check(CLI::Range(0.0, 1.0));
     train->add_option("--graph-matcher-train-width-keep-ratio", options.graph_matcher_train_width_keep_ratio,
                       "Randomly keep this positive token ratio during GraphMatcher training; 1 disables width dropout")
         ->check(CLI::Range(0.0, 1.0));

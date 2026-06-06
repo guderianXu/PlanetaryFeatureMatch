@@ -178,6 +178,8 @@ static void parse_train_command()
         "--graph-matcher-train-max-attention-layers",
         "2",
         "--graph-matcher-train-random-attention-layers",
+        "--graph-matcher-train-max-attention-work-fraction",
+        "0.5",
         "--graph-matcher-train-width-keep-ratio",
         "0.5",
         "--graph-matcher-prune-ranking-weight",
@@ -284,6 +286,7 @@ static void parse_train_command()
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_no_match_min_distance, 5.5, 1.0e-12);
     PFM_REQUIRE(parsed.graph_matcher_train_max_attention_layers == 2);
     PFM_REQUIRE(parsed.graph_matcher_train_random_attention_layers);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_train_max_attention_work_fraction, 0.5, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_train_width_keep_ratio, 0.5, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_weight, 0.15, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.4, 1.0e-12);
@@ -377,6 +380,7 @@ static void parse_train_python_compare_profile_options()
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_no_match_min_distance, 4.0, 1.0e-12);
     PFM_REQUIRE(parsed.graph_matcher_train_max_attention_layers == 0);
     PFM_REQUIRE(!parsed.graph_matcher_train_random_attention_layers);
+    PFM_REQUIRE_CLOSE(parsed.graph_matcher_train_max_attention_work_fraction, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_train_width_keep_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_weight, 0.1, 1.0e-12);
     PFM_REQUIRE_CLOSE(parsed.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);

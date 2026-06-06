@@ -402,6 +402,12 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_train_max_attention_layers must be non-negative");
     }
+    if (!std::isfinite(config.graph_matcher_train_max_attention_work_fraction) ||
+        config.graph_matcher_train_max_attention_work_fraction < 0.0 ||
+        config.graph_matcher_train_max_attention_work_fraction > 1.0)
+    {
+        throw std::invalid_argument("graph_matcher_train_max_attention_work_fraction must be in [0, 1]");
+    }
     if (!std::isfinite(config.graph_matcher_train_width_keep_ratio) ||
         config.graph_matcher_train_width_keep_ratio <= 0.0 || config.graph_matcher_train_width_keep_ratio > 1.0)
     {
@@ -4681,7 +4687,8 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
                                              std::optional<at::Generator>* generator = nullptr,
                                              int64_t positive_count_override = -1,
                                              double width_keep_ratio = 1.0,
-                                             int64_t* selected_positive_count = nullptr)
+                                             int64_t* selected_positive_count = nullptr,
+                                             double max_attention_work_fraction = 1.0)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4690,6 +4697,11 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
             *selected_positive_count = 0;
         }
         return torch::zeros({}, desc_a.options());
+    }
+    if (!std::isfinite(max_attention_work_fraction) || max_attention_work_fraction < 0.0 ||
+        max_attention_work_fraction > 1.0)
+    {
+        throw std::invalid_argument("graph matcher max_attention_work_fraction must be in [0, 1]");
     }
     if (!std::isfinite(width_keep_ratio) || width_keep_ratio <= 0.0 || width_keep_ratio > 1.0)
     {
@@ -4765,8 +4777,8 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
             .to(active_desc_b.device());
     const auto attention_budget = resolve_python_compare_graph_attention_budget(
         max_attention_layers, random_attention_layers, active_desc_a.device(), &active_generator);
-    auto output =
-        graph_matcher.forward(active_desc_a, meta_a, active_desc_b, meta_b, false, -1.0, -1.0, attention_budget);
+    auto output = graph_matcher.forward(active_desc_a, meta_a, active_desc_b, meta_b, false, -1.0, -1.0,
+                                        attention_budget, max_attention_work_fraction);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -4873,7 +4885,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 config.graph_matcher_prune_ranking_margin, config.graph_matcher_stop_confidence_weight,
                 config.graph_matcher_stop_confidence_margin, train_max_attention_layers,
                 config.graph_matcher_train_random_attention_layers, &generator, sample.points_a.size(0),
-                config.graph_matcher_train_width_keep_ratio));
+                config.graph_matcher_train_width_keep_ratio, nullptr,
+                config.graph_matcher_train_max_attention_work_fraction));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6874,6 +6887,15 @@ torch::Tensor make_python_compare_graph_loss_with_random_attention_budget_for_te
     auto generator = make_training_random_generator(desc_a.device(), seed);
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
                                           0.25, 0.0, 0.5, max_attention_layers, true, &generator);
+}
+
+torch::Tensor make_python_compare_graph_loss_with_attention_work_fraction_for_test(
+    v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, double max_attention_work_fraction)
+{
+    return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
+                                          0.25, 0.0, 0.5, 0, false, nullptr, -1, 1.0, nullptr,
+                                          max_attention_work_fraction);
 }
 
 std::pair<torch::Tensor, int64_t> make_python_compare_graph_loss_with_width_keep_ratio_for_test(

@@ -54,6 +54,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_matcher_no_match_min_distance"', train_html)
                 self.assertIn('name="graph_matcher_train_max_attention_layers"', train_html)
                 self.assertIn('name="graph_matcher_train_random_attention_layers"', train_html)
+                self.assertIn('name="graph_matcher_train_max_attention_work_fraction"', train_html)
                 self.assertIn('name="graph_matcher_train_width_keep_ratio"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_weight"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_margin"', train_html)
@@ -124,6 +125,7 @@ class DashboardAppTest(unittest.TestCase):
                     "graph_matcher_no_match_min_distance": "6.0",
                     "graph_matcher_train_max_attention_layers": "2",
                     "graph_matcher_train_random_attention_layers": "on",
+                    "graph_matcher_train_max_attention_work_fraction": "0.5",
                     "graph_matcher_train_width_keep_ratio": "0.5",
                 }
                 data = urllib.parse.urlencode(form).encode("utf-8")
@@ -138,11 +140,13 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
                 self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
                 self.assertIn("--graph-matcher-train-random-attention-layers", script)
+                self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
                 self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
                 self.assertIn("graph_matcher_no_match_points=24", report)
                 self.assertIn("graph_matcher_train_max_attention_layers=2", report)
                 self.assertIn("graph_matcher_train_random_attention_layers=True", report)
+                self.assertIn("graph_matcher_train_max_attention_work_fraction=0.5", report)
                 self.assertIn("graph_matcher_train_width_keep_ratio=0.5", report)
                 self.assertIn("graph_width_prune_keep_ratio=0.4", report)
             finally:

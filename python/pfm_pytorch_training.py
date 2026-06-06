@@ -42,6 +42,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
     "graph_matcher_executed_attention_layers",
+    "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
 )
 
@@ -1388,6 +1389,7 @@ def graph_matcher_correspondence_loss(
     semi_dense_min_score: float = 0.0,
     max_attention_layers: int = 0,
     random_attention_layers: bool = False,
+    max_attention_work_fraction: float = 1.0,
     width_keep_ratio: float = 1.0,
     generator: torch.Generator | None = None,
     return_components: bool = False,
@@ -1402,6 +1404,7 @@ def graph_matcher_correspondence_loss(
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
         executed_attention_layers: torch.Tensor,
+        attention_work_fraction: torch.Tensor,
         positive_pairs: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {
@@ -1414,15 +1417,22 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
             "graph_matcher_executed_attention_layers": executed_attention_layers,
+            "graph_matcher_attention_work_fraction": attention_work_fraction,
             "graph_matcher_positive_pairs": positive_pairs,
         }
 
+    if (
+        not math.isfinite(float(max_attention_work_fraction))
+        or max_attention_work_fraction < 0.0
+        or max_attention_work_fraction > 1.0
+    ):
+        raise ValueError("max_attention_work_fraction must be in [0, 1]")
     if not math.isfinite(float(width_keep_ratio)) or width_keep_ratio <= 0.0 or width_keep_ratio > 1.0:
         raise ValueError("width_keep_ratio must be in (0, 1]")
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1527,6 +1537,7 @@ def graph_matcher_correspondence_loss(
         meta_b,
         apply_candidate_mask=False,
         max_attention_layers=attention_layer_budget,
+        max_attention_work_fraction=max_attention_work_fraction,
     )
     targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
     row_loss = F.cross_entropy(output.logits[:count, :], targets)
@@ -1598,6 +1609,7 @@ def graph_matcher_correspondence_loss(
         loss = loss + float(hard_negative_dustbin_weight) * hard_negative_dustbin_loss
     if return_components:
         executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
+        attention_work_fraction = output.logits.new_tensor(float(getattr(output, "attention_work_fraction", 0.0)))
         positive_pairs = output.logits.new_tensor(float(count))
         return loss, components(
             loss,
@@ -1609,6 +1621,7 @@ def graph_matcher_correspondence_loss(
             raw_preservation_loss,
             hard_negative_dustbin_loss,
             executed_attention_layers,
+            attention_work_fraction,
             positive_pairs,
         )
     return loss
@@ -2191,6 +2204,7 @@ def train_step(
     graph_matcher_semi_dense_min_score: float = 0.0,
     graph_matcher_train_max_attention_layers: int = 0,
     graph_matcher_train_random_attention_layers: bool = False,
+    graph_matcher_train_max_attention_work_fraction: float = 1.0,
     graph_matcher_train_width_keep_ratio: float = 1.0,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
@@ -2342,6 +2356,7 @@ def train_step(
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
                             max_attention_layers=graph_matcher_train_max_attention_layers,
                             random_attention_layers=graph_matcher_train_random_attention_layers,
+                            max_attention_work_fraction=graph_matcher_train_max_attention_work_fraction,
                             width_keep_ratio=graph_matcher_train_width_keep_ratio,
                             generator=generator,
                             return_components=True,
@@ -3241,6 +3256,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
     parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
+    parser.add_argument("--graph-matcher-train-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--graph-matcher-train-width-keep-ratio", type=float, default=1.0)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
@@ -3345,6 +3361,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-no-match-min-distance must be nonnegative")
     if args.graph_matcher_train_max_attention_layers < 0:
         parser.error("--graph-matcher-train-max-attention-layers must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_train_max_attention_work_fraction))
+        or args.graph_matcher_train_max_attention_work_fraction < 0.0
+        or args.graph_matcher_train_max_attention_work_fraction > 1.0
+    ):
+        parser.error("--graph-matcher-train-max-attention-work-fraction must be in [0, 1]")
     if (
         not math.isfinite(float(args.graph_matcher_train_width_keep_ratio))
         or args.graph_matcher_train_width_keep_ratio <= 0.0
@@ -3880,6 +3902,7 @@ def main() -> int:
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
                 graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
+                graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
                 graph_matcher_train_width_keep_ratio=args.graph_matcher_train_width_keep_ratio,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
@@ -3916,6 +3939,9 @@ def main() -> int:
                     "graph_matcher_train_random_attention_layers": int(
                         bool(args.graph_matcher_train_random_attention_layers and args.train_graph_matcher)
                     ),
+                    "graph_matcher_train_max_attention_work_fraction": args.graph_matcher_train_max_attention_work_fraction
+                    if args.train_graph_matcher
+                    else 1.0,
                     "graph_matcher_train_width_keep_ratio": args.graph_matcher_train_width_keep_ratio
                     if args.train_graph_matcher
                     else 1.0,

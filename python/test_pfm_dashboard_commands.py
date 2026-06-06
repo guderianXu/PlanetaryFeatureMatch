@@ -24,6 +24,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_no_match_min_distance=5.0,
                 graph_matcher_train_max_attention_layers=2,
                 graph_matcher_train_random_attention_layers=True,
+                graph_matcher_train_max_attention_work_fraction=0.5,
                 graph_matcher_train_width_keep_ratio=0.5,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
@@ -48,6 +49,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-no-match-min-distance 5.0", script)
         self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
         self.assertIn("--graph-matcher-train-random-attention-layers", script)
+        self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
         self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
@@ -65,6 +67,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("graph_matcher_no_match_weight=0.1", run_html)
         self.assertIn("graph_matcher_train_max_attention_layers=2", run_html)
         self.assertIn("graph_matcher_train_random_attention_layers=True", run_html)
+        self.assertIn("graph_matcher_train_max_attention_work_fraction=0.5", run_html)
         self.assertIn("graph_matcher_train_width_keep_ratio=0.5", run_html)
         self.assertIn("graph_matcher_stop_confidence_weight=0.07", run_html)
 
@@ -100,6 +103,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 graph_matcher_no_match_min_distance=6.0,
                 graph_matcher_train_max_attention_layers=2,
                 graph_matcher_train_random_attention_layers=True,
+                graph_matcher_train_max_attention_work_fraction=0.5,
                 graph_matcher_train_width_keep_ratio=0.5,
                 graph_matcher_stop_confidence_weight=0.07,
                 graph_matcher_stop_confidence_margin=0.6,
@@ -120,6 +124,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
         self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
         self.assertIn("--graph-matcher-train-random-attention-layers", script)
+        self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
         self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
         self.assertIn("--graph-matcher-stop-confidence-weight 0.07", script)
         self.assertIn("--graph-matcher-stop-confidence-margin 0.6", script)
@@ -205,6 +210,19 @@ class DashboardCommandsTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "graph_matcher_train_width_keep_ratio must be in"):
+                create_training_runs(request)
+
+    def test_graph_matcher_train_attention_work_fraction_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+                graph_matcher_train_max_attention_work_fraction=1.5,
+            )
+
+            with self.assertRaisesRegex(ValueError, "graph_matcher_train_max_attention_work_fraction must be in"):
                 create_training_runs(request)
 
 

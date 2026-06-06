@@ -806,6 +806,8 @@ int run_train_command(const CliOptions& options)
         config.graph_matcher_no_match_min_distance = options.graph_matcher_no_match_min_distance;
         config.graph_matcher_train_max_attention_layers = options.graph_matcher_train_max_attention_layers;
         config.graph_matcher_train_random_attention_layers = options.graph_matcher_train_random_attention_layers;
+        config.graph_matcher_train_max_attention_work_fraction =
+            options.graph_matcher_train_max_attention_work_fraction;
         config.graph_matcher_train_width_keep_ratio = options.graph_matcher_train_width_keep_ratio;
         config.graph_matcher_prune_ranking_weight = options.graph_matcher_prune_ranking_weight;
         config.graph_matcher_prune_ranking_margin = options.graph_matcher_prune_ranking_margin;
