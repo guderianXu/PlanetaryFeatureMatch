@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from compact_pair_cache import make_compact_pair_payload, save_shared_image
 
 import patch_descriptor_training as pdt

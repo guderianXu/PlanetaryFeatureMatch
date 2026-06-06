@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""PyTorch implementation of the current C++/LibTorch PFM model."""
+"""PyTorch 版 PFM 主模型。
+
+这个文件保留模型结构、checkpoint 读写和 Python/C++ 对齐所需的公共类。
+不要继续把训练 loss、数据读取、报告生成或一次性实验逻辑塞进这里；这些逻辑应该拆到
+`pfm_pytorch_training.py` 的子模块或 `scripts/` 下面。
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,8 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from pfm_model_descriptors import geometry_aware_descriptor_pool, make_xy_grid, normalize_channels_stable
 
 INFERENCE_TEXTURE_BLEND_WEIGHT = 1.0
 
@@ -213,30 +220,8 @@ class DualFPNLite(nn.Module):
         return p2_keypoint, p2_descriptor
 
 
-def normalize_channels_stable(tensor: torch.Tensor) -> torch.Tensor:
-    finite = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
-    scale = finite.detach().abs().amax(dim=1, keepdim=True).clamp_min(1.0)
-    scaled = finite / scale
-    return scaled / scaled.norm(p=2, dim=1, keepdim=True).clamp_min(1.0e-3)
-
-
 def _normalize_channels(tensor: torch.Tensor) -> torch.Tensor:
     return normalize_channels_stable(tensor)
-
-
-def _rotate_feature_map(tensor: torch.Tensor, turns: int) -> torch.Tensor:
-    turns = turns % 4
-    if turns == 0:
-        return tensor
-    return torch.rot90(tensor, turns, dims=(2, 3)).contiguous()
-
-
-def _align_descriptor_orientation_channels(tensor: torch.Tensor, turns: int) -> torch.Tensor:
-    channels = tensor.size(1)
-    if channels < 4 or channels % 4 != 0:
-        return tensor
-    shift = channels // 4
-    return torch.roll(tensor, shifts=-turns * shift, dims=1)
 
 
 class DescriptorResidualBlock(nn.Module):
@@ -299,16 +284,14 @@ def _zero_module(module: nn.Module) -> None:
             parameter.zero_()
 
 
-def _init_concat_identity_projection(module: nn.Conv2d, descriptor_dim: int) -> None:
-    with torch.no_grad():
-        module.weight.zero_()
-        if module.bias is not None:
-            module.bias.zero_()
-        for channel in range(descriptor_dim):
-            module.weight[channel, channel, 0, 0] = 1.0
-
-
 class SparseHead(nn.Module):
+    """稀疏特征头：同时预测关键点、descriptor 和局部几何。
+
+    当前版本已经删除旧的 C4 旋转分支。descriptor 的旋转鲁棒性不再靠 0/90/180/270
+    离散旋转枚举，而是由 `orientation/scale/affine` 预测出的连续局部几何驱动
+    `geometry_aware_descriptor_pool()` 完成。
+    """
+
     def __init__(self, input_channels: int, descriptor_dim: int) -> None:
         super().__init__()
         if input_channels <= 0 or descriptor_dim <= 0:
@@ -390,78 +373,18 @@ class SparseHead(nn.Module):
         descriptor_sum = descriptor_gated + self.descriptor_dilated_context(descriptor_gated)
         heatmap = torch.sigmoid(heatmap_sum)
         descriptors = _normalize_channels(descriptor_sum)
+
+        # 这三个几何头不是给外部直接显示用的，而是给 descriptor canonical pooling 用：
+        # scale 控制采样半径，orientation 给出局部主方向，affine 捕捉斜视/局部剪切。
         scale = torch.exp(torch.clamp(self.scale(geometry_context), min=-2.0, max=2.0))
         orientation = _normalize_channels(self.orientation(geometry_context))
         affine_delta = torch.tanh(self.affine(geometry_context)) * 0.1
         identity = affine_delta.new_tensor([1.0, 0.0, 0.0, 1.0]).view(1, 4, 1, 1)
         affine = identity + affine_delta
+
+        # 用连续几何做 canonical pooling，替代旧 C4 分支，输出仍保持 dense descriptor map。
         descriptors = geometry_aware_descriptor_pool(descriptors, orientation, scale, affine)
         return SparseHeadOutput(heatmap, descriptors, scale, orientation, affine, keypoint_offsets)
-
-
-def make_xy_grid(height: int, width: int, *, device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
-    y, x = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
-    return torch.stack([x.to(dtype), y.to(dtype)], dim=-1)
-
-
-def geometry_aware_descriptor_pool(
-    descriptors: torch.Tensor,
-    orientation: torch.Tensor,
-    scale: torch.Tensor,
-    affine: torch.Tensor,
-    *,
-    radius: float = 0.75,
-) -> torch.Tensor:
-    """Pool dense descriptors on a small canonical grid controlled by predicted geometry."""
-
-    if descriptors.dim() != 4:
-        raise ValueError("descriptors must have shape BxDxHxW")
-    if orientation.shape[:2] != (descriptors.size(0), 2) or orientation.shape[-2:] != descriptors.shape[-2:]:
-        raise ValueError("orientation must have shape Bx2xHxW matching descriptors")
-    if scale.shape[:2] != (descriptors.size(0), 1) or scale.shape[-2:] != descriptors.shape[-2:]:
-        raise ValueError("scale must have shape Bx1xHxW matching descriptors")
-    if affine.shape[:2] != (descriptors.size(0), 4) or affine.shape[-2:] != descriptors.shape[-2:]:
-        raise ValueError("affine must have shape Bx4xHxW matching descriptors")
-    batch, _, height, width = descriptors.shape
-    if height <= 1 or width <= 1:
-        return _normalize_channels(descriptors)
-    base_xy = make_xy_grid(height, width, device=descriptors.device, dtype=descriptors.dtype)
-    base_xy = base_xy.permute(2, 0, 1).unsqueeze(0).expand(batch, 2, height, width)
-    ori = F.normalize(orientation.to(descriptors.dtype), p=2, dim=1, eps=1.0e-6)
-    tangent = ori
-    normal = torch.stack([-ori[:, 1], ori[:, 0]], dim=1)
-    clamped_scale = scale.to(descriptors.dtype).clamp(0.5, 2.0)
-    a00, a01, a10, a11 = [affine[:, index : index + 1].to(descriptors.dtype) for index in range(4)]
-
-    def sample(offset_x: torch.Tensor, offset_y: torch.Tensor) -> torch.Tensor:
-        warped_x = a00 * offset_x + a01 * offset_y
-        warped_y = a10 * offset_x + a11 * offset_y
-        sample_xy = base_xy + torch.cat([warped_x, warped_y], dim=1)
-        grid_x = sample_xy[:, 0] * (2.0 / float(max(1, width - 1))) - 1.0
-        grid_y = sample_xy[:, 1] * (2.0 / float(max(1, height - 1))) - 1.0
-        grid = torch.stack([grid_x, grid_y], dim=-1)
-        return F.grid_sample(descriptors, grid, mode="bilinear", padding_mode="border", align_corners=True)
-
-    step = clamped_scale * float(radius)
-    diagonal_step = step * 0.70710678118
-    zero = torch.zeros_like(step)
-    tangent_x = tangent[:, 0:1]
-    tangent_y = tangent[:, 1:2]
-    normal_x = normal[:, 0:1]
-    normal_y = normal[:, 1:2]
-    offsets = [
-        (zero, zero, 0.30),
-        (tangent_x * step, tangent_y * step, 0.16),
-        (-tangent_x * step, -tangent_y * step, 0.16),
-        (normal_x * step, normal_y * step, 0.09),
-        (-normal_x * step, -normal_y * step, 0.09),
-        ((tangent_x + normal_x) * diagonal_step, (tangent_y + normal_y) * diagonal_step, 0.05),
-        (-(tangent_x + normal_x) * diagonal_step, -(tangent_y + normal_y) * diagonal_step, 0.05),
-        ((tangent_x - normal_x) * diagonal_step, (tangent_y - normal_y) * diagonal_step, 0.05),
-        (-(tangent_x - normal_x) * diagonal_step, -(tangent_y - normal_y) * diagonal_step, 0.05),
-    ]
-    pooled = sum(sample(dx, dy) * weight for dx, dy, weight in offsets)
-    return _normalize_channels(0.45 * descriptors + 0.55 * pooled)
 
 
 def _shifted_feature(feature: torch.Tensor, dy: int, dx: int) -> torch.Tensor:

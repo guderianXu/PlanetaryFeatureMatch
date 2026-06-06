@@ -75,11 +75,11 @@ ctest --test-dir build --output-on-failure
 改 Python 训练、缓存或仿真数据脚本后，优先使用包含 torch 和 cv2 的 `plascan` 环境：
 
 ```bash
-PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python -m unittest python/test_batch_pose_sim_dataset.py
-PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python -m unittest python/test_generate_cross_position_pose_pairs.py
+PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python -m unittest python.tests.test_batch_pose_sim_dataset
+PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python -m unittest python.tests.test_generate_cross_position_pose_pairs
 ```
 
-按改动选择更具体的 `python/test_*.py`。涉及 pair cache 的改动至少跑一次 `scripts/verify_pair_cache_dataset.py` 或对应单测确认 `.pt` 可加载、split 比例和 manifest 一致。
+按改动选择更具体的 `python.tests.test_*`，全量发现测试使用 `python/tests/` 目录。涉及 pair cache 的改动至少跑一次 `scripts/verify_pair_cache_dataset.py` 或对应单测确认 `.pt` 可加载、split 比例和 manifest 一致。
 
 ## 仿真数据生成
 

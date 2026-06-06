@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import rotation_matcher_benchmark as bench
 
 
@@ -310,8 +310,17 @@ class RotationMatcherBenchmarkTest(unittest.TestCase):
 
         extractor = FakeExtractor()
         lightglue = FakeLightGlue()
+        fake_lightglue = types.ModuleType("lightglue")
+        fake_lightglue_utils = types.ModuleType("lightglue.utils")
+        fake_lightglue_utils.numpy_image_to_torch = lambda image: torch.as_tensor(image, dtype=torch.float32).unsqueeze(0)
         matcher = bench.LightGlueSuperPointMatcher(device="cpu", max_keypoints=128, max_matches=2)
-        with mock.patch.object(matcher, "_load", return_value=(extractor, lightglue)):
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "lightglue": fake_lightglue,
+                "lightglue.utils": fake_lightglue_utils,
+            },
+        ), mock.patch.object(matcher, "_load", return_value=(extractor, lightglue)):
             output = matcher.match(np.zeros((8, 9), dtype=np.uint8), np.ones((8, 9), dtype=np.uint8))
 
         self.assertEqual(extractor.seen_shapes, [(1, 8, 9), (1, 8, 9)])

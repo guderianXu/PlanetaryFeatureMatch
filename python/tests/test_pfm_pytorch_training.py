@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pfm_model
 import pfm_pytorch_training as train
 from patch_descriptor_training import SyntheticPair

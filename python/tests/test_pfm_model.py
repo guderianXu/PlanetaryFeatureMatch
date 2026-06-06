@@ -4,11 +4,16 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pfm_model
+import pfm_model_descriptors
 
 
 class PFMModelTest(unittest.TestCase):
+    def test_descriptor_geometry_helpers_live_in_descriptor_module(self):
+        self.assertIs(pfm_model.geometry_aware_descriptor_pool, pfm_model_descriptors.geometry_aware_descriptor_pool)
+        self.assertIs(pfm_model.make_xy_grid, pfm_model_descriptors.make_xy_grid)
+
     def test_backbone_matches_libtorch_feature_pyramid_shapes(self):
         model = pfm_model.Backbone(input_channels=1, base_channels=4)
         features = model(torch.randn(2, 1, 64, 80))
@@ -42,18 +47,12 @@ class PFMModelTest(unittest.TestCase):
 
     def test_sparse_head_no_longer_uses_c4_rotated_branches(self):
         head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16)
-        original = pfm_model._rotate_feature_map
 
-        def fail_if_called(tensor: torch.Tensor, turns: int) -> torch.Tensor:
-            raise AssertionError("SparseHead.forward must not use the old C4 rotated branches")
-
-        pfm_model._rotate_feature_map = fail_if_called
-        try:
-            output = head(torch.randn(1, 8, 16, 20), torch.randn(1, 8, 16, 20))
-        finally:
-            pfm_model._rotate_feature_map = original
+        output = head(torch.randn(1, 8, 16, 20), torch.randn(1, 8, 16, 20))
 
         self.assertEqual(tuple(output.descriptors.shape), (1, 16, 16, 20))
+        self.assertFalse(hasattr(pfm_model, "_rotate_feature_map"))
+        self.assertFalse(hasattr(pfm_model, "_align_descriptor_orientation_channels"))
         self.assertFalse(hasattr(head, "descriptor_branch_quality"))
         self.assertFalse(hasattr(head, "descriptor_rotation_fusion"))
 

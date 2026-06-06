@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "辅助软件" / "数据模拟" / "batch_pose_sim_dataset.py"
 
 
