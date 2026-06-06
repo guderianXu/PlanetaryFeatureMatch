@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""扫描 GraphMatcher 推理阈值组合并生成 HTML 汇总。
+
+这个脚本只做离线评估，不训练模型。典型用途是比较 `fast`、`high_precision`
+以及手动 width-prune / early-stop / fallback 参数对速度、precision 和支持度的影响。
+"""
+
 from __future__ import annotations
 
 import argparse
