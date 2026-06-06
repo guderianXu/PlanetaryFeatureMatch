@@ -381,6 +381,13 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_loss_weight must be non-negative and finite");
     }
+    if (config.graph_matcher_metadata_mode != "full" && config.graph_matcher_metadata_mode != "descriptor_only" &&
+        config.graph_matcher_metadata_mode != "no_xy" && config.graph_matcher_metadata_mode != "no_geometry" &&
+        config.graph_matcher_metadata_mode != "no_quality")
+    {
+        throw std::invalid_argument("graph_matcher_metadata_mode must be one of full, descriptor_only, no_xy, "
+                                    "no_geometry, no_quality");
+    }
     if (!std::isfinite(config.graph_matcher_accept_weight) || config.graph_matcher_accept_weight < 0.0)
     {
         throw std::invalid_argument("graph_matcher_accept_weight must be non-negative and finite");
@@ -4498,6 +4505,48 @@ torch::Tensor make_python_compare_graph_metadata(const torch::Tensor& points, in
         .contiguous();
 }
 
+torch::Tensor apply_python_compare_graph_metadata_mode(const torch::Tensor& metadata, const std::string& metadata_mode)
+{
+    using torch::indexing::Slice;
+
+    auto adjusted = metadata.clone();
+    if (metadata_mode == "full")
+    {
+        return adjusted;
+    }
+    if (metadata_mode == "descriptor_only")
+    {
+        return adjusted.zero_();
+    }
+    if (metadata_mode == "no_xy")
+    {
+        const auto end = std::min<int64_t>(adjusted.size(1), 4);
+        if (end > 0)
+        {
+            adjusted.index_put_({Slice(), Slice(0, end)}, 0.0);
+        }
+        return adjusted;
+    }
+    if (metadata_mode == "no_geometry")
+    {
+        if (adjusted.size(1) > 5)
+        {
+            adjusted.index_put_({Slice(), Slice(5, std::min<int64_t>(adjusted.size(1), 12))}, 0.0);
+        }
+        return adjusted;
+    }
+    if (metadata_mode == "no_quality")
+    {
+        if (adjusted.size(1) > 12)
+        {
+            adjusted.index_put_({Slice(), Slice(12, adjusted.size(1))}, 0.0);
+        }
+        return adjusted;
+    }
+    throw std::invalid_argument("graph_matcher_metadata_mode must be one of full, descriptor_only, no_xy, "
+                                "no_geometry, no_quality");
+}
+
 torch::Tensor binary_cross_entropy_with_logits_mean(const torch::Tensor& logits, const torch::Tensor& targets)
 {
     auto zeros = torch::zeros_like(logits);
@@ -4688,7 +4737,8 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
                                              int64_t positive_count_override = -1,
                                              double width_keep_ratio = 1.0,
                                              int64_t* selected_positive_count = nullptr,
-                                             double max_attention_work_fraction = 1.0)
+                                             double max_attention_work_fraction = 1.0,
+                                             const std::string& metadata_mode = "full")
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
@@ -4770,10 +4820,14 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
         *selected_positive_count = count;
     }
     auto meta_a =
-        make_python_compare_graph_metadata(active_points_a.narrow(0, 0, active_desc_a.size(0)), meta_dim)
+        apply_python_compare_graph_metadata_mode(
+            make_python_compare_graph_metadata(active_points_a.narrow(0, 0, active_desc_a.size(0)), meta_dim),
+            metadata_mode)
             .to(active_desc_a.device());
     auto meta_b =
-        make_python_compare_graph_metadata(active_points_b.narrow(0, 0, active_desc_b.size(0)), meta_dim)
+        apply_python_compare_graph_metadata_mode(
+            make_python_compare_graph_metadata(active_points_b.narrow(0, 0, active_desc_b.size(0)), meta_dim),
+            metadata_mode)
             .to(active_desc_b.device());
     const auto attention_budget = resolve_python_compare_graph_attention_budget(
         max_attention_layers, random_attention_layers, active_desc_a.device(), &active_generator);
@@ -4886,7 +4940,7 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 config.graph_matcher_stop_confidence_margin, train_max_attention_layers,
                 config.graph_matcher_train_random_attention_layers, &generator, sample.points_a.size(0),
                 config.graph_matcher_train_width_keep_ratio, nullptr,
-                config.graph_matcher_train_max_attention_work_fraction));
+                config.graph_matcher_train_max_attention_work_fraction, config.graph_matcher_metadata_mode));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6869,6 +6923,13 @@ torch::Tensor make_python_compare_graph_loss_for_test(v21::PfmV21GraphMatcherImp
 {
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, accept_weight,
                                           8, prune_ranking_weight, prune_ranking_margin, stop_confidence_weight, 0.5);
+}
+
+torch::Tensor make_python_compare_graph_metadata_for_test(const torch::Tensor& points, int64_t meta_dim,
+                                                          const std::string& metadata_mode)
+{
+    return apply_python_compare_graph_metadata_mode(make_python_compare_graph_metadata(points, meta_dim),
+                                                    metadata_mode);
 }
 
 torch::Tensor make_python_compare_graph_loss_with_attention_budget_for_test(

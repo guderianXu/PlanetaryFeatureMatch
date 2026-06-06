@@ -144,6 +144,10 @@ std::unique_ptr<CLI::App> build_cli_app(CliOptions& options)
                       "Python-compatible descriptor synthetic loss weight");
     train->add_option("--graph-matcher-loss-weight", options.graph_matcher_loss_weight,
                       "Python-compatible graph matcher loss weight");
+    train
+        ->add_option("--graph-matcher-metadata-mode", options.graph_matcher_metadata_mode,
+                     "GraphMatcher metadata mode: full, descriptor_only, no_xy, no_geometry, or no_quality")
+        ->check(CLI::IsMember({"full", "descriptor_only", "no_xy", "no_geometry", "no_quality"}));
     train->add_option("--graph-matcher-accept-weight", options.graph_matcher_accept_weight,
                       "Python-compatible LightGlue-style graph accept loss weight")
         ->check(CLI::NonNegativeNumber);

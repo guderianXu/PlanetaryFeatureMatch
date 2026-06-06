@@ -43,6 +43,7 @@ class TrainingRequest:
     pair_cache_limit: int = 0
     synthetic_loss_weight: float = 0.1
     graph_matcher_loss_weight: float = 1.0
+    graph_matcher_metadata_mode: str = "full"
     graph_matcher_no_match_points: int = 0
     graph_matcher_no_match_weight: float = 0.0
     graph_matcher_no_match_min_distance: float = 4.0
@@ -107,6 +108,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>resize={request.resize}</li>
 <li>samples_per_pair={request.samples_per_pair}</li>
 <li>learning_rate={request.learning_rate}</li>
+<li>graph_matcher_metadata_mode={html.escape(request.graph_matcher_metadata_mode)}</li>
 <li>graph_matcher_no_match_points={request.graph_matcher_no_match_points}</li>
 <li>graph_matcher_no_match_weight={request.graph_matcher_no_match_weight}</li>
 <li>graph_matcher_no_match_min_distance={request.graph_matcher_no_match_min_distance}</li>
@@ -167,6 +169,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         "0.0",
         "--graph-matcher-loss-weight",
         str(request.graph_matcher_loss_weight),
+        "--graph-matcher-metadata-mode",
+        request.graph_matcher_metadata_mode,
         "--graph-matcher-no-match-points",
         str(request.graph_matcher_no_match_points),
         "--graph-matcher-no-match-weight",
@@ -284,6 +288,8 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.synthetic_loss_weight),
         "--graph-matcher-loss-weight",
         str(request.graph_matcher_loss_weight),
+        "--graph-matcher-metadata-mode",
+        request.graph_matcher_metadata_mode,
         "--graph-matcher-no-match-points",
         str(request.graph_matcher_no_match_points),
         "--graph-matcher-no-match-min-distance",
@@ -361,6 +367,9 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_max_attention_work_fraction must be in [0, 1]")
     if request.graph_width_prune_keep_ratio < 0.0 or request.graph_width_prune_keep_ratio > 1.0:
         raise ValueError("graph_width_prune_keep_ratio must be in [0, 1]")
+    valid_metadata_modes = {"full", "descriptor_only", "no_xy", "no_geometry", "no_quality"}
+    if request.graph_matcher_metadata_mode not in valid_metadata_modes:
+        raise ValueError("graph_matcher_metadata_mode must be one of full, descriptor_only, no_xy, no_geometry, no_quality")
     if request.graph_matcher_no_match_points < 0:
         raise ValueError("graph_matcher_no_match_points must be nonnegative")
     if request.graph_matcher_no_match_weight < 0.0:

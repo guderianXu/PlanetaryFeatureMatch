@@ -49,6 +49,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_min_accept_probability"', train_html)
                 self.assertIn('name="graph_max_attention_work_fraction"', train_html)
                 self.assertIn('name="graph_width_prune_keep_ratio"', train_html)
+                self.assertIn('name="graph_matcher_metadata_mode"', train_html)
                 self.assertIn('name="graph_matcher_no_match_points"', train_html)
                 self.assertIn('name="graph_matcher_no_match_weight"', train_html)
                 self.assertIn('name="graph_matcher_no_match_min_distance"', train_html)
@@ -120,6 +121,7 @@ class DashboardAppTest(unittest.TestCase):
                     "cache_dirs": str(cache),
                     "graph_max_attention_work_fraction": "0.55",
                     "graph_width_prune_keep_ratio": "0.4",
+                    "graph_matcher_metadata_mode": "no_xy",
                     "graph_matcher_no_match_points": "24",
                     "graph_matcher_no_match_weight": "0.1",
                     "graph_matcher_no_match_min_distance": "6.0",
@@ -136,6 +138,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--training-profile full", script)
                 self.assertIn("--train-backbone", script)
                 self.assertIn("--train-graph-matcher", script)
+                self.assertIn("--graph-matcher-metadata-mode no_xy", script)
                 self.assertIn("--graph-matcher-no-match-points 24", script)
                 self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
                 self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
@@ -143,6 +146,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
                 self.assertIn("--graph-matcher-train-width-keep-ratio 0.5", script)
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
+                self.assertIn("graph_matcher_metadata_mode=no_xy", report)
                 self.assertIn("graph_matcher_no_match_points=24", report)
                 self.assertIn("graph_matcher_train_max_attention_layers=2", report)
                 self.assertIn("graph_matcher_train_random_attention_layers=True", report)

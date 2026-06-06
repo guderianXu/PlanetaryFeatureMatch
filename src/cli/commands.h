@@ -80,6 +80,7 @@ struct CliOptions
     int samples_per_pair = 512;
     double synthetic_loss_weight = 0.1;
     double graph_matcher_loss_weight = 1.0;
+    std::string graph_matcher_metadata_mode = "full";
     double graph_matcher_accept_weight = 0.2;
     int graph_matcher_accept_negative_topk = 8;
     int graph_matcher_no_match_points = 0;

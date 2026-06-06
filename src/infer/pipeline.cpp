@@ -800,6 +800,7 @@ int run_train_command(const CliOptions& options)
         config.samples_per_pair = options.samples_per_pair;
         config.synthetic_loss_weight = options.synthetic_loss_weight;
         config.graph_matcher_loss_weight = options.graph_matcher_loss_weight;
+        config.graph_matcher_metadata_mode = options.graph_matcher_metadata_mode;
         config.graph_matcher_accept_weight = options.graph_matcher_accept_weight;
         config.graph_matcher_accept_negative_topk = options.graph_matcher_accept_negative_topk;
         config.graph_matcher_no_match_points = options.graph_matcher_no_match_points;

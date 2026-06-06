@@ -19,6 +19,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 resize=512,
                 training_crop_size=512,
                 learning_rate=3.0e-5,
+                graph_matcher_metadata_mode="no_xy",
                 graph_matcher_no_match_points=32,
                 graph_matcher_no_match_weight=0.1,
                 graph_matcher_no_match_min_distance=5.0,
@@ -44,6 +45,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--training-crop-size 512", script)
         self.assertIn("--training-max-image-size 512", script)
         self.assertIn("--learning-rate 3e-05", script)
+        self.assertIn("--graph-matcher-metadata-mode no_xy", script)
         self.assertIn("--graph-matcher-no-match-points 32", script)
         self.assertIn("--graph-matcher-no-match-weight 0.1", script)
         self.assertIn("--graph-matcher-no-match-min-distance 5.0", script)
@@ -63,6 +65,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--report-graph-width-prune-keep-ratio 0.4", script)
         self.assertIn("graph_max_attention_work_fraction=0.55", run_html)
         self.assertIn("graph_width_prune_keep_ratio=0.4", run_html)
+        self.assertIn("graph_matcher_metadata_mode=no_xy", run_html)
         self.assertIn("graph_matcher_no_match_points=32", run_html)
         self.assertIn("graph_matcher_no_match_weight=0.1", run_html)
         self.assertIn("graph_matcher_train_max_attention_layers=2", run_html)
@@ -99,6 +102,7 @@ class DashboardCommandsTest(unittest.TestCase):
                 device="cuda",
                 full_v21=True,
                 memory_cache_items=16,
+                graph_matcher_metadata_mode="no_xy",
                 graph_matcher_no_match_points=24,
                 graph_matcher_no_match_min_distance=6.0,
                 graph_matcher_train_max_attention_layers=2,
@@ -120,6 +124,7 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--memory-cache-items 16", script)
         self.assertIn("--training-crop-size 512", script)
         self.assertIn("--weight-decay 0.0001", script)
+        self.assertIn("--graph-matcher-metadata-mode no_xy", script)
         self.assertIn("--graph-matcher-no-match-points 24", script)
         self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
         self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
@@ -210,6 +215,19 @@ class DashboardCommandsTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "graph_matcher_train_width_keep_ratio must be in"):
+                create_training_runs(request)
+
+    def test_graph_matcher_metadata_mode_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+                graph_matcher_metadata_mode="bad",
+            )
+
+            with self.assertRaisesRegex(ValueError, "graph_matcher_metadata_mode must be one of"):
                 create_training_runs(request)
 
     def test_graph_matcher_train_attention_work_fraction_is_validated(self) -> None:

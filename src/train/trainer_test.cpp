@@ -214,6 +214,8 @@ torch::Tensor make_python_compare_graph_loss_for_test(pfm::v21::PfmV21GraphMatch
                                                       int64_t meta_dim, double accept_weight,
                                                       double prune_ranking_weight, double prune_ranking_margin,
                                                       double stop_confidence_weight);
+torch::Tensor make_python_compare_graph_metadata_for_test(const torch::Tensor& points, int64_t meta_dim,
+                                                          const std::string& metadata_mode);
 torch::Tensor make_python_compare_graph_loss_with_attention_budget_for_test(
     pfm::v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
     const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, int64_t max_attention_layers);
@@ -432,6 +434,7 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE(config.graph_attention_layers == 6);
     PFM_REQUIRE(config.graph_keypoint_meta_dim == 16);
     PFM_REQUIRE(config.training_profile == "full");
+    PFM_REQUIRE(config.graph_matcher_metadata_mode == "full");
     PFM_REQUIRE_CLOSE(config.graph_matcher_accept_weight, 0.2, 1.0e-12);
     PFM_REQUIRE(config.graph_matcher_no_match_points == 0);
     PFM_REQUIRE_CLOSE(config.graph_matcher_no_match_min_distance, 4.0, 1.0e-12);
@@ -708,6 +711,10 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument()
     auto invalid_attention_budget = config;
     invalid_attention_budget.graph_matcher_train_max_attention_layers = -1;
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_attention_budget));
+
+    auto invalid_metadata_mode = config;
+    invalid_metadata_mode.graph_matcher_metadata_mode = "bad_mode";
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_metadata_mode));
 
     auto invalid_attention_work_budget = config;
     invalid_attention_work_budget.graph_matcher_train_max_attention_work_fraction = 1.5;
@@ -1905,6 +1912,34 @@ static void trainer_python_compare_graph_loss_respects_attention_work_budget()
 
     PFM_REQUIRE(torch::isfinite(loss).all().item<bool>());
     PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
+}
+
+static void trainer_python_compare_graph_metadata_mode_matches_python_masks()
+{
+    auto points = torch::tensor({{0.0F, 0.0F}, {2.0F, 1.0F}, {4.0F, 3.0F}}, torch::kFloat32);
+
+    const auto full = pfm::testing::make_python_compare_graph_metadata_for_test(points, 16, "full");
+    const auto descriptor_only =
+        pfm::testing::make_python_compare_graph_metadata_for_test(points, 16, "descriptor_only");
+    const auto no_xy = pfm::testing::make_python_compare_graph_metadata_for_test(points, 16, "no_xy");
+    const auto no_geometry = pfm::testing::make_python_compare_graph_metadata_for_test(points, 16, "no_geometry");
+    const auto no_quality = pfm::testing::make_python_compare_graph_metadata_for_test(points, 16, "no_quality");
+
+    PFM_REQUIRE(torch::allclose(descriptor_only, torch::zeros_like(descriptor_only)));
+    PFM_REQUIRE(torch::allclose(no_xy.index({torch::indexing::Slice(), torch::indexing::Slice(0, 4)}),
+                                torch::zeros({points.size(0), 4}, no_xy.options())));
+    PFM_REQUIRE(torch::allclose(no_xy.index({torch::indexing::Slice(), torch::indexing::Slice(4, 16)}),
+                                full.index({torch::indexing::Slice(), torch::indexing::Slice(4, 16)})));
+    PFM_REQUIRE(torch::allclose(no_geometry.index({torch::indexing::Slice(), torch::indexing::Slice(0, 5)}),
+                                full.index({torch::indexing::Slice(), torch::indexing::Slice(0, 5)})));
+    PFM_REQUIRE(torch::allclose(no_geometry.index({torch::indexing::Slice(), torch::indexing::Slice(5, 12)}),
+                                torch::zeros({points.size(0), 7}, no_geometry.options())));
+    PFM_REQUIRE(torch::allclose(no_geometry.index({torch::indexing::Slice(), torch::indexing::Slice(12, 16)}),
+                                full.index({torch::indexing::Slice(), torch::indexing::Slice(12, 16)})));
+    PFM_REQUIRE(torch::allclose(no_quality.index({torch::indexing::Slice(), torch::indexing::Slice(0, 12)}),
+                                full.index({torch::indexing::Slice(), torch::indexing::Slice(0, 12)})));
+    PFM_REQUIRE(torch::allclose(no_quality.index({torch::indexing::Slice(), torch::indexing::Slice(12, 16)}),
+                                torch::zeros({points.size(0), 4}, no_quality.options())));
 }
 
 static void trainer_python_compare_graph_loss_can_train_with_width_dropout()
@@ -3459,6 +3494,8 @@ void register_trainer_tests()
                   trainer_python_compare_graph_loss_can_randomize_attention_layer_budget);
     register_test("trainer python compare graph loss respects attention work budget",
                   trainer_python_compare_graph_loss_respects_attention_work_budget);
+    register_test("trainer python compare graph metadata mode matches python masks",
+                  trainer_python_compare_graph_metadata_mode_matches_python_masks);
     register_test("trainer python compare graph loss can train with width dropout",
                   trainer_python_compare_graph_loss_can_train_with_width_dropout);
     register_test("trainer python compare graph loss can train prune ranking accept head",
