@@ -402,6 +402,11 @@ void validate_config(const TrainConfig& config)
     {
         throw std::invalid_argument("graph_matcher_train_max_attention_layers must be non-negative");
     }
+    if (!std::isfinite(config.graph_matcher_train_width_keep_ratio) ||
+        config.graph_matcher_train_width_keep_ratio <= 0.0 || config.graph_matcher_train_width_keep_ratio > 1.0)
+    {
+        throw std::invalid_argument("graph_matcher_train_width_keep_ratio must be in (0, 1]");
+    }
     if (!std::isfinite(config.graph_matcher_prune_ranking_weight) ||
         config.graph_matcher_prune_ranking_weight < 0.0)
     {
@@ -4673,24 +4678,95 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
                                              double stop_confidence_margin = 0.5,
                                              int64_t max_attention_layers = 0,
                                              bool random_attention_layers = false,
-                                             std::optional<at::Generator>* generator = nullptr)
+                                             std::optional<at::Generator>* generator = nullptr,
+                                             int64_t positive_count_override = -1,
+                                             double width_keep_ratio = 1.0,
+                                             int64_t* selected_positive_count = nullptr)
 {
     if (desc_a.size(0) == 0 || desc_b.size(0) == 0)
     {
+        if (selected_positive_count != nullptr)
+        {
+            *selected_positive_count = 0;
+        }
         return torch::zeros({}, desc_a.options());
+    }
+    if (!std::isfinite(width_keep_ratio) || width_keep_ratio <= 0.0 || width_keep_ratio > 1.0)
+    {
+        throw std::invalid_argument("graph matcher width_keep_ratio must be in (0, 1]");
     }
     if (points_a.size(0) < desc_a.size(0) || points_b.size(0) < desc_b.size(0))
     {
         throw std::invalid_argument("python compare graph loss points must cover all descriptors");
     }
-    const auto count = std::min<int64_t>(desc_a.size(0), desc_b.size(0));
+    const auto inferred_positive_count = std::min<int64_t>(desc_a.size(0), desc_b.size(0));
+    auto count = positive_count_override >= 0
+                     ? std::min<int64_t>(positive_count_override, inferred_positive_count)
+                     : inferred_positive_count;
+    if (count <= 0)
+    {
+        if (selected_positive_count != nullptr)
+        {
+            *selected_positive_count = 0;
+        }
+        return torch::zeros({}, desc_a.options());
+    }
+    std::optional<at::Generator> fallback_generator;
+    auto& active_generator = generator == nullptr ? fallback_generator : *generator;
+    auto active_desc_a = desc_a;
+    auto active_desc_b = desc_b;
+    auto active_points_a = points_a.narrow(0, 0, desc_a.size(0));
+    auto active_points_b = points_b.narrow(0, 0, desc_b.size(0));
+    if (width_keep_ratio < 1.0 && count > 1)
+    {
+        const auto requested_keep =
+            static_cast<int64_t>(std::ceil(static_cast<double>(count) * width_keep_ratio));
+        const auto keep_count = std::max<int64_t>(1, std::min<int64_t>(count, requested_keep));
+        if (keep_count < count)
+        {
+            auto index_options = torch::TensorOptions().dtype(torch::kLong).device(desc_a.device());
+            auto keep_indices =
+                std::get<0>(randperm_with_training_generator(count, index_options, active_generator)
+                                .narrow(0, 0, keep_count)
+                                .sort());
+            auto keep_indices_b = keep_indices.to(desc_b.device());
+            auto keep_points_a = keep_indices.to(points_a.device());
+            auto keep_points_b = keep_indices.to(points_b.device());
+            auto positive_desc_a = desc_a.narrow(0, 0, count).index_select(0, keep_indices);
+            auto positive_desc_b = desc_b.narrow(0, 0, count).index_select(0, keep_indices_b);
+            auto positive_points_a = points_a.narrow(0, 0, count).index_select(0, keep_points_a);
+            auto positive_points_b = points_b.narrow(0, 0, count).index_select(0, keep_points_b);
+            active_desc_a = desc_a.size(0) > count
+                                ? torch::cat({positive_desc_a, desc_a.narrow(0, count, desc_a.size(0) - count)}, 0)
+                                : positive_desc_a;
+            active_desc_b = desc_b.size(0) > count
+                                ? torch::cat({positive_desc_b, desc_b.narrow(0, count, desc_b.size(0) - count)}, 0)
+                                : positive_desc_b;
+            active_points_a =
+                points_a.size(0) > count
+                    ? torch::cat({positive_points_a, points_a.narrow(0, count, points_a.size(0) - count)}, 0)
+                    : positive_points_a;
+            active_points_b =
+                points_b.size(0) > count
+                    ? torch::cat({positive_points_b, points_b.narrow(0, count, points_b.size(0) - count)}, 0)
+                    : positive_points_b;
+            count = keep_count;
+        }
+    }
+    if (selected_positive_count != nullptr)
+    {
+        *selected_positive_count = count;
+    }
     auto meta_a =
-        make_python_compare_graph_metadata(points_a.narrow(0, 0, desc_a.size(0)), meta_dim).to(desc_a.device());
+        make_python_compare_graph_metadata(active_points_a.narrow(0, 0, active_desc_a.size(0)), meta_dim)
+            .to(active_desc_a.device());
     auto meta_b =
-        make_python_compare_graph_metadata(points_b.narrow(0, 0, desc_b.size(0)), meta_dim).to(desc_b.device());
+        make_python_compare_graph_metadata(active_points_b.narrow(0, 0, active_desc_b.size(0)), meta_dim)
+            .to(active_desc_b.device());
     const auto attention_budget = resolve_python_compare_graph_attention_budget(
-        max_attention_layers, random_attention_layers, desc_a.device(), generator);
-    auto output = graph_matcher.forward(desc_a, meta_a, desc_b, meta_b, false, -1.0, -1.0, attention_budget);
+        max_attention_layers, random_attention_layers, active_desc_a.device(), &active_generator);
+    auto output =
+        graph_matcher.forward(active_desc_a, meta_a, active_desc_b, meta_b, false, -1.0, -1.0, attention_budget);
     auto targets = torch::arange(count, torch::TensorOptions().dtype(torch::kLong).device(output.logits.device()));
     auto row_loss = torch::nn::functional::cross_entropy(output.logits.narrow(0, 0, count), targets);
     auto col_logits =
@@ -4700,7 +4776,8 @@ torch::Tensor make_python_compare_graph_loss(GraphMatcherT& graph_matcher, const
     if (accept_weight > 0.0)
     {
         loss = loss + static_cast<float>(accept_weight) *
-                          make_python_compare_graph_acceptance_loss(output, desc_a, desc_b, count, accept_negative_topk);
+                          make_python_compare_graph_acceptance_loss(output, active_desc_a, active_desc_b, count,
+                                                                    accept_negative_topk);
     }
     if (prune_ranking_weight > 0.0)
     {
@@ -4795,7 +4872,8 @@ TrainingLossComponents make_python_compare_training_loss(TrainModules& modules, 
                 config.graph_matcher_accept_negative_topk, config.graph_matcher_prune_ranking_weight,
                 config.graph_matcher_prune_ranking_margin, config.graph_matcher_stop_confidence_weight,
                 config.graph_matcher_stop_confidence_margin, train_max_attention_layers,
-                config.graph_matcher_train_random_attention_layers, &generator));
+                config.graph_matcher_train_random_attention_layers, &generator, sample.points_a.size(0),
+                config.graph_matcher_train_width_keep_ratio));
         }
     }
     if (descriptor_losses.empty() && graph_losses.empty())
@@ -6796,6 +6874,19 @@ torch::Tensor make_python_compare_graph_loss_with_random_attention_budget_for_te
     auto generator = make_training_random_generator(desc_a.device(), seed);
     return make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8, 0.0,
                                           0.25, 0.0, 0.5, max_attention_layers, true, &generator);
+}
+
+std::pair<torch::Tensor, int64_t> make_python_compare_graph_loss_with_width_keep_ratio_for_test(
+    v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, double width_keep_ratio,
+    uint64_t seed)
+{
+    auto generator = make_training_random_generator(desc_a.device(), seed);
+    int64_t selected_positive_count = 0;
+    auto loss = make_python_compare_graph_loss(graph_matcher, desc_a, desc_b, points_a, points_b, meta_dim, 0.0, 8,
+                                               0.0, 0.25, 0.0, 0.5, 0, false, &generator, -1, width_keep_ratio,
+                                               &selected_positive_count);
+    return {loss, selected_positive_count};
 }
 
 } // namespace testing

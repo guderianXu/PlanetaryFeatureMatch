@@ -734,6 +734,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       <label>不可匹配最小距离 <input type="number" name="graph_matcher_no_match_min_distance" value="4" min="0" step="0.5"></label>
       <label>训练注意力层上限 <input type="number" name="graph_matcher_train_max_attention_layers" value="0" min="0"></label>
       <label><input type="checkbox" name="graph_matcher_train_random_attention_layers"> 随机训练注意力层</label>
+      <label>训练宽度保留比例 <input type="number" name="graph_matcher_train_width_keep_ratio" value="1" min="0.05" max="1" step="0.05"></label>
       <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
       <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
     </div>
@@ -958,6 +959,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_matcher_no_match_min_distance=float(value("graph_matcher_no_match_min_distance", "4")),
             graph_matcher_train_max_attention_layers=int(value("graph_matcher_train_max_attention_layers", "0")),
             graph_matcher_train_random_attention_layers=random_attention_layers,
+            graph_matcher_train_width_keep_ratio=float(value("graph_matcher_train_width_keep_ratio", "1")),
             graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
             graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
         )

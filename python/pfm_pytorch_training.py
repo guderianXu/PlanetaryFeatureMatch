@@ -42,6 +42,7 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
     "graph_matcher_executed_attention_layers",
+    "graph_matcher_positive_pairs",
 )
 
 
@@ -1387,6 +1388,7 @@ def graph_matcher_correspondence_loss(
     semi_dense_min_score: float = 0.0,
     max_attention_layers: int = 0,
     random_attention_layers: bool = False,
+    width_keep_ratio: float = 1.0,
     generator: torch.Generator | None = None,
     return_components: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1400,6 +1402,7 @@ def graph_matcher_correspondence_loss(
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
         executed_attention_layers: torch.Tensor,
+        positive_pairs: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {
             "graph_matcher_total_loss": total_loss,
@@ -1411,16 +1414,28 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
             "graph_matcher_executed_attention_layers": executed_attention_layers,
+            "graph_matcher_positive_pairs": positive_pairs,
         }
 
+    if not math.isfinite(float(width_keep_ratio)) or width_keep_ratio <= 0.0 or width_keep_ratio > 1.0:
+        raise ValueError("width_keep_ratio must be in (0, 1]")
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
     points_b_xy = points_b_xy[:count]
+    if width_keep_ratio < 1.0 and count > 1:
+        keep_count = max(1, min(count, int(math.ceil(float(count) * float(width_keep_ratio)))))
+        if keep_count < count:
+            keep_indices = torch.randperm(count, device=points_a_xy.device, generator=generator)[
+                :keep_count
+            ].sort().values
+            points_a_xy = points_a_xy.index_select(0, keep_indices)
+            points_b_xy = points_b_xy.index_select(0, keep_indices)
+            count = keep_count
     positive_points_a_xy = points_a_xy
     positive_points_b_xy = points_b_xy
     desc_a = normalize_descriptor_batch(sample_descriptors(descriptors_a, points_a_xy))
@@ -1583,6 +1598,7 @@ def graph_matcher_correspondence_loss(
         loss = loss + float(hard_negative_dustbin_weight) * hard_negative_dustbin_loss
     if return_components:
         executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
+        positive_pairs = output.logits.new_tensor(float(count))
         return loss, components(
             loss,
             match_ce_loss,
@@ -1593,6 +1609,7 @@ def graph_matcher_correspondence_loss(
             raw_preservation_loss,
             hard_negative_dustbin_loss,
             executed_attention_layers,
+            positive_pairs,
         )
     return loss
 
@@ -2174,6 +2191,7 @@ def train_step(
     graph_matcher_semi_dense_min_score: float = 0.0,
     graph_matcher_train_max_attention_layers: int = 0,
     graph_matcher_train_random_attention_layers: bool = False,
+    graph_matcher_train_width_keep_ratio: float = 1.0,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
@@ -2324,6 +2342,7 @@ def train_step(
                             semi_dense_min_score=graph_matcher_semi_dense_min_score,
                             max_attention_layers=graph_matcher_train_max_attention_layers,
                             random_attention_layers=graph_matcher_train_random_attention_layers,
+                            width_keep_ratio=graph_matcher_train_width_keep_ratio,
                             generator=generator,
                             return_components=True,
                         )
@@ -3222,6 +3241,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-no-match-min-distance", type=float, default=4.0)
     parser.add_argument("--graph-matcher-train-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
+    parser.add_argument("--graph-matcher-train-width-keep-ratio", type=float, default=1.0)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
@@ -3325,6 +3345,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-no-match-min-distance must be nonnegative")
     if args.graph_matcher_train_max_attention_layers < 0:
         parser.error("--graph-matcher-train-max-attention-layers must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_train_width_keep_ratio))
+        or args.graph_matcher_train_width_keep_ratio <= 0.0
+        or args.graph_matcher_train_width_keep_ratio > 1.0
+    ):
+        parser.error("--graph-matcher-train-width-keep-ratio must be in (0, 1]")
     if args.graph_matcher_accept_weight < 0.0:
         parser.error("--graph-matcher-accept-weight must be nonnegative")
     if args.graph_matcher_accept_negative_topk < 0:
@@ -3854,6 +3880,7 @@ def main() -> int:
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
                 graph_matcher_train_max_attention_layers=args.graph_matcher_train_max_attention_layers,
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
+                graph_matcher_train_width_keep_ratio=args.graph_matcher_train_width_keep_ratio,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
@@ -3889,6 +3916,9 @@ def main() -> int:
                     "graph_matcher_train_random_attention_layers": int(
                         bool(args.graph_matcher_train_random_attention_layers and args.train_graph_matcher)
                     ),
+                    "graph_matcher_train_width_keep_ratio": args.graph_matcher_train_width_keep_ratio
+                    if args.train_graph_matcher
+                    else 1.0,
                     **metrics,
                 }
             )

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -220,6 +221,10 @@ torch::Tensor make_python_compare_graph_loss_with_random_attention_budget_for_te
     pfm::v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
     const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, int64_t max_attention_layers,
     uint64_t seed);
+std::pair<torch::Tensor, int64_t> make_python_compare_graph_loss_with_width_keep_ratio_for_test(
+    pfm::v21::PfmV21GraphMatcherImpl& graph_matcher, const torch::Tensor& desc_a, const torch::Tensor& desc_b,
+    const torch::Tensor& points_a, const torch::Tensor& points_b, int64_t meta_dim, double width_keep_ratio,
+    uint64_t seed);
 
 } // namespace pfm::testing
 
@@ -428,6 +433,7 @@ static void trainer_default_config_uses_larger_model_settings()
     PFM_REQUIRE_CLOSE(config.graph_matcher_no_match_min_distance, 4.0, 1.0e-12);
     PFM_REQUIRE(config.graph_matcher_train_max_attention_layers == 0);
     PFM_REQUIRE(!config.graph_matcher_train_random_attention_layers);
+    PFM_REQUIRE_CLOSE(config.graph_matcher_train_width_keep_ratio, 1.0, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_weight, 0.1, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_prune_ranking_margin, 0.25, 1.0e-12);
     PFM_REQUIRE_CLOSE(config.graph_matcher_stop_confidence_weight, 0.05, 1.0e-12);
@@ -697,6 +703,10 @@ static void trainer_invalid_numeric_parameters_throw_invalid_argument()
     auto invalid_attention_budget = config;
     invalid_attention_budget.graph_matcher_train_max_attention_layers = -1;
     PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_attention_budget));
+
+    auto invalid_width_keep = config;
+    invalid_width_keep.graph_matcher_train_width_keep_ratio = 0.0;
+    PFM_REQUIRE_INVALID_ARG(pfm::train_model(invalid_width_keep));
 
     auto invalid_training_profile = config;
     invalid_training_profile.training_profile = "wide-open";
@@ -1870,6 +1880,24 @@ static void trainer_python_compare_graph_loss_can_randomize_attention_layer_budg
 
     PFM_REQUIRE(torch::isfinite(loss).all().item<bool>());
     PFM_REQUIRE(matcher->lastExecutedAttentionLayers() == 1);
+}
+
+static void trainer_python_compare_graph_loss_can_train_with_width_dropout()
+{
+    auto matcher = pfm::v21::PfmV21GraphMatcher(8, 16, 1, 16, 1);
+    matcher->train();
+
+    auto descriptors_a = torch::eye(6, 8, torch::kFloat32);
+    auto descriptors_b = descriptors_a.clone();
+    auto points =
+        torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}, {2.0F, 0.0F}, {3.0F, 0.0F}, {0.0F, 1.0F}, {1.0F, 1.0F}},
+                      torch::kFloat32);
+
+    const auto result = pfm::testing::make_python_compare_graph_loss_with_width_keep_ratio_for_test(
+        *matcher, descriptors_a, descriptors_b, points, points, 16, 0.5, 20260606);
+
+    PFM_REQUIRE(torch::isfinite(result.first).all().item<bool>());
+    PFM_REQUIRE(result.second == 3);
 }
 
 static void trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head()
@@ -3404,6 +3432,8 @@ void register_trainer_tests()
                   trainer_python_compare_graph_loss_respects_attention_layer_budget);
     register_test("trainer python compare graph loss can randomize attention layer budget",
                   trainer_python_compare_graph_loss_can_randomize_attention_layer_budget);
+    register_test("trainer python compare graph loss can train with width dropout",
+                  trainer_python_compare_graph_loss_can_train_with_width_dropout);
     register_test("trainer python compare graph loss can train prune ranking accept head",
                   trainer_python_compare_graph_loss_can_train_prune_ranking_accept_head);
     register_test("trainer python compare graph loss can train stop confidence score path",
