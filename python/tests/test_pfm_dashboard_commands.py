@@ -113,6 +113,28 @@ class DashboardCommandsTest(unittest.TestCase):
         self.assertIn("--report-graph-width-prune-min-score 0.5", script)
         self.assertIn("--report-graph-early-stop-min-confidence 0.85", script)
 
+    def test_default_python_training_run_enables_rejection_training(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            request = TrainingRequest(
+                experiment_name="exp",
+                backend="python",
+                cache_dirs=["/cache/train"],
+                output_root=Path(temp),
+            )
+
+            runs = create_training_runs(request)
+            run_html = runs[0].html_path.read_text(encoding="utf-8")
+
+        script = runs[0].script_text
+        self.assertIn("--graph-matcher-no-match-points 64", script)
+        self.assertIn("--graph-matcher-no-match-weight 0.15", script)
+        self.assertIn("--graph-matcher-assignment-weight 0.25", script)
+        self.assertIn("--graph-matcher-accept-weight 0.1", script)
+        self.assertIn("--graph-matcher-hard-negative-dustbin-weight 0.05", script)
+        self.assertIn("--graph-matcher-online-false-no-match", script)
+        self.assertIn("graph_matcher_no_match_points=64", run_html)
+        self.assertIn("graph_matcher_no_match_weight=0.15", run_html)
+
     def test_create_cpp_training_run_writes_script(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             request = TrainingRequest(

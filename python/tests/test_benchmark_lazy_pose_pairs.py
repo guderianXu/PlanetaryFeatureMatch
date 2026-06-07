@@ -219,6 +219,33 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertTrue(args.input_local_contrast)
         self.assertAlmostEqual(args.input_local_contrast_strength, 0.6)
 
+    def test_parse_args_enable_rejection_training_expands_safe_defaults(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--enable-rejection-training",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertTrue(args.enable_rejection_training)
+        self.assertTrue(args.train_graph_matcher)
+        self.assertTrue(args.inline_false_match_mining)
+        self.assertTrue(args.graph_matcher_online_false_no_match)
+        self.assertEqual(args.graph_matcher_no_match_points, 64)
+        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.15)
+        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.25)
+        self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.10)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.05)
+        self.assertAlmostEqual(args.false_match_weight, 0.05)
+        self.assertEqual(args.visual_matcher_mode, "graph_matcher")
+
     def test_parse_args_accepts_multiple_render_and_uint8_manifests(self) -> None:
         argv = [
             "benchmark_lazy_pose_pairs.py",

@@ -72,6 +72,18 @@ DEFAULT_TARGET_VARIANTS = (
 
 DEFAULT_INIT_STATE = PROJECT_ROOT / "runs" / "python_diag_balanced_512_3epoch_20260603_2143" / "pytorch_pfm_state.pt"
 
+REJECTION_TRAINING_DEFAULTS = {
+    "graph_matcher_loss_weight": 0.50,
+    "graph_matcher_no_match_points": 64,
+    "graph_matcher_no_match_weight": 0.15,
+    "graph_matcher_assignment_weight": 0.25,
+    "graph_matcher_accept_weight": 0.10,
+    "graph_matcher_prune_ranking_weight": 0.05,
+    "graph_matcher_hard_negative_dustbin_weight": 0.05,
+    "false_match_weight": 0.05,
+    "false_match_curriculum_max_probability": 1.0,
+}
+
 _IMAGE_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 _DEPTH_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _CAMERA_CACHE: "OrderedDict[str, object]" = OrderedDict()
@@ -1883,6 +1895,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-online-false-no-match", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--enable-rejection-training",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable a safe no-match/dustbin training preset for descriptor false matches and GraphMatcher rejection.",
+    )
     parser.add_argument("--training-spatial-bins", type=int, default=0)
     parser.add_argument("--hard-variant", action="append", default=[])
     parser.add_argument("--hard-valid-fraction-max", type=float, default=0.0)
@@ -1961,7 +1979,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-filtered-min-margin", type=float, default=0.02)
     parser.add_argument("--visual-filtered-max-matches", type=int, default=0)
     parser.add_argument("--visual-filtered-draw-matches", type=int, default=0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    apply_rejection_training_defaults(args)
+    return args
+
+
+def _set_positive_default(args: argparse.Namespace, name: str) -> None:
+    value = getattr(args, name)
+    if value <= 0:
+        setattr(args, name, REJECTION_TRAINING_DEFAULTS[name])
+
+
+def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
+    """把拒配训练开关展开成实际会参与 loss 的参数。"""
+
+    if not getattr(args, "enable_rejection_training", False):
+        return
+    args.train_graph_matcher = True
+    args.inline_false_match_mining = True
+    args.graph_matcher_online_false_no_match = True
+    args.visual_matcher_mode = "graph_matcher"
+    for name in REJECTION_TRAINING_DEFAULTS:
+        _set_positive_default(args, name)
 
 
 def main() -> int:

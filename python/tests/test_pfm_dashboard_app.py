@@ -38,12 +38,13 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("亮线：平滑趋势", train_html)
                 self.assertIn("圆点：当前 batch", train_html)
                 self.assertIn('data-live-chart="loss"', train_html)
-                self.assertIn('data-live-chart="graph_prune"', train_html)
-                self.assertIn('data-live-chart="stop_confidence"', train_html)
-                self.assertIn("图剪枝", train_html)
-                self.assertIn("早停置信", train_html)
-                self.assertIn("C++ 的完整训练定义已经默认与 Python 对齐", train_html)
-                self.assertIn('value="dashboard_cpp"', train_html)
+                self.assertIn('data-live-chart="no_match"', train_html)
+                self.assertIn('data-live-chart="online_false"', train_html)
+                self.assertIn("拒配损失", train_html)
+                self.assertIn("在线错配", train_html)
+                self.assertIn("默认启动 Python 拒配训练", train_html)
+                self.assertIn('value="dashboard_python"', train_html)
+                self.assertIn('<option value="python" selected>Python 训练</option>', train_html)
                 self.assertIn('<option value="cpp">C++ 训练</option>', train_html)
                 self.assertIn('name="graph_inference_preset"', train_html)
                 self.assertIn('name="graph_min_accept_probability"', train_html)
@@ -53,11 +54,18 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn('name="graph_matcher_no_match_points"', train_html)
                 self.assertIn('name="graph_matcher_no_match_weight"', train_html)
                 self.assertIn('name="graph_matcher_no_match_min_distance"', train_html)
+                self.assertIn('name="graph_matcher_assignment_weight"', train_html)
+                self.assertIn('name="graph_matcher_accept_weight"', train_html)
+                self.assertIn('name="graph_matcher_accept_negative_topk"', train_html)
+                self.assertIn('name="graph_matcher_prune_ranking_weight"', train_html)
+                self.assertIn('name="graph_matcher_prune_ranking_margin"', train_html)
                 self.assertIn('name="graph_matcher_train_max_attention_layers"', train_html)
                 self.assertIn('name="graph_matcher_train_random_attention_layers"', train_html)
+                self.assertIn('name="graph_matcher_online_false_no_match"', train_html)
                 self.assertIn('name="graph_matcher_train_max_attention_work_fraction"', train_html)
                 self.assertIn('name="graph_matcher_train_width_keep_ratio"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_weight"', train_html)
+                self.assertIn('name="graph_matcher_stop_confidence_weight" value="0"', train_html)
                 self.assertIn('name="graph_matcher_stop_confidence_margin"', train_html)
                 self.assertIn('name="graph_matcher_raw_preservation_weight"', train_html)
                 self.assertIn('name="graph_matcher_raw_preservation_margin"', train_html)
@@ -89,8 +97,8 @@ class DashboardAppTest(unittest.TestCase):
                     dashboard_js = response.read()
                     self.assertIn(b"installLiveTraining", dashboard_js)
                     self.assertIn(b"loss_total", dashboard_js)
-                    self.assertIn(b"graph_matcher_prune_ranking_loss", dashboard_js)
-                    self.assertIn(b"graph_matcher_stop_confidence_loss", dashboard_js)
+                    self.assertIn(b"graph_matcher_no_match_loss", dashboard_js)
+                    self.assertIn(b"online_false_match_points", dashboard_js)
                     self.assertIn(b"LIVE_CHART_WINDOW_BATCHES = 300", dashboard_js)
                     self.assertIn(b"liveChartRun", dashboard_js)
                     self.assertIn(b"updateChartMeta", dashboard_js)
@@ -132,8 +140,14 @@ class DashboardAppTest(unittest.TestCase):
                     "graph_matcher_no_match_points": "24",
                     "graph_matcher_no_match_weight": "0.1",
                     "graph_matcher_no_match_min_distance": "6.0",
+                    "graph_matcher_assignment_weight": "0.2",
+                    "graph_matcher_accept_weight": "0.3",
+                    "graph_matcher_accept_negative_topk": "6",
+                    "graph_matcher_prune_ranking_weight": "0.04",
+                    "graph_matcher_prune_ranking_margin": "0.2",
                     "graph_matcher_train_max_attention_layers": "2",
                     "graph_matcher_train_random_attention_layers": "on",
+                    "graph_matcher_online_false_no_match": "on",
                     "graph_matcher_train_max_attention_work_fraction": "0.5",
                     "graph_matcher_train_width_keep_ratio": "0.5",
                     "graph_matcher_raw_preservation_weight": "0.11",
@@ -155,6 +169,10 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("--graph-matcher-metadata-mode no_xy", script)
                 self.assertIn("--graph-matcher-no-match-points 24", script)
                 self.assertIn("--graph-matcher-no-match-min-distance 6.0", script)
+                self.assertIn("--graph-matcher-accept-weight 0.3", script)
+                self.assertIn("--graph-matcher-accept-negative-topk 6", script)
+                self.assertIn("--graph-matcher-prune-ranking-weight 0.04", script)
+                self.assertIn("--graph-matcher-prune-ranking-margin 0.2", script)
                 self.assertIn("--graph-matcher-train-max-attention-layers 2", script)
                 self.assertIn("--graph-matcher-train-random-attention-layers", script)
                 self.assertIn("--graph-matcher-train-max-attention-work-fraction 0.5", script)
@@ -169,6 +187,8 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertIn("graph_max_attention_work_fraction=0.55", report)
                 self.assertIn("graph_matcher_metadata_mode=no_xy", report)
                 self.assertIn("graph_matcher_no_match_points=24", report)
+                self.assertIn("graph_matcher_accept_weight=0.3", report)
+                self.assertIn("graph_matcher_prune_ranking_weight=0.04", report)
                 self.assertIn("graph_matcher_train_max_attention_layers=2", report)
                 self.assertIn("graph_matcher_train_random_attention_layers=True", report)
                 self.assertIn("graph_matcher_train_max_attention_work_fraction=0.5", report)

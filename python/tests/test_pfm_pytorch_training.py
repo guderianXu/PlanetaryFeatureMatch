@@ -1856,6 +1856,31 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.05)
         self.assertAlmostEqual(args.graph_matcher_stop_confidence_margin, 0.5)
 
+    def test_parse_args_enable_rejection_training_expands_safe_defaults(self):
+        argv = [
+            "pfm_pytorch_training.py",
+            "--init-random",
+            "--cache-dir",
+            "train",
+            "--enable-rejection-training",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = train.parse_args()
+
+        self.assertTrue(args.enable_rejection_training)
+        self.assertTrue(args.train_graph_matcher)
+        self.assertTrue(args.graph_matcher_online_false_no_match)
+        self.assertEqual(args.graph_matcher_no_match_points, 64)
+        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.15)
+        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.25)
+        self.assertGreater(args.graph_matcher_accept_weight, 0.0)
+        self.assertGreater(args.graph_matcher_prune_ranking_weight, 0.0)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.05)
+        self.assertAlmostEqual(args.false_match_weight, 0.05)
+        self.assertEqual(args.report_matcher_mode, "graph_matcher")
+        self.assertEqual(args.report_graph_inference_preset, "fast")
+
     def test_parse_args_accepts_gradient_accumulation_steps(self):
         argv = [
             "pfm_pytorch_training.py",

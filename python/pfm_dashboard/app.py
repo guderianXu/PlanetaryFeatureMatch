@@ -701,20 +701,20 @@ def render_train(project_root: Path, message: str = "") -> str:
     <div class="live-chart-grid">
       <div class="live-chart-card"><div><strong>损失</strong><span data-live-chart-meta="loss">最近 300 batch</span></div><svg data-live-chart="loss" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
       <div class="live-chart-card"><div><strong>Top1</strong><span data-live-chart-meta="top1">最近 300 batch</span></div><svg data-live-chart="top1" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      <div class="live-chart-card"><div><strong>早停置信</strong><span data-live-chart-meta="stop_confidence">最近 300 batch</span></div><svg data-live-chart="stop_confidence" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
-      <div class="live-chart-card"><div><strong>图剪枝</strong><span data-live-chart-meta="graph_prune">最近 300 batch</span></div><svg data-live-chart="graph_prune" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>拒配损失</strong><span data-live-chart-meta="no_match">最近 300 batch</span></div><svg data-live-chart="no_match" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
+      <div class="live-chart-card"><div><strong>在线错配</strong><span data-live-chart-meta="online_false">最近 300 batch</span></div><svg data-live-chart="online_false" viewBox="0 0 520 220" preserveAspectRatio="none"></svg></div>
     </div>
   </div>
 </section>
 <form method="post" action="/train" class="train-workbench">
   <section class="panel launch-panel">
-    <div class="panel-head"><div><h2>实验配置</h2><p>默认启动 C++ 训练；Python 只作为单独验证入口。</p></div></div>
+    <div class="panel-head"><div><h2>实验配置</h2><p>默认启动 Python 拒配训练；C++ 入口保留用于后续对齐。</p></div></div>
     <div class="form-grid two">
-      <label>实验名称 <input name="experiment_name" value="dashboard_cpp"></label>
+      <label>实验名称 <input name="experiment_name" value="dashboard_python"></label>
       <label>训练后端
         <select name="backend">
+          <option value="python" selected>Python 训练</option>
           <option value="cpp">C++ 训练</option>
-          <option value="python">Python 验证</option>
         </select>
       </label>
       <label>设备 <input name="device" value="cuda"></label>
@@ -738,14 +738,20 @@ def render_train(project_root: Path, message: str = "") -> str:
           <option value="descriptor_only">仅描述子</option>
         </select>
       </label>
-      <label>不可匹配点数 <input type="number" name="graph_matcher_no_match_points" value="0" min="0"></label>
-      <label>不可匹配权重 <input type="number" name="graph_matcher_no_match_weight" value="0" min="0" step="0.01"></label>
+      <label>不可匹配点数 <input type="number" name="graph_matcher_no_match_points" value="64" min="0"></label>
+      <label>不可匹配权重 <input type="number" name="graph_matcher_no_match_weight" value="0.15" min="0" step="0.01"></label>
       <label>不可匹配最小距离 <input type="number" name="graph_matcher_no_match_min_distance" value="4" min="0" step="0.5"></label>
+      <label>双向分配权重 <input type="number" name="graph_matcher_assignment_weight" value="0.25" min="0" step="0.01"></label>
+      <label>匹配接受权重 <input type="number" name="graph_matcher_accept_weight" value="0.1" min="0" step="0.01"></label>
+      <label>接受负例 TopK <input type="number" name="graph_matcher_accept_negative_topk" value="8" min="0"></label>
+      <label>剪枝排序权重 <input type="number" name="graph_matcher_prune_ranking_weight" value="0.05" min="0" step="0.01"></label>
+      <label>剪枝排序间隔 <input type="number" name="graph_matcher_prune_ranking_margin" value="0.25" min="0" step="0.05"></label>
       <label>训练注意力层上限 <input type="number" name="graph_matcher_train_max_attention_layers" value="0" min="0"></label>
       <label><input type="checkbox" name="graph_matcher_train_random_attention_layers"> 随机训练注意力层</label>
+      <label><input type="checkbox" name="graph_matcher_online_false_no_match" checked> 在线错配作为不可匹配点</label>
       <label>训练计算量预算 <input type="number" name="graph_matcher_train_max_attention_work_fraction" value="1" min="0" max="1" step="0.05"></label>
       <label>训练宽度保留比例 <input type="number" name="graph_matcher_train_width_keep_ratio" value="1" min="0.05" max="1" step="0.05"></label>
-      <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0.05" min="0" step="0.01"></label>
+      <label>早停置信权重 <input type="number" name="graph_matcher_stop_confidence_weight" value="0" min="0" step="0.01"></label>
       <label>早停安全间隔 <input type="number" name="graph_matcher_stop_confidence_margin" value="0.5" min="0" step="0.05"></label>
       <label>原始间隔保持权重
         <input type="number" name="graph_matcher_raw_preservation_weight" value="0" min="0" step="0.01">
@@ -757,7 +763,7 @@ def render_train(project_root: Path, message: str = "") -> str:
         <input type="number" name="graph_matcher_raw_preservation_raw_margin" value="0.05" min="0" step="0.01">
       </label>
       <label>困难负例 Dustbin 权重
-        <input type="number" name="graph_matcher_hard_negative_dustbin_weight" value="0" min="0" step="0.01">
+        <input type="number" name="graph_matcher_hard_negative_dustbin_weight" value="0.05" min="0" step="0.01">
       </label>
       <label>困难负例 TopK
         <input type="number" name="graph_matcher_hard_negative_dustbin_topk" value="8" min="0">
@@ -767,7 +773,7 @@ def render_train(project_root: Path, message: str = "") -> str:
       </label>
       <label>困难负例最小距离
         <input type="number" name="graph_matcher_hard_negative_dustbin_spatial_min_distance"
-               value="0" min="0" step="0.5">
+          value="0" min="0" step="0.5">
       </label>
     </div>
     <div class="quick-presets">
@@ -962,9 +968,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         value = lambda name, default="": fields.get(name, [default])[0]
         lines = lambda name: [line.strip() for line in value(name).splitlines() if line.strip()]
         random_attention_layers = value("graph_matcher_train_random_attention_layers", "") in {"on", "1", "true", "True"}
+        online_false_no_match = value("graph_matcher_online_false_no_match", "") in {"on", "1", "true", "True"}
         request = TrainingRequest(
             experiment_name=value("experiment_name", "dashboard_run"),
-            backend=value("backend", "cpp"),
+            backend=value("backend", "python"),
             cache_dirs=lines("cache_dirs"),
             validation_cache_dirs=lines("validation_cache_dirs"),
             output_root=self.project_root / "runs",
@@ -987,16 +994,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             graph_max_attention_work_fraction=float(value("graph_max_attention_work_fraction", "1")),
             graph_width_prune_keep_ratio=float(value("graph_width_prune_keep_ratio", "1")),
             graph_matcher_metadata_mode=value("graph_matcher_metadata_mode", "full"),
-            graph_matcher_no_match_points=int(value("graph_matcher_no_match_points", "0")),
-            graph_matcher_no_match_weight=float(value("graph_matcher_no_match_weight", "0")),
+            graph_matcher_no_match_points=int(value("graph_matcher_no_match_points", "64")),
+            graph_matcher_no_match_weight=float(value("graph_matcher_no_match_weight", "0.15")),
             graph_matcher_no_match_min_distance=float(value("graph_matcher_no_match_min_distance", "4")),
+            graph_matcher_assignment_weight=float(value("graph_matcher_assignment_weight", "0.25")),
+            graph_matcher_accept_weight=float(value("graph_matcher_accept_weight", "0.1")),
+            graph_matcher_accept_negative_topk=int(value("graph_matcher_accept_negative_topk", "8")),
+            graph_matcher_prune_ranking_weight=float(value("graph_matcher_prune_ranking_weight", "0.05")),
+            graph_matcher_prune_ranking_margin=float(value("graph_matcher_prune_ranking_margin", "0.25")),
             graph_matcher_train_max_attention_layers=int(value("graph_matcher_train_max_attention_layers", "0")),
             graph_matcher_train_random_attention_layers=random_attention_layers,
+            graph_matcher_online_false_no_match=online_false_no_match,
             graph_matcher_train_max_attention_work_fraction=float(
                 value("graph_matcher_train_max_attention_work_fraction", "1")
             ),
             graph_matcher_train_width_keep_ratio=float(value("graph_matcher_train_width_keep_ratio", "1")),
-            graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0.05")),
+            graph_matcher_stop_confidence_weight=float(value("graph_matcher_stop_confidence_weight", "0")),
             graph_matcher_stop_confidence_margin=float(value("graph_matcher_stop_confidence_margin", "0.5")),
             graph_matcher_raw_preservation_weight=float(value("graph_matcher_raw_preservation_weight", "0")),
             graph_matcher_raw_preservation_margin=float(value("graph_matcher_raw_preservation_margin", "1")),
@@ -1004,7 +1017,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 value("graph_matcher_raw_preservation_raw_margin", "0.05")
             ),
             graph_matcher_hard_negative_dustbin_weight=float(
-                value("graph_matcher_hard_negative_dustbin_weight", "0")
+                value("graph_matcher_hard_negative_dustbin_weight", "0.05")
             ),
             graph_matcher_hard_negative_dustbin_topk=int(value("graph_matcher_hard_negative_dustbin_topk", "8")),
             graph_matcher_hard_negative_dustbin_margin=float(
@@ -1987,8 +2000,8 @@ const LIVE_CHART_MAX_DOTS = 80;
 const LIVE_CHART_METRICS = {
   loss: ['loss', 'loss_total', 'total_loss', 'train_loss'],
   top1: ['descriptor_accuracy', 'top1_accuracy', 'top1', 'mean_top1'],
-  stop_confidence: ['graph_matcher_stop_confidence_loss', 'stop_confidence_loss'],
-  graph_prune: ['graph_matcher_prune_ranking_loss', 'prune_ranking_loss']
+  no_match: ['graph_matcher_no_match_loss', 'graph_matcher_hard_negative_dustbin_loss', 'no_match_loss'],
+  online_false: ['online_false_match_points', 'false_match_points', 'graph_matcher_extra_no_match_points']
 };
 
 function visibleMetricRows(rows) {
@@ -2192,8 +2205,8 @@ async function refreshLiveTraining() {
   Object.entries(LIVE_CHART_METRICS).forEach(([chartKey, names]) => updateChartMeta(chartKey, chartRun, metricsPayload, names));
   renderLiveChart(document.querySelector('[data-live-chart="loss"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.loss));
   renderLiveChart(document.querySelector('[data-live-chart="top1"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.top1));
-  renderLiveChart(document.querySelector('[data-live-chart="stop_confidence"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.stop_confidence));
-  renderLiveChart(document.querySelector('[data-live-chart="graph_prune"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.graph_prune));
+  renderLiveChart(document.querySelector('[data-live-chart="no_match"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.no_match));
+  renderLiveChart(document.querySelector('[data-live-chart="online_false"]'), chartPoints(metricsPayload, chartRuns, LIVE_CHART_METRICS.online_false));
 }
 
 function installLiveTraining() {

@@ -44,22 +44,28 @@ class TrainingRequest:
     synthetic_loss_weight: float = 0.1
     graph_matcher_loss_weight: float = 1.0
     graph_matcher_metadata_mode: str = "full"
-    graph_matcher_no_match_points: int = 0
-    graph_matcher_no_match_weight: float = 0.0
+    graph_matcher_no_match_points: int = 64
+    graph_matcher_no_match_weight: float = 0.15
     graph_matcher_no_match_min_distance: float = 4.0
+    graph_matcher_assignment_weight: float = 0.25
+    graph_matcher_accept_weight: float = 0.1
+    graph_matcher_accept_negative_topk: int = 8
+    graph_matcher_prune_ranking_weight: float = 0.05
+    graph_matcher_prune_ranking_margin: float = 0.25
     graph_matcher_train_max_attention_layers: int = 0
     graph_matcher_train_random_attention_layers: bool = False
     graph_matcher_train_max_attention_work_fraction: float = 1.0
     graph_matcher_train_width_keep_ratio: float = 1.0
-    graph_matcher_stop_confidence_weight: float = 0.05
+    graph_matcher_stop_confidence_weight: float = 0.0
     graph_matcher_stop_confidence_margin: float = 0.5
     graph_matcher_raw_preservation_weight: float = 0.0
     graph_matcher_raw_preservation_margin: float = 1.0
     graph_matcher_raw_preservation_raw_margin: float = 0.05
-    graph_matcher_hard_negative_dustbin_weight: float = 0.0
+    graph_matcher_hard_negative_dustbin_weight: float = 0.05
     graph_matcher_hard_negative_dustbin_topk: int = 8
     graph_matcher_hard_negative_dustbin_margin: float = 0.25
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0
+    graph_matcher_online_false_no_match: bool = True
     temperature: float = 0.07
     min_intensity: float = 0.01
     seed: int = 20260603
@@ -120,6 +126,11 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_matcher_no_match_points={request.graph_matcher_no_match_points}</li>
 <li>graph_matcher_no_match_weight={request.graph_matcher_no_match_weight}</li>
 <li>graph_matcher_no_match_min_distance={request.graph_matcher_no_match_min_distance}</li>
+<li>graph_matcher_assignment_weight={request.graph_matcher_assignment_weight}</li>
+<li>graph_matcher_accept_weight={request.graph_matcher_accept_weight}</li>
+<li>graph_matcher_accept_negative_topk={request.graph_matcher_accept_negative_topk}</li>
+<li>graph_matcher_prune_ranking_weight={request.graph_matcher_prune_ranking_weight}</li>
+<li>graph_matcher_prune_ranking_margin={request.graph_matcher_prune_ranking_margin}</li>
 <li>graph_matcher_train_max_attention_layers={request.graph_matcher_train_max_attention_layers}</li>
 <li>graph_matcher_train_random_attention_layers={request.graph_matcher_train_random_attention_layers}</li>
 <li>graph_matcher_train_max_attention_work_fraction={request.graph_matcher_train_max_attention_work_fraction}</li>
@@ -133,6 +144,7 @@ def _write_run_html(path: Path, request: TrainingRequest, backend: str, script_p
 <li>graph_matcher_hard_negative_dustbin_topk={request.graph_matcher_hard_negative_dustbin_topk}</li>
 <li>graph_matcher_hard_negative_dustbin_margin={request.graph_matcher_hard_negative_dustbin_margin}</li>
 <li>graph_matcher_hard_negative_dustbin_spatial_min_distance={hard_negative_distance}</li>
+<li>graph_matcher_online_false_no_match={request.graph_matcher_online_false_no_match}</li>
 <li>graph_inference_preset={html.escape(request.graph_inference_preset)}</li>
 <li>graph_min_accept_probability={request.graph_min_accept_probability}</li>
 <li>graph_max_attention_work_fraction={request.graph_max_attention_work_fraction}</li>
@@ -192,6 +204,16 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         str(request.graph_matcher_no_match_weight),
         "--graph-matcher-no-match-min-distance",
         str(request.graph_matcher_no_match_min_distance),
+        "--graph-matcher-assignment-weight",
+        str(request.graph_matcher_assignment_weight),
+        "--graph-matcher-accept-weight",
+        str(request.graph_matcher_accept_weight),
+        "--graph-matcher-accept-negative-topk",
+        str(request.graph_matcher_accept_negative_topk),
+        "--graph-matcher-prune-ranking-weight",
+        str(request.graph_matcher_prune_ranking_weight),
+        "--graph-matcher-prune-ranking-margin",
+        str(request.graph_matcher_prune_ranking_margin),
         "--graph-matcher-train-max-attention-layers",
         str(request.graph_matcher_train_max_attention_layers),
         "--graph-matcher-train-max-attention-work-fraction",
@@ -240,6 +262,8 @@ def build_python_training_script(request: TrainingRequest, run_dir: Path) -> str
         parts.append("--init-random")
     if request.graph_matcher_train_random_attention_layers:
         parts.append("--graph-matcher-train-random-attention-layers")
+    if request.graph_matcher_online_false_no_match:
+        parts.append("--graph-matcher-online-false-no-match")
     for cache_dir in request.cache_dirs:
         parts.extend(["--cache-dir", _quote(cache_dir)])
     for cache_dir in request.validation_cache_dirs:
@@ -321,6 +345,14 @@ def build_cpp_training_script(request: TrainingRequest, run_dir: Path) -> str:
         str(request.graph_matcher_no_match_points),
         "--graph-matcher-no-match-min-distance",
         str(request.graph_matcher_no_match_min_distance),
+        "--graph-matcher-accept-weight",
+        str(request.graph_matcher_accept_weight),
+        "--graph-matcher-accept-negative-topk",
+        str(request.graph_matcher_accept_negative_topk),
+        "--graph-matcher-prune-ranking-weight",
+        str(request.graph_matcher_prune_ranking_weight),
+        "--graph-matcher-prune-ranking-margin",
+        str(request.graph_matcher_prune_ranking_margin),
         "--graph-matcher-train-max-attention-layers",
         str(request.graph_matcher_train_max_attention_layers),
         "--graph-matcher-train-max-attention-work-fraction",
@@ -419,6 +451,16 @@ def create_training_runs(request: TrainingRequest) -> list[GeneratedRun]:
         raise ValueError("graph_matcher_no_match_min_distance must be nonnegative")
     if request.graph_matcher_train_max_attention_layers < 0:
         raise ValueError("graph_matcher_train_max_attention_layers must be nonnegative")
+    if request.graph_matcher_assignment_weight < 0.0:
+        raise ValueError("graph_matcher_assignment_weight must be nonnegative")
+    if request.graph_matcher_accept_weight < 0.0:
+        raise ValueError("graph_matcher_accept_weight must be nonnegative")
+    if request.graph_matcher_accept_negative_topk < 0:
+        raise ValueError("graph_matcher_accept_negative_topk must be nonnegative")
+    if request.graph_matcher_prune_ranking_weight < 0.0:
+        raise ValueError("graph_matcher_prune_ranking_weight must be nonnegative")
+    if request.graph_matcher_prune_ranking_margin < 0.0:
+        raise ValueError("graph_matcher_prune_ranking_margin must be nonnegative")
     if (
         not math.isfinite(float(request.graph_matcher_train_max_attention_work_fraction))
         or request.graph_matcher_train_max_attention_work_fraction < 0.0

@@ -32,6 +32,17 @@ from patch_descriptor_training import (
 
 
 GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
+REJECTION_TRAINING_DEFAULTS = {
+    "graph_matcher_loss_weight": 0.50,
+    "graph_matcher_no_match_points": 64,
+    "graph_matcher_no_match_weight": 0.15,
+    "graph_matcher_assignment_weight": 0.25,
+    "graph_matcher_accept_weight": 0.10,
+    "graph_matcher_prune_ranking_weight": 0.05,
+    "graph_matcher_hard_negative_dustbin_weight": 0.05,
+    "false_match_weight": 0.05,
+    "false_match_curriculum_max_probability": 1.0,
+}
 GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_total_loss",
     "graph_matcher_ce_loss",
@@ -2808,6 +2819,27 @@ def aggregate_descriptor_metrics(rows: list[dict[str, float]]) -> dict[str, floa
     return result
 
 
+def _set_positive_default(args: argparse.Namespace, name: str) -> None:
+    value = getattr(args, name)
+    if value <= 0:
+        setattr(args, name, REJECTION_TRAINING_DEFAULTS[name])
+
+
+def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
+    """把拒配训练开关展开成实际会参与 loss 的参数。"""
+
+    if not getattr(args, "enable_rejection_training", False):
+        return
+    args.train_graph_matcher = True
+    args.graph_matcher_online_false_no_match = True
+    args.report_matcher_mode = "graph_matcher" if args.report_matcher_mode == "raw_descriptor" else args.report_matcher_mode
+    args.report_graph_inference_preset = (
+        "fast" if args.report_graph_inference_preset == "off" else args.report_graph_inference_preset
+    )
+    for name in REJECTION_TRAINING_DEFAULTS:
+        _set_positive_default(args, name)
+
+
 def aggregate_graph_matcher_loss_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
     if not rows:
         return {key: 0.0 for key in GRAPH_MATCHER_LOSS_METRIC_KEYS}
@@ -3411,6 +3443,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-online-false-no-match", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--enable-rejection-training",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable a safe no-match/dustbin training preset for descriptor false matches and GraphMatcher rejection.",
+    )
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -3435,6 +3473,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-required-sample-glob", action="append", default=[])
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
+    apply_rejection_training_defaults(args)
     if args.init_random and (args.checkpoint is not None or args.init_pytorch_state is not None):
         parser.error("--init-random cannot be combined with --checkpoint or --init-pytorch-state")
     if args.checkpoint is None and args.init_pytorch_state is None and not args.init_random:
@@ -4028,6 +4067,8 @@ def main() -> int:
                     max_probability=args.false_match_curriculum_max_probability,
                     warmup_steps=args.false_match_curriculum_warmup_steps,
                 ),
+                online_false_match_max_points=args.false_match_max_points,
+                online_false_match_max_score=args.false_match_max_score,
                 pose_metadata=pose_metadata,
                 pose_balanced_sampling=args.pose_balanced_sampling,
                 pose_difficulty_loss_weight=args.pose_difficulty_loss_weight,
