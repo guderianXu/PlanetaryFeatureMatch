@@ -434,6 +434,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "--pair-spec-manifest",
             "overlap_pairs.csv",
             "--overlap-scan-all",
+            "--overlap-resume",
+            "--overlap-start-index",
+            "12",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -442,6 +445,8 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.mode, "overlap-list")
         self.assertEqual(args.pair_spec_manifest, Path("overlap_pairs.csv"))
         self.assertTrue(args.overlap_scan_all)
+        self.assertTrue(args.overlap_resume)
+        self.assertEqual(args.overlap_start_index, 12)
 
     def test_gpu_snapshot_interval_collects_first_and_interval_steps(self) -> None:
         self.assertTrue(lazy_bench._should_collect_gpu_snapshot(1, 25))
@@ -1251,6 +1256,39 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("step,loss", text)
             self.assertNotIn("ignored", text)
+
+    def test_streaming_csv_rows_append_preserves_existing_rows_without_extra_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "metrics.csv"
+            with StreamingCsvRows(path, ["step", "loss"]) as writer:
+                writer.write({"step": 1, "loss": "2.5"})
+            with StreamingCsvRows(path, ["step", "loss"], append=True) as writer:
+                writer.write({"step": 2, "loss": "1.5"})
+
+            lines = path.read_text(encoding="utf-8").strip().splitlines()
+
+        self.assertEqual(lines, ["step,loss", "1,2.5", "2,1.5"])
+
+    def test_read_overlap_resume_state_uses_last_source_pair_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "overlap_edges.csv"
+            metrics = root / "overlap_metrics.csv"
+            with manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=lazy_bench.PAIR_SPEC_MANIFEST_FIELDS)
+                writer.writeheader()
+                writer.writerow({"pair_index": 0, "split": "train"})
+                writer.writerow({"pair_index": 1, "split": "train"})
+            with metrics.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["index", "source_pair_index"])
+                writer.writeheader()
+                writer.writerow({"index": 1, "source_pair_index": 7})
+                writer.writerow({"index": 2, "source_pair_index": 11})
+
+            state = lazy_bench._read_overlap_resume_state(manifest, metrics)
+
+        self.assertEqual(state.pair_count, 2)
+        self.assertEqual(state.next_source_pair_index, 12)
 
 
 if __name__ == "__main__":

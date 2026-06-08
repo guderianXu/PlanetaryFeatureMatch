@@ -1418,11 +1418,14 @@ def iter_lazy_pair_specs_once(
     seed: int,
     skip_bad_pairs: bool,
     max_bad_pairs: int,
+    start_index: int = 0,
 ) -> Iterator[LazyPairResult]:
     if not specs:
         raise RuntimeError("no lazy pair specs available")
+    if start_index < 0 or start_index > len(specs):
+        raise ValueError("--overlap-start-index must be in [0, candidate count]")
 
-    cursor = 0
+    cursor = start_index
     skipped = 0
     total = len(specs)
     max_skips = max_bad_pairs if max_bad_pairs > 0 else total
@@ -1586,18 +1589,61 @@ def read_pair_spec_manifest(path: Path, records: list[RenderRecord]) -> list[Laz
     return specs
 
 
+@dataclass(frozen=True)
+class OverlapResumeState:
+    pair_count: int
+    next_source_pair_index: int
+
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return sum(1 for _ in csv.DictReader(handle))
+
+
+def _read_overlap_resume_state(pair_spec_manifest: Path, metrics_path: Path) -> OverlapResumeState:
+    if not pair_spec_manifest.exists() and not metrics_path.exists():
+        return OverlapResumeState(pair_count=0, next_source_pair_index=0)
+    if not pair_spec_manifest.exists() or not metrics_path.exists():
+        raise ValueError("--overlap-resume requires both overlap edge and metrics files when either exists")
+
+    manifest_count = _count_csv_rows(pair_spec_manifest)
+    metrics_count = 0
+    last_metrics_row: dict[str, str] | None = None
+    with metrics_path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            metrics_count += 1
+            last_metrics_row = row
+
+    if manifest_count != metrics_count:
+        raise ValueError(
+            "--overlap-resume found mismatched CSV row counts: "
+            f"manifest={manifest_count} metrics={metrics_count}"
+        )
+    if last_metrics_row is None:
+        return OverlapResumeState(pair_count=0, next_source_pair_index=0)
+    return OverlapResumeState(
+        pair_count=metrics_count,
+        next_source_pair_index=int(last_metrics_row["source_pair_index"]) + 1,
+    )
+
+
 class StreamingCsvRows:
-    def __init__(self, path: Path, fieldnames: list[str]) -> None:
+    def __init__(self, path: Path, fieldnames: list[str], *, append: bool = False) -> None:
         self.path = path
         self.fieldnames = fieldnames
+        self.append = append
         self._handle = None
         self._writer: csv.DictWriter | None = None
 
     def open(self) -> "StreamingCsvRows":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self.path.open("w", encoding="utf-8", newline="")
+        write_header = not self.append or not self.path.exists() or self.path.stat().st_size == 0
+        self._handle = self.path.open("a" if self.append else "w", encoding="utf-8", newline="")
         self._writer = csv.DictWriter(self._handle, fieldnames=self.fieldnames, extrasaction="ignore")
-        self._writer.writeheader()
+        if write_header:
+            self._writer.writeheader()
         self._handle.flush()
         return self
 
@@ -1938,10 +1984,25 @@ def run_overlap_list(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dic
     recent_rows: list[dict[str, object]] = []
     metrics_fields = ["index", "source_pair_index", *PAIR_SPEC_MANIFEST_FIELDS, "worker_elapsed_ms"]
     metrics_path = args.output_dir / "overlap_metrics.csv"
+    resume_state = OverlapResumeState(pair_count=0, next_source_pair_index=0)
+    overlap_start_index = int(getattr(args, "overlap_start_index", 0))
+    if overlap_scan_all and bool(getattr(args, "overlap_resume", False)):
+        resume_state = _read_overlap_resume_state(args.pair_spec_manifest, metrics_path)
+        overlap_start_index = max(overlap_start_index, resume_state.next_source_pair_index)
+        if resume_state.pair_count:
+            print(
+                f"overlap-list resume pairs={resume_state.pair_count} "
+                f"start_index={overlap_start_index} manifest={args.pair_spec_manifest}",
+                flush=True,
+            )
 
     with (
-        StreamingCsvRows(args.pair_spec_manifest, PAIR_SPEC_MANIFEST_FIELDS) as manifest_writer,
-        StreamingCsvRows(metrics_path, metrics_fields) as metrics_writer,
+        StreamingCsvRows(
+            args.pair_spec_manifest,
+            PAIR_SPEC_MANIFEST_FIELDS,
+            append=bool(resume_state.pair_count),
+        ) as manifest_writer,
+        StreamingCsvRows(metrics_path, metrics_fields, append=bool(resume_state.pair_count)) as metrics_writer,
     ):
         if overlap_scan_all:
             pair_results = iter_lazy_pair_specs_once(
@@ -1958,6 +2019,7 @@ def run_overlap_list(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dic
                 seed=args.seed,
                 skip_bad_pairs=args.skip_bad_pairs,
                 max_bad_pairs=args.max_bad_pairs,
+                start_index=overlap_start_index,
             )
         else:
             pair_results = iter_lazy_pairs(
@@ -1979,7 +2041,7 @@ def run_overlap_list(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dic
 
         for index, result in enumerate(
             pair_results,
-            1,
+            resume_state.pair_count + 1,
         ):
             manifest_row = _pair_spec_manifest_row(index - 1, result)
             manifest_writer.write(manifest_row)
@@ -2983,6 +3045,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spatial-index-height-km", type=parse_int_list, default=[])
     parser.add_argument("--pair-spec-manifest", type=Path, default=None)
     parser.add_argument("--overlap-scan-all", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--overlap-resume", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--overlap-start-index", type=int, default=0)
     parser.add_argument("--image-source", choices=["uint8", "render"], default="uint8")
     parser.add_argument("--limit-pairs", type=int, default=0)
     parser.add_argument("--pairs", type=int, default=64)
@@ -3232,6 +3296,8 @@ def main() -> int:
         raise ValueError("--steps must be positive in train mode")
     if args.mode == "overlap-list" and args.pair_spec_manifest is None:
         raise ValueError("--pair-spec-manifest is required in overlap-list mode")
+    if args.overlap_start_index < 0:
+        raise ValueError("--overlap-start-index must be nonnegative")
     if args.spatial_index_planet_radius_m <= 0.0:
         raise ValueError("--spatial-index-planet-radius-m must be positive")
     if args.spatial_index_footprint_samples < 2:
