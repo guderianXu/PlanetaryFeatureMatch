@@ -459,18 +459,14 @@ def sample_map_rows_at_keypoints(map_tensor: torch.Tensor | None, keypoints: tor
 
 
 def cyclic_descriptor_similarity(desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+    """Legacy entry point for descriptor similarity; now uses strict cosine only."""
     if desc_a.dim() != 2 or desc_b.dim() != 2:
         raise ValueError("descriptors must have shape NxD")
     if desc_a.size(1) != desc_b.size(1):
         raise ValueError("descriptor dimensions must match")
     desc_a = F.normalize(desc_a.to(torch.float32), p=2, dim=1, eps=1.0e-12)
     desc_b = F.normalize(desc_b.to(torch.float32), p=2, dim=1, eps=1.0e-12)
-    channels = desc_a.size(1)
-    if channels < 4 or channels % 4 != 0:
-        return desc_a @ desc_b.T
-    group = channels // 4
-    scores = [desc_a @ torch.roll(desc_b, shifts=turns * group, dims=1).T for turns in range(4)]
-    return torch.stack(scores, dim=0).max(dim=0).values
+    return desc_a @ desc_b.T
 
 
 def greedy_unique_matches(
@@ -788,6 +784,18 @@ def gather_score_rows(score_map: torch.Tensor | None, selected: torch.Tensor) ->
     return flat.index_select(0, selected.to(selected.device))
 
 
+def effective_keypoint_score_map(raw: pfm_model.RawFeatureMaps | None) -> torch.Tensor | None:
+    if raw is None:
+        return None
+    score = raw.heatmap.to(torch.float32)
+    if raw.matchability is not None:
+        score = score * raw.matchability.to(device=score.device, dtype=torch.float32).clamp(0.0, 1.0)
+    if raw.descriptor_uncertainty is not None:
+        uncertainty = raw.descriptor_uncertainty.to(device=score.device, dtype=torch.float32).clamp(0.0, 1.0)
+        score = score * (1.0 - uncertainty)
+    return score.clamp(0.0, 1.0)
+
+
 def graph_metadata_from_raw_features(
     raw: pfm_model.RawFeatureMaps | None,
     keypoints: torch.Tensor,
@@ -805,6 +813,9 @@ def graph_metadata_from_raw_features(
     affine = sample_map_rows_at_keypoints(raw.affine, keypoints, width=4)
     quality = sample_map_rows_at_keypoints(raw.quality, keypoints, width=1)
     local_contrast = sample_map_rows_at_keypoints(raw.local_contrast, keypoints, width=1)
+    matchability = sample_map_rows_at_keypoints(raw.matchability, keypoints, width=1)
+    descriptor_uncertainty = sample_map_rows_at_keypoints(raw.descriptor_uncertainty, keypoints, width=1)
+    no_match_prior = sample_map_rows_at_keypoints(raw.no_match_prior, keypoints, width=1)
     return pfm_model.prepare_graph_keypoint_metadata(
         keypoints,
         meta_dim=meta_dim,
@@ -814,6 +825,9 @@ def graph_metadata_from_raw_features(
         affine=affine,
         quality=quality.squeeze(1) if quality is not None else None,
         local_contrast=local_contrast.squeeze(1) if local_contrast is not None else None,
+        matchability=matchability.squeeze(1) if matchability is not None else None,
+        descriptor_uncertainty=descriptor_uncertainty.squeeze(1) if descriptor_uncertainty is not None else None,
+        no_match_prior=no_match_prior.squeeze(1) if no_match_prior is not None else None,
     )
 
 
@@ -993,6 +1007,10 @@ def match_pair_descriptor_maps(
     if graph_fallback_mode not in {"mutual", "none"}:
         raise ValueError("graph_fallback_mode must be mutual or none")
     graph_stats: dict[str, float | int] = {}
+    if keypoint_scores_a is None:
+        keypoint_scores_a = effective_keypoint_score_map(raw_features_a)
+    if keypoint_scores_b is None:
+        keypoint_scores_b = effective_keypoint_score_map(raw_features_b)
     keypoints_a, selected_a = select_descriptor_keypoints(
         pair.view_a,
         descriptors_a,

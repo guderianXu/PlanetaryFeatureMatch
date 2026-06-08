@@ -47,12 +47,14 @@ FeatureSet makePythonDescriptorGridFeatureSet(const torch::Tensor& image, const 
 /// @param keypoint_config Python-style 选点参数。
 /// @param max_matches 最多输出的 mutual 匹配数量。
 /// @param threshold_px 正确匹配阈值，单位为原始 pair cache 像素。
+/// @param min_descriptor_score 最低 descriptor cosine 分数，默认保留旧行为。
 /// @return matches/correct/wrong/precision。
 /// @throws std::invalid_argument 当输入非法时抛出。
 CacheRawMutualEvalResult evaluatePythonRawMutualDescriptorMaps(const PairArchiveSample& pair,
                                                                const torch::Tensor& descriptors_a,
                                                                const torch::Tensor& descriptors_b,
                                                                const PythonDescriptorGridConfig& keypoint_config,
-                                                               int64_t max_matches, double threshold_px);
+                                                               int64_t max_matches, double threshold_px,
+                                                               double min_descriptor_score = -1.0);
 
 } // namespace pfm

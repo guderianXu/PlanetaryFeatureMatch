@@ -92,21 +92,6 @@ void zeroConv(torch::nn::Conv2d& module)
     }
 }
 
-void initConcatIdentityProjection(torch::nn::Conv2d& module, int64_t descriptor_dim)
-{
-    // 融合适配器输入是 learned/texture 拼接，初始化为直接保留 learned descriptor。
-    torch::NoGradGuard no_grad;
-    module->weight.zero_();
-    if (module->bias.defined())
-    {
-        module->bias.zero_();
-    }
-    for (int64_t channel = 0; channel < descriptor_dim; ++channel)
-    {
-        module->weight.index_put_({channel, channel, 0, 0}, 1.0);
-    }
-}
-
 void zeroSequentialChild(torch::nn::Sequential& sequence, const std::string& child_name)
 {
     for (const auto& child : sequence->named_children())
@@ -118,28 +103,6 @@ void zeroSequentialChild(torch::nn::Sequential& sequence, const std::string& chi
         }
     }
     throw std::invalid_argument("missing sequential child " + child_name);
-}
-
-torch::Tensor rotateFeatureMap(const torch::Tensor& tensor, int64_t turns)
-{
-    const auto normalized_turns = ((turns % 4) + 4) % 4;
-    if (normalized_turns == 0)
-    {
-        return tensor;
-    }
-    return torch::rot90(tensor, normalized_turns, {2, 3}).contiguous();
-}
-
-torch::Tensor alignDescriptorOrientationChannels(const torch::Tensor& tensor, int64_t turns)
-{
-    // 描述子通道按四个方向分组，旋转特征图时同步滚动通道，保持方向语义对齐。
-    const auto channels = tensor.size(1);
-    if (channels < 4 || channels % 4 != 0)
-    {
-        return tensor;
-    }
-    const auto shift = channels / 4;
-    return torch::roll(tensor, {-turns * shift}, {1});
 }
 
 class PfmV21DescriptorResidualBlockImpl : public torch::nn::Module
@@ -540,16 +503,18 @@ PfmV21SparseHeadImpl::PfmV21SparseHeadImpl(int64_t input_channels, int64_t descr
     _descriptor_dilated_context = register_module(
         "descriptor_dilated_context",
         torch::nn::Conv2d(torch::nn::Conv2dOptions(_descriptor_dim, _descriptor_dim, 3).padding(2).dilation(2)));
-    _descriptor_branch_quality = register_module("descriptor_branch_quality",
-                                                 torch::nn::Conv2d(torch::nn::Conv2dOptions(_descriptor_dim, 1, 1)));
-    _descriptor_rotation_fusion =
-        register_module("descriptor_rotation_fusion",
-                        torch::nn::Conv2d(torch::nn::Conv2dOptions(_descriptor_dim * 2, _descriptor_dim, 1)));
     _descriptor_skip = register_module(
         "descriptor_skip", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, _descriptor_dim, 1)));
     _scale = register_module("scale", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
     _orientation = register_module("orientation", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 2, 1)));
     _affine = register_module("affine", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 4, 1)));
+    _matchability =
+        register_module("matchability", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
+    _descriptor_uncertainty =
+        register_module("descriptor_uncertainty",
+                        torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
+    _no_match_prior =
+        register_module("no_match_prior", torch::nn::Conv2d(torch::nn::Conv2dOptions(_input_channels, 1, 1)));
 
     zeroConv(_heatmap_viewpoint_context);
     zeroConv(_keypoint_offsets);
@@ -557,8 +522,9 @@ PfmV21SparseHeadImpl::PfmV21SparseHeadImpl(int64_t input_channels, int64_t descr
     zeroConv(_descriptor_viewpoint_attention);
     zeroConv(_descriptor_orientation_alignment);
     zeroConv(_descriptor_dilated_context);
-    zeroConv(_descriptor_branch_quality);
-    initConcatIdentityProjection(_descriptor_rotation_fusion, _descriptor_dim);
+    zeroConv(_matchability);
+    zeroConv(_descriptor_uncertainty);
+    zeroConv(_no_match_prior);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -608,46 +574,21 @@ PfmV21SparseHeadOutput PfmV21SparseHeadImpl::forward(const torch::Tensor& featur
     auto heatmap_sum = std::get<1>(branch);
     auto descriptor_gated = std::get<2>(branch);
     auto keypoint_offsets = std::get<3>(branch);
-    std::vector<torch::Tensor> descriptor_branches;
-    descriptor_branches.push_back(descriptor_gated + _descriptor_orientation_alignment->forward(descriptor_gated) +
-                                  _descriptor_dilated_context->forward(descriptor_gated));
-
-    for (int64_t turns = 1; turns < 4; ++turns)
-    {
-        auto rotated_feature = rotateFeatureMap(feature, turns);
-        auto rotated_descriptor_feature = rotateFeatureMap(descriptor_feature, turns);
-        auto rotated_branch = descriptorBranch(rotated_feature, rotated_descriptor_feature);
-        auto rotated_heatmap = std::get<1>(rotated_branch);
-        auto rotated_descriptor_gated = std::get<2>(rotated_branch);
-        heatmap_sum = heatmap_sum + rotateFeatureMap(rotated_heatmap, -turns);
-        auto rotated_descriptor = rotateFeatureMap(rotated_descriptor_gated, -turns);
-        auto orientation_aligned = alignDescriptorOrientationChannels(rotated_descriptor, turns);
-        descriptor_branches.push_back(rotated_descriptor +
-                                      _descriptor_orientation_alignment->forward(orientation_aligned) +
-                                      _descriptor_dilated_context->forward(rotated_descriptor));
-    }
-
-    auto descriptor_stack = torch::stack(descriptor_branches, 1);
-    std::vector<torch::Tensor> quality_logits;
-    quality_logits.reserve(descriptor_branches.size());
-    for (const auto& descriptor_branch : descriptor_branches)
-    {
-        quality_logits.push_back(_descriptor_branch_quality->forward(descriptor_branch));
-    }
-    auto branch_weights = torch::softmax(torch::stack(quality_logits, 1), 1);
-    auto descriptor_invariant = (descriptor_stack * branch_weights).sum(1);
-    auto descriptor_equivariant = descriptor_branches.front();
-    auto descriptor_sum =
-        _descriptor_rotation_fusion->forward(torch::cat({descriptor_invariant, descriptor_equivariant}, 1));
-    auto heatmap = torch::sigmoid(heatmap_sum / 4.0);
+    auto descriptor_sum = descriptor_gated + _descriptor_orientation_alignment->forward(descriptor_gated) +
+                          _descriptor_dilated_context->forward(descriptor_gated);
+    auto heatmap = torch::sigmoid(heatmap_sum);
     auto descriptors = normalizeChannelsStable(descriptor_sum);
     auto scale = torch::exp(_scale->forward(geometry_context).clamp(-2.0, 2.0));
     auto orientation = normalizeChannelsStable(_orientation->forward(geometry_context));
     auto affine_delta = torch::tanh(_affine->forward(geometry_context)) * 0.1;
     auto identity = torch::tensor({1.0, 0.0, 0.0, 1.0}, affine_delta.options()).view({1, 4, 1, 1});
     auto affine = identity + affine_delta;
+    auto matchability = torch::sigmoid(_matchability->forward(geometry_context));
+    auto descriptor_uncertainty = torch::sigmoid(_descriptor_uncertainty->forward(geometry_context));
+    auto no_match_prior = torch::sigmoid(_no_match_prior->forward(geometry_context));
     descriptors = geometryAwareDescriptorPool(descriptors, orientation, scale, affine);
-    return PfmV21SparseHeadOutput{heatmap, descriptors, scale, orientation, affine, keypoint_offsets};
+    return PfmV21SparseHeadOutput{heatmap, descriptors, scale, orientation, affine, keypoint_offsets,
+                                  matchability, descriptor_uncertainty, no_match_prior};
 }
 
 PfmV21DenseHeadImpl::PfmV21DenseHeadImpl(int64_t feature_channels) : _feature_channels(feature_channels)
@@ -1680,7 +1621,10 @@ PfmV21RawFeatureMaps PfmV21FeatureMatcherImpl::forwardSingle(const torch::Tensor
                                 dense_confidence,
                                 sparse.keypoint_offsets,
                                 quality,
-                                texture_saliency};
+                                texture_saliency,
+                                sparse.matchability,
+                                sparse.descriptor_uncertainty,
+                                sparse.no_match_prior};
 }
 
 } // namespace pfm::v21

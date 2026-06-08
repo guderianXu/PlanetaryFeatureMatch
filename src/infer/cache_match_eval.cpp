@@ -296,7 +296,8 @@ CacheRawMutualEvalResult evaluatePythonRawMutualDescriptorMaps(const PairArchive
                                                                const torch::Tensor& descriptors_a,
                                                                const torch::Tensor& descriptors_b,
                                                                const PythonDescriptorGridConfig& keypoint_config,
-                                                               int64_t max_matches, double threshold_px)
+                                                               int64_t max_matches, double threshold_px,
+                                                               double min_descriptor_score)
 {
     if (max_matches <= 0)
     {
@@ -306,9 +307,13 @@ CacheRawMutualEvalResult evaluatePythonRawMutualDescriptorMaps(const PairArchive
     {
         throw std::invalid_argument("threshold_px must be non-negative and finite");
     }
+    if (!std::isfinite(min_descriptor_score))
+    {
+        throw std::invalid_argument("min_descriptor_score must be finite");
+    }
     auto features_a = makePythonDescriptorGridFeatureSet(pair.view_a, descriptors_a, keypoint_config);
     auto features_b = makePythonDescriptorGridFeatureSet(pair.view_b, descriptors_b, keypoint_config);
-    auto matches = matchFeatureSetsPythonRawMutual(features_a, features_b, max_matches);
+    auto matches = matchFeatureSetsPythonRawMutual(features_a, features_b, max_matches, min_descriptor_score);
     CacheRawMutualEvalResult result;
     result.matches = matches.sparse_matches.size(0);
     if (result.matches == 0)

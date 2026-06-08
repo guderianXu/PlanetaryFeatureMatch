@@ -297,6 +297,9 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             keypoint_offsets=torch.zeros(1, 2, 2, 2),
             quality=torch.full((1, 1, 2, 2), 0.9),
             local_contrast=torch.full((1, 1, 2, 2), 0.4),
+            matchability=torch.full((1, 1, 2, 2), 0.6),
+            descriptor_uncertainty=torch.full((1, 1, 2, 2), 0.2),
+            no_match_prior=torch.full((1, 1, 2, 2), 0.3),
         )
 
         meta = eval_py.graph_metadata_from_raw_features(raw, torch.tensor([[1.0, 1.0]]), meta_dim=16)
@@ -304,8 +307,32 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(tuple(meta.shape), (1, 16))
         self.assertAlmostEqual(float(meta[0, 4]), 0.7, places=5)
         self.assertAlmostEqual(float(meta[0, 5]), torch.tensor(2.0).log().item(), places=5)
-        self.assertAlmostEqual(float(meta[0, 12]), 0.9, places=5)
+        self.assertAlmostEqual(float(meta[0, 12]), 0.6, places=5)
         self.assertAlmostEqual(float(meta[0, 13]), 0.4, places=5)
+        self.assertAlmostEqual(float(meta[0, 14]), 0.2, places=5)
+        self.assertAlmostEqual(float(meta[0, 15]), 0.3, places=5)
+
+    def test_effective_keypoint_score_map_uses_reliability_maps(self):
+        heatmap = torch.tensor([[[[0.9, 0.9]]]], dtype=torch.float32)
+        raw = pfm_model.RawFeatureMaps(
+            heatmap=heatmap,
+            descriptors=torch.randn(1, 4, 1, 2),
+            scale=torch.ones(1, 1, 1, 2),
+            orientation=torch.zeros(1, 2, 1, 2),
+            affine=torch.zeros(1, 4, 1, 2),
+            dense_confidence=heatmap,
+            keypoint_offsets=torch.zeros(1, 2, 1, 2),
+            quality=torch.ones(1, 1, 1, 2),
+            local_contrast=torch.zeros(1, 1, 1, 2),
+            matchability=torch.tensor([[[[0.2, 0.8]]]], dtype=torch.float32),
+            descriptor_uncertainty=torch.tensor([[[[0.0, 0.5]]]], dtype=torch.float32),
+            no_match_prior=torch.zeros(1, 1, 1, 2),
+        )
+
+        score = eval_py.effective_keypoint_score_map(raw)
+
+        expected = torch.tensor([[[[0.18, 0.36]]]], dtype=torch.float32)
+        self.assertTrue(torch.allclose(score, expected, atol=1.0e-6))
 
     def test_parse_args_accepts_min_target_gradient(self):
         argv = [
@@ -359,7 +386,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertGreater(contrast, 20.0)
 
-    def test_cyclic_descriptor_similarity_accepts_quarter_channel_shift(self):
+    def test_cyclic_descriptor_similarity_rejects_quarter_channel_shift(self):
         desc_a = torch.zeros(1, 8)
         desc_b = torch.zeros(1, 8)
         desc_a[0, 1] = 1.0
@@ -367,7 +394,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         similarity = eval_py.cyclic_descriptor_similarity(desc_a, desc_b)
 
-        self.assertAlmostEqual(float(similarity[0, 0]), 1.0, places=6)
+        self.assertAlmostEqual(float(similarity[0, 0]), 0.0, places=6)
 
     def test_match_pair_descriptor_maps_scores_identity_warp_matches(self):
         image = torch.ones(1, 4, 4)
@@ -391,6 +418,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             max_keypoints=4,
             min_intensity=0.0,
             threshold_px=0.01,
+            graph_fallback_mode="none",
         )
 
         self.assertEqual(result.matches, 4)
@@ -475,6 +503,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             max_keypoints=4,
             min_intensity=0.0,
             threshold_px=0.01,
+            graph_fallback_mode="none",
         )
 
         self.assertEqual(result.matches, 2)

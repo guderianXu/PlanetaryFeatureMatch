@@ -328,29 +328,29 @@ static void matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilt
     PFM_REQUIRE(matches.sparse_scores.size(0) == matches.sparse_matches.size(0));
 }
 
-static torch::Tensor makeC4DescriptorRows(const std::vector<int64_t>& slot_indices)
+static torch::Tensor makeSlotDescriptorRows(const std::vector<int64_t>& slot_indices)
 {
     auto descriptors = torch::zeros({static_cast<int64_t>(slot_indices.size()), 16}, torch::kFloat32);
     for (int64_t row = 0; row < static_cast<int64_t>(slot_indices.size()); ++row)
     {
-        descriptors.index_put_({row, row + slot_indices[static_cast<size_t>(row)] * 4}, 1.0F);
+        descriptors.index_put_({row, slot_indices[static_cast<size_t>(row)]}, 1.0F);
     }
     return descriptors;
 }
 
-static void matchingPipelineUsesOneGlobalCyclicDescriptorShift()
+static void matchingPipelineUsesDescriptorSlotsForGlobalGeometry()
 {
     const auto keypoints_a =
         torch::tensor({{0.0F, 0.0F}, {10.0F, 0.0F}, {20.0F, 0.0F}, {30.0F, 0.0F}}, torch::kFloat32);
     const auto keypoints_b =
         torch::tensor({{30.0F, 0.0F}, {20.0F, 0.0F}, {10.0F, 0.0F}, {0.0F, 0.0F}, {100.0F, 100.0F}}, torch::kFloat32);
-    const auto features_a = makeFeatureSet(keypoints_a, makeC4DescriptorRows({0, 0, 0, 0}),
+    const auto features_a = makeFeatureSet(keypoints_a, makeSlotDescriptorRows({0, 1, 2, 3}),
                                            torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
     auto descriptors_b = torch::zeros({5, 16}, torch::kFloat32);
-    descriptors_b.index_put_({0, 2 * 4 + 3}, 1.0F);
-    descriptors_b.index_put_({1, 2 * 4 + 2}, 1.0F);
-    descriptors_b.index_put_({2, 2 * 4 + 1}, 1.0F);
-    descriptors_b.index_put_({3, 2 * 4 + 0}, 1.0F);
+    descriptors_b.index_put_({0, 3}, 1.0F);
+    descriptors_b.index_put_({1, 2}, 1.0F);
+    descriptors_b.index_put_({2, 1}, 1.0F);
+    descriptors_b.index_put_({3, 0}, 1.0F);
     descriptors_b.index_put_({4, 0}, 1.0F);
     const auto features_b = makeFeatureSet(keypoints_b, descriptors_b, torch::empty({0, 2}, torch::kFloat32),
                                            torch::empty({0}, torch::kFloat32));
@@ -361,14 +361,14 @@ static void matchingPipelineUsesOneGlobalCyclicDescriptorShift()
     PFM_REQUIRE(torch::equal(matches.sparse_matches, expected));
 }
 
-static void matchingPipelineRecoversHalfTurnWithCyclicDescriptors()
+static void matchingPipelineRecoversHalfTurnWithStrictDescriptors()
 {
     const auto features_a = makeFeatureSet(
         torch::tensor({{2.0F, 2.0F}, {8.0F, 2.0F}, {2.0F, 8.0F}, {8.0F, 8.0F}}, torch::kFloat32),
-        makeC4DescriptorRows({0, 0, 0, 0}), torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
+        makeSlotDescriptorRows({0, 1, 2, 3}), torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
     auto features_b = makeFeatureSet(
         torch::tensor({{7.0F, 7.0F}, {1.0F, 7.0F}, {7.0F, 1.0F}, {1.0F, 1.0F}, {2.0F, 2.0F}}, torch::kFloat32),
-        torch::cat({makeC4DescriptorRows({2, 2, 2, 2}),
+        torch::cat({makeSlotDescriptorRows({0, 1, 2, 3}),
                     torch::nn::functional::one_hot(torch::tensor({0}), 16).to(torch::kFloat32)},
                    0),
         torch::empty({0, 2}, torch::kFloat32), torch::empty({0}, torch::kFloat32));
@@ -403,7 +403,7 @@ static void matching_pipeline_python_raw_mutual_sorts_and_limits_like_python_eva
     PFM_REQUIRE(matches.sparse_scores.size(0) == 2);
 }
 
-static void matching_pipeline_python_raw_mutual_accepts_quarter_channel_shift()
+static void matching_pipeline_python_raw_mutual_rejects_quarter_channel_shift()
 {
     const auto keypoints = torch::tensor({{0.0F, 0.0F}}, torch::kFloat32);
     const auto descriptors_a = torch::tensor({{1.0F, 0.0F, 0.0F, 0.0F}}, torch::kFloat32);
@@ -413,11 +413,9 @@ static void matching_pipeline_python_raw_mutual_accepts_quarter_channel_shift()
     const auto features_b = makeFeatureSet(keypoints, descriptors_b, torch::empty({0, 2}, torch::kFloat32),
                                            torch::empty({0}, torch::kFloat32));
 
-    const auto matches = pfm::matchFeatureSetsPythonRawMutual(features_a, features_b, 1);
+    const auto matches = pfm::matchFeatureSetsPythonRawMutual(features_a, features_b, 1, 0.1);
 
-    PFM_REQUIRE(matches.sparse_matches.size(0) == 1);
-    PFM_REQUIRE(torch::equal(matches.sparse_matches, torch::tensor({{0, 0}}, torch::kInt64)));
-    PFM_REQUIRE_CLOSE(matches.sparse_scores.index({0}).item<float>(), 1.0F, 1.0e-6F);
+    PFM_REQUIRE(matches.sparse_matches.size(0) == 0);
 }
 
 static void matchingPipelineAcceptsCudaGraphMatcherWithCpuFeatures()
@@ -1202,8 +1200,8 @@ void register_matching_pipeline_tests()
                   matchingPipelineReturnsLearnedSparseCandidatesWithoutTranslationFilter);
     register_test("matching_pipeline_python_raw_mutual_sorts_and_limits_like_python_eval",
                   matching_pipeline_python_raw_mutual_sorts_and_limits_like_python_eval);
-    register_test("matching_pipeline_python_raw_mutual_accepts_quarter_channel_shift",
-                  matching_pipeline_python_raw_mutual_accepts_quarter_channel_shift);
+    register_test("matching_pipeline_python_raw_mutual_rejects_quarter_channel_shift",
+                  matching_pipeline_python_raw_mutual_rejects_quarter_channel_shift);
     register_test("matching_pipeline_accepts_cuda_graph_matcher_with_cpu_features",
                   matchingPipelineAcceptsCudaGraphMatcherWithCpuFeatures);
     register_test("matching_pipeline_keeps_more_than_legacy_256_geometric_matches",

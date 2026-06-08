@@ -68,57 +68,13 @@ bool require_path(const std::string& value, const char* option_name)
     return false;
 }
 
-int64_t descriptorOrientationQuarterTurn(const float* orientation_data, int64_t spatial_count, int64_t index)
-{
-    const auto axis_x = orientation_data[index];
-    const auto axis_y = orientation_data[spatial_count + index];
-    const auto axis_norm = std::sqrt(axis_x * axis_x + axis_y * axis_y);
-    if (!std::isfinite(axis_norm) || axis_norm <= 1.0e-6F)
-    {
-        return 0;
-    }
-    const auto angle = std::atan2(static_cast<double>(axis_y), static_cast<double>(axis_x));
-    auto turns = static_cast<int64_t>(std::llround(angle / (PI * 0.5)));
-    turns %= 4;
-    if (turns < 0)
-    {
-        turns += 4;
-    }
-    return turns;
-}
-
 void canonicalizeDescriptorRowsByOrientation(torch::Tensor& descriptors, const torch::Tensor& orientation,
                                              const std::vector<int64_t>& spatial_indices, int64_t spatial_count)
 {
-    if (!descriptors.defined() || descriptors.size(1) < 4 || descriptors.size(1) % 4 != 0 || !orientation.defined() ||
-        orientation.size(1) != 2 || static_cast<int64_t>(spatial_indices.size()) != descriptors.size(0))
-    {
-        return;
-    }
-    auto descriptor_rows = descriptors.to(torch::kCPU, torch::kFloat32).contiguous();
-    const auto orientation_cpu = orientation.to(torch::kCPU, torch::kFloat32).contiguous();
-    auto* descriptor_data = descriptor_rows.data_ptr<float>();
-    const auto* orientation_data = orientation_cpu.data_ptr<float>();
-    const auto descriptor_channels = descriptor_rows.size(1);
-    const auto group_channels = descriptor_channels / 4;
-    std::vector<float> row(static_cast<std::size_t>(descriptor_channels), 0.0F);
-    for (int64_t row_index = 0; row_index < descriptor_rows.size(0); ++row_index)
-    {
-        const auto turns = descriptorOrientationQuarterTurn(orientation_data, spatial_count,
-                                                            spatial_indices[static_cast<std::size_t>(row_index)]);
-        if (turns == 0)
-        {
-            continue;
-        }
-        const auto left_shift = (turns * group_channels) % descriptor_channels;
-        auto* descriptor_row = descriptor_data + row_index * descriptor_channels;
-        std::copy(descriptor_row, descriptor_row + descriptor_channels, row.begin());
-        for (int64_t channel = 0; channel < descriptor_channels; ++channel)
-        {
-            descriptor_row[channel] = row[static_cast<std::size_t>((channel + left_shift) % descriptor_channels)];
-        }
-    }
-    descriptors = descriptor_rows;
+    (void)descriptors;
+    (void)orientation;
+    (void)spatial_indices;
+    (void)spatial_count;
 }
 
 double rotationInvariantTextureBlendWeight()

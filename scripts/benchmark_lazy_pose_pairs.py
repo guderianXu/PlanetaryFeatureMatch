@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -17,7 +18,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -51,8 +52,11 @@ from pfm_data.photometric import (  # noqa: E402
 )
 from pfm_pytorch_training import (  # noqa: E402
     FalseMatchLabels,
+    amp_dtype_from_name,
     descriptor_parameters,
     hard_pair_probability,
+    make_grad_scaler,
+    parse_rotation_consistency_degrees,
     read_false_match_labels,
     train_step,
 )
@@ -68,6 +72,22 @@ DEFAULT_TARGET_VARIANTS = (
     "extreme_01",
     "extreme_02",
     "extreme_03",
+)
+
+PAIR_TYPE_SAME_POSITION_VIEW = "same_position_view"
+PAIR_TYPE_CROSS_CAMERA = "cross_camera"
+PAIR_TYPE_CROSS_FOV = "cross_fov"
+PAIR_TYPES = (PAIR_TYPE_SAME_POSITION_VIEW, PAIR_TYPE_CROSS_CAMERA, PAIR_TYPE_CROSS_FOV)
+PAIR_TYPE_METRIC_FIELDS = [f"pair_type_{pair_type}" for pair_type in PAIR_TYPES]
+DEFAULT_PAIR_TYPE_WEIGHTS = {
+    PAIR_TYPE_SAME_POSITION_VIEW: 0.40,
+    PAIR_TYPE_CROSS_CAMERA: 0.35,
+    PAIR_TYPE_CROSS_FOV: 0.25,
+}
+DEFAULT_PLANET_RADIUS_M = 3_396_190.0
+HEIGHT_KM_PATTERNS = (
+    re.compile(r"h(?P<height>\d+)km", re.IGNORECASE),
+    re.compile(r"(?:^|[_:/\\-])h(?P<height>\d+)(?:$|[_:/\\-])", re.IGNORECASE),
 )
 
 DEFAULT_INIT_STATE = PROJECT_ROOT / "runs" / "python_diag_balanced_512_3epoch_20260603_2143" / "pytorch_pfm_state.pt"
@@ -100,6 +120,10 @@ class RenderRecord:
     image_path: Path
     uint8_path: Path | None
     depth_path: Path
+    dataset_id: str = ""
+    raw_base_id: str = ""
+    lon_deg: float | None = None
+    lat_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +132,15 @@ class LazyPairSpec:
     split: str
     reference: RenderRecord
     target: RenderRecord
+    pair_type: str = PAIR_TYPE_SAME_POSITION_VIEW
+    fixed_crop_a: "CropWindow | None" = None
+    fixed_crop_b: "CropWindow | None" = None
+
+
+@dataclass(frozen=True)
+class SpatialFootprint:
+    record: RenderRecord
+    bounds: tuple[float, float, float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -168,6 +201,43 @@ def _first_path(value: Path | list[Path] | tuple[Path, ...] | None) -> Path | No
     return paths[0] if paths else None
 
 
+def parse_int_list(value: str) -> list[int]:
+    values: list[int] = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parsed = int(item)
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("offsets must be nonnegative")
+        values.append(parsed)
+    if not values:
+        raise argparse.ArgumentTypeError("at least one offset is required")
+    return values
+
+
+def parse_pair_type_weights(value: str) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise argparse.ArgumentTypeError("pair type weights must use name=value entries")
+        name, raw_weight = [part.strip() for part in item.split("=", 1)]
+        if name not in PAIR_TYPES:
+            raise argparse.ArgumentTypeError(f"unknown pair type weight: {name}")
+        weight = float(raw_weight)
+        if weight < 0.0:
+            raise argparse.ArgumentTypeError("pair type weights must be nonnegative")
+        weights[name] = weight
+    if not weights:
+        raise argparse.ArgumentTypeError("at least one pair type weight is required")
+    if sum(weights.values()) <= 0.0:
+        raise argparse.ArgumentTypeError("at least one pair type weight must be positive")
+    return weights
+
+
 def _read_uint8_manifest(path: Path | None) -> dict[str, Path]:
     if path is None or not path.exists():
         return {}
@@ -189,8 +259,15 @@ def _read_uint8_manifests(paths: list[Path]) -> dict[str, Path]:
     return mapping
 
 
-def _read_render_manifest(path: Path, uint8_paths: dict[str, Path], *, dataset_prefix: str | None = None) -> list[RenderRecord]:
+def _read_render_manifest(
+    path: Path,
+    uint8_paths: dict[str, Path],
+    *,
+    dataset_prefix: str | None = None,
+    dataset_id: str | None = None,
+) -> list[RenderRecord]:
     records: list[RenderRecord] = []
+    record_dataset_id = dataset_id or path.parent.name or "dataset_000"
     with path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             pose_id = row.get("pose_id", "")
@@ -200,7 +277,8 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path], *, dataset_p
             uint8_path = uint8_paths.get(str(image_path))
             if uint8_path is None and image_path.is_file():
                 uint8_path = image_path
-            base_id = row["base_id"]
+            raw_base_id = row["base_id"]
+            base_id = raw_base_id
             if dataset_prefix:
                 base_id = f"{dataset_prefix}:{base_id}"
             records.append(
@@ -213,23 +291,46 @@ def _read_render_manifest(path: Path, uint8_paths: dict[str, Path], *, dataset_p
                     image_path=image_path,
                     uint8_path=uint8_path,
                     depth_path=Path(row["depth_path"]),
+                    dataset_id=record_dataset_id,
+                    raw_base_id=raw_base_id,
+                    lon_deg=float(row["lon_deg"]) if row.get("lon_deg") not in (None, "") else None,
+                    lat_deg=float(row["lat_deg"]) if row.get("lat_deg") not in (None, "") else None,
                 )
             )
     return records
 
 
-def _dataset_prefix_for_manifest(path: Path, index: int) -> str:
+def _dataset_name_from_stem(path: Path, index: int) -> str:
+    stem = path.stem
+    for suffix in ("_render_manifest", "_manifest", "render_manifest"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    stem = stem.strip("_")
+    return stem if stem else f"dataset_{index:03d}"
+
+
+def _dataset_prefix_for_manifest(path: Path, index: int, *, prefer_stem: bool = False) -> str:
+    if prefer_stem or path.parent.name == "manifests":
+        return _dataset_name_from_stem(path, index)
     parent_name = path.parent.name
-    return parent_name if parent_name else f"dataset_{index:03d}"
+    return parent_name if parent_name else _dataset_name_from_stem(path, index)
 
 
 def _read_all_render_records(render_manifests: list[Path], uint8_manifests: list[Path]) -> list[RenderRecord]:
     uint8_paths = _read_uint8_manifests(uint8_manifests)
     use_prefix = len(render_manifests) > 1
+    parent_names = [path.parent.name for path in render_manifests]
+    duplicate_parent_names = {name for name in parent_names if name and parent_names.count(name) > 1}
     records: list[RenderRecord] = []
     for index, render_manifest in enumerate(render_manifests):
-        prefix = _dataset_prefix_for_manifest(render_manifest, index) if use_prefix else None
-        records.extend(_read_render_manifest(render_manifest, uint8_paths, dataset_prefix=prefix))
+        dataset_id = _dataset_prefix_for_manifest(
+            render_manifest,
+            index,
+            prefer_stem=render_manifest.parent.name in duplicate_parent_names,
+        )
+        prefix = dataset_id if use_prefix else None
+        records.extend(_read_render_manifest(render_manifest, uint8_paths, dataset_prefix=prefix, dataset_id=dataset_id))
     return records
 
 
@@ -268,6 +369,49 @@ def _cached_camera(path: Path):
     return _cache_get(_CAMERA_CACHE, path, parse_tsai)
 
 
+def _record_dataset_id(record: RenderRecord) -> str:
+    return record.dataset_id or "dataset"
+
+
+def _record_raw_base_id(record: RenderRecord) -> str:
+    return record.raw_base_id or record.base_id
+
+
+def _record_sort_key(record: RenderRecord) -> tuple[str, str, str]:
+    return (_record_raw_base_id(record), record.variant, record.pose_id)
+
+
+def _eligible_record(record: RenderRecord, *, split: str, image_source: str) -> bool:
+    if split != "all" and record.split != split:
+        return False
+    if image_source == "uint8" and record.uint8_path is None:
+        return False
+    image_path = _selected_image_path(record, image_source)
+    return image_path.is_file() and record.depth_path.is_file() and record.tsai_path.is_file()
+
+
+def _record_height_km(record: RenderRecord) -> int | None:
+    candidates = (
+        str(record.tsai_path),
+        record.pose_id,
+        record.base_id,
+        record.raw_base_id,
+        record.dataset_id,
+    )
+    for candidate in candidates:
+        for pattern in HEIGHT_KM_PATTERNS:
+            match = pattern.search(candidate)
+            if match is not None:
+                return int(match.group("height"))
+    return None
+
+
+def _record_height_allowed(record: RenderRecord, height_km_filter: set[int] | None) -> bool:
+    if not height_km_filter:
+        return True
+    return _record_height_km(record) in height_km_filter
+
+
 def build_pair_specs(
     records: list[RenderRecord],
     *,
@@ -281,12 +425,7 @@ def build_pair_specs(
 ) -> list[LazyPairSpec]:
     by_base: dict[str, dict[str, RenderRecord]] = defaultdict(dict)
     for record in records:
-        if split != "all" and record.split != split:
-            continue
-        if image_source == "uint8" and record.uint8_path is None:
-            continue
-        image_path = _selected_image_path(record, image_source)
-        if image_path.is_file() and record.depth_path.is_file() and record.tsai_path.is_file():
+        if _eligible_record(record, split=split, image_source=image_source):
             by_base[record.base_id][record.variant] = record
 
     specs: list[LazyPairSpec] = []
@@ -305,6 +444,7 @@ def build_pair_specs(
                     split=reference.split,
                     reference=reference,
                     target=target,
+                    pair_type=PAIR_TYPE_SAME_POSITION_VIEW,
                 )
             )
     if shuffle:
@@ -313,6 +453,617 @@ def build_pair_specs(
     if limit_pairs > 0:
         return specs[:limit_pairs]
     return specs
+
+
+def _records_by_dataset_base_variant(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    image_source: str,
+    variants: tuple[str, ...],
+) -> dict[str, dict[str, dict[str, RenderRecord]]]:
+    allowed_variants = set(variants)
+    grouped: dict[str, dict[str, dict[str, RenderRecord]]] = defaultdict(lambda: defaultdict(dict))
+    for record in records:
+        if record.variant not in allowed_variants:
+            continue
+        if not _eligible_record(record, split=split, image_source=image_source):
+            continue
+        grouped[_record_dataset_id(record)][_record_raw_base_id(record)][record.variant] = record
+    return grouped
+
+
+def build_cross_camera_pair_specs(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    cross_variants: tuple[str, ...],
+    offsets: tuple[int, ...],
+    image_source: str,
+    start_index: int,
+) -> list[LazyPairSpec]:
+    grouped = _records_by_dataset_base_variant(
+        records,
+        split=split,
+        image_source=image_source,
+        variants=cross_variants,
+    )
+    specs: list[LazyPairSpec] = []
+    for dataset_id in sorted(grouped):
+        bases = sorted(grouped[dataset_id])
+        for offset in offsets:
+            if offset <= 0:
+                continue
+            for index in range(0, max(0, len(bases) - offset)):
+                source_base = bases[index]
+                target_base = bases[index + offset]
+                if source_base == target_base:
+                    continue
+                source_variants = grouped[dataset_id][source_base]
+                target_variants = grouped[dataset_id][target_base]
+                for reference_variant in cross_variants:
+                    reference = source_variants.get(reference_variant)
+                    if reference is None:
+                        continue
+                    for target_variant in cross_variants:
+                        target = target_variants.get(target_variant)
+                        if target is None:
+                            continue
+                        specs.append(
+                            LazyPairSpec(
+                                pair_index=start_index + len(specs),
+                                split=reference.split,
+                                reference=reference,
+                                target=target,
+                                pair_type=PAIR_TYPE_CROSS_CAMERA,
+                            )
+                        )
+    return specs
+
+
+def _representative_base_record(variants: dict[str, RenderRecord], preferred_variants: tuple[str, ...]) -> RenderRecord:
+    for variant in preferred_variants:
+        record = variants.get(variant)
+        if record is not None:
+            return record
+    return next(iter(variants.values()))
+
+
+def _record_has_position(record: RenderRecord) -> bool:
+    return record.lon_deg is not None and record.lat_deg is not None
+
+
+def _camera_image_size_from_intrinsics(camera) -> tuple[int, int]:
+    width = max(1, int(round(float(camera.cu) * 2.0)))
+    height = max(1, int(round(float(camera.cv) * 2.0)))
+    return width, height
+
+
+def _ray_sphere_intersection_t(center: np.ndarray, direction: np.ndarray, radius: float) -> float | None:
+    b = 2.0 * float(np.dot(center, direction))
+    c = float(np.dot(center, center) - radius * radius)
+    discriminant = b * b - 4.0 * c
+    if discriminant < 0.0:
+        return None
+    sqrt_discriminant = math.sqrt(discriminant)
+    candidates = [(-b - sqrt_discriminant) * 0.5, (-b + sqrt_discriminant) * 0.5]
+    positive = [value for value in candidates if value > 0.0]
+    return min(positive) if positive else None
+
+
+def camera_sphere_footprint_bounds(
+    camera,
+    *,
+    width: int,
+    height: int,
+    planet_radius_m: float,
+    sample_grid: int,
+    bbox_margin_m: float,
+) -> tuple[float, float, float, float, float, float]:
+    if planet_radius_m <= 0.0:
+        raise ValueError("planet_radius_m must be positive")
+    sample_count = max(2, int(sample_grid))
+    center = np.asarray(camera.center, dtype=np.float64)
+    rotation_world_to_camera = np.asarray(camera.rotation_world_to_camera, dtype=np.float64)
+    x_values = np.linspace(0.0, max(0.0, float(width - 1)), sample_count, dtype=np.float64)
+    y_values = np.linspace(0.0, max(0.0, float(height - 1)), sample_count, dtype=np.float64)
+
+    points: list[np.ndarray] = []
+    for y in y_values:
+        for x in x_values:
+            ray_camera = np.asarray(
+                [
+                    (float(x) + 0.5 - float(camera.cu)) / float(camera.fu),
+                    (float(y) + 0.5 - float(camera.cv)) / float(camera.fv),
+                    1.0,
+                ],
+                dtype=np.float64,
+            )
+            direction = rotation_world_to_camera.T @ ray_camera
+            norm = float(np.linalg.norm(direction))
+            if norm <= 0.0:
+                continue
+            direction = direction / norm
+            t = _ray_sphere_intersection_t(center, direction, float(planet_radius_m))
+            if t is not None:
+                points.append(center + t * direction)
+
+    if not points:
+        raise RuntimeError("camera rays do not intersect the planet sphere")
+    stacked = np.stack(points, axis=0)
+    margin = max(0.0, float(bbox_margin_m))
+    minimum = stacked.min(axis=0) - margin
+    maximum = stacked.max(axis=0) + margin
+    return (
+        float(minimum[0]),
+        float(minimum[1]),
+        float(minimum[2]),
+        float(maximum[0]),
+        float(maximum[1]),
+        float(maximum[2]),
+    )
+
+
+def build_camera_spatial_footprints(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    image_source: str,
+    planet_radius_m: float,
+    sample_grid: int,
+    bbox_margin_m: float,
+    height_km_filter: set[int] | None = None,
+) -> dict[str, SpatialFootprint]:
+    footprints: dict[str, SpatialFootprint] = {}
+    for record in sorted(records, key=_record_sort_key):
+        if not _eligible_record(record, split=split, image_source=image_source):
+            continue
+        if not _record_height_allowed(record, height_km_filter):
+            continue
+        camera = _cached_camera(record.tsai_path)
+        width, height = _camera_image_size_from_intrinsics(camera)
+        bounds = camera_sphere_footprint_bounds(
+            camera,
+            width=width,
+            height=height,
+            planet_radius_m=planet_radius_m,
+            sample_grid=sample_grid,
+            bbox_margin_m=bbox_margin_m,
+        )
+        footprints[record.pose_id] = SpatialFootprint(record=record, bounds=bounds)
+    return footprints
+
+
+def _spatial_distance_deg(left: RenderRecord, right: RenderRecord) -> float:
+    if not _record_has_position(left) or not _record_has_position(right):
+        return math.inf
+    assert left.lon_deg is not None and left.lat_deg is not None
+    assert right.lon_deg is not None and right.lat_deg is not None
+    lon_delta = abs(left.lon_deg - right.lon_deg)
+    lon_delta = min(lon_delta, 360.0 - lon_delta)
+    lat_delta = left.lat_deg - right.lat_deg
+    return lon_delta * lon_delta + lat_delta * lat_delta
+
+
+def _append_variant_cross_fov_specs(
+    specs: list[LazyPairSpec],
+    *,
+    source_variants: dict[str, RenderRecord],
+    target_variants: dict[str, RenderRecord],
+    cross_variants: tuple[str, ...],
+    start_index: int,
+) -> None:
+    for reference_variant in cross_variants:
+        reference = source_variants.get(reference_variant)
+        if reference is None:
+            continue
+        for target_variant in cross_variants:
+            target = target_variants.get(target_variant)
+            if target is None:
+                continue
+            specs.append(
+                LazyPairSpec(
+                    pair_index=start_index + len(specs),
+                    split=reference.split,
+                    reference=reference,
+                    target=target,
+                    pair_type=PAIR_TYPE_CROSS_FOV,
+                )
+            )
+
+
+def build_cross_fov_pair_specs(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    cross_variants: tuple[str, ...],
+    offsets: tuple[int, ...],
+    image_source: str,
+    start_index: int,
+) -> list[LazyPairSpec]:
+    grouped = _records_by_dataset_base_variant(
+        records,
+        split=split,
+        image_source=image_source,
+        variants=cross_variants,
+    )
+    dataset_ids = sorted(grouped)
+    specs: list[LazyPairSpec] = []
+    for left_index, left_dataset_id in enumerate(dataset_ids):
+        left_bases = sorted(grouped[left_dataset_id])
+        for right_dataset_id in dataset_ids[left_index + 1 :]:
+            right_bases = sorted(grouped[right_dataset_id])
+            left_representatives = {
+                base_id: _representative_base_record(grouped[left_dataset_id][base_id], cross_variants)
+                for base_id in left_bases
+            }
+            right_representatives = {
+                base_id: _representative_base_record(grouped[right_dataset_id][base_id], cross_variants)
+                for base_id in right_bases
+            }
+            use_spatial_pairing = all(
+                _record_has_position(record) for record in (*left_representatives.values(), *right_representatives.values())
+            )
+            if use_spatial_pairing:
+                for source_base in left_bases:
+                    ranked_targets = sorted(
+                        right_bases,
+                        key=lambda target_base: (
+                            _spatial_distance_deg(left_representatives[source_base], right_representatives[target_base]),
+                            target_base,
+                        ),
+                    )
+                    used_target_bases: set[str] = set()
+                    for offset in offsets:
+                        if offset < 0 or offset >= len(ranked_targets):
+                            continue
+                        target_base = ranked_targets[offset]
+                        if target_base in used_target_bases:
+                            continue
+                        used_target_bases.add(target_base)
+                        _append_variant_cross_fov_specs(
+                            specs,
+                            source_variants=grouped[left_dataset_id][source_base],
+                            target_variants=grouped[right_dataset_id][target_base],
+                            cross_variants=cross_variants,
+                            start_index=start_index,
+                        )
+                continue
+            for offset in offsets:
+                if offset < 0:
+                    continue
+                max_left = min(len(left_bases), max(0, len(right_bases) - offset))
+                for index in range(max_left):
+                    source_variants = grouped[left_dataset_id][left_bases[index]]
+                    target_variants = grouped[right_dataset_id][right_bases[index + offset]]
+                    _append_variant_cross_fov_specs(
+                        specs,
+                        source_variants=source_variants,
+                        target_variants=target_variants,
+                        cross_variants=cross_variants,
+                        start_index=start_index,
+                    )
+    return specs
+
+
+def _classify_spatial_pair_type(reference: RenderRecord, target: RenderRecord) -> str:
+    if _record_dataset_id(reference) != _record_dataset_id(target):
+        return PAIR_TYPE_CROSS_FOV
+    if _record_raw_base_id(reference) != _record_raw_base_id(target):
+        return PAIR_TYPE_CROSS_CAMERA
+    return PAIR_TYPE_SAME_POSITION_VIEW
+
+
+@dataclass(frozen=True)
+class _SpatialIndexNode:
+    bounds: tuple[float, float, float, float, float, float]
+    children: tuple["_SpatialIndexNode", ...] = ()
+    item_indices: tuple[int, ...] = ()
+
+
+def _bounds_intersect(
+    left: tuple[float, float, float, float, float, float],
+    right: tuple[float, float, float, float, float, float],
+) -> bool:
+    return (
+        left[0] <= right[3]
+        and left[3] >= right[0]
+        and left[1] <= right[4]
+        and left[4] >= right[1]
+        and left[2] <= right[5]
+        and left[5] >= right[2]
+    )
+
+
+def _union_bounds(
+    bounds: list[tuple[float, float, float, float, float, float]],
+) -> tuple[float, float, float, float, float, float]:
+    return (
+        min(item[0] for item in bounds),
+        min(item[1] for item in bounds),
+        min(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+        max(item[4] for item in bounds),
+        max(item[5] for item in bounds),
+    )
+
+
+def _bounds_center(bounds: tuple[float, float, float, float, float, float], axis: int) -> float:
+    return 0.5 * (bounds[axis] + bounds[axis + 3])
+
+
+def _pack_spatial_nodes(
+    items: list[tuple[int, tuple[float, float, float, float, float, float]]],
+    *,
+    node_size: int,
+) -> _SpatialIndexNode:
+    if not items:
+        raise ValueError("cannot build an empty spatial index")
+    if len(items) <= node_size:
+        return _SpatialIndexNode(
+            bounds=_union_bounds([bounds for _, bounds in items]),
+            item_indices=tuple(index for index, _ in items),
+        )
+    spreads = [
+        max(_bounds_center(bounds, axis) for _, bounds in items) - min(_bounds_center(bounds, axis) for _, bounds in items)
+        for axis in range(3)
+    ]
+    axis = max(range(3), key=lambda item: spreads[item])
+    ordered = sorted(items, key=lambda item: (_bounds_center(item[1], axis), item[0]))
+    children = tuple(
+        _pack_spatial_nodes(ordered[index : index + node_size], node_size=node_size)
+        for index in range(0, len(ordered), node_size)
+    )
+    return _SpatialIndexNode(
+        bounds=_union_bounds([child.bounds for child in children]),
+        children=children,
+    )
+
+
+class _PackedSpatialIndex:
+    def __init__(self, bounds: list[tuple[float, float, float, float, float, float]], *, node_size: int = 32) -> None:
+        if not bounds:
+            self._root: _SpatialIndexNode | None = None
+            return
+        self._bounds = bounds
+        self._root = _pack_spatial_nodes(list(enumerate(bounds)), node_size=max(2, int(node_size)))
+
+    def intersection(self, bounds: tuple[float, float, float, float, float, float]) -> Iterator[int]:
+        if self._root is None:
+            return
+        stack = [self._root]
+        while stack:
+            node = stack.pop()
+            if not _bounds_intersect(node.bounds, bounds):
+                continue
+            if node.item_indices:
+                for item_index in node.item_indices:
+                    if _bounds_intersect(self._bounds[item_index], bounds):
+                        yield item_index
+                continue
+            stack.extend(node.children)
+
+
+def build_spatial_index_pair_specs(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    image_source: str,
+    footprints: dict[str, SpatialFootprint],
+    start_index: int,
+) -> list[LazyPairSpec]:
+    eligible = [
+        footprints[record.pose_id]
+        for record in sorted(records, key=_record_sort_key)
+        if record.pose_id in footprints and _eligible_record(record, split=split, image_source=image_source)
+    ]
+    spatial_index = _PackedSpatialIndex([footprint.bounds for footprint in eligible])
+
+    specs: list[LazyPairSpec] = []
+    for left_index, left in enumerate(eligible):
+        for right_index in spatial_index.intersection(left.bounds):
+            if right_index <= left_index:
+                continue
+            right = eligible[right_index]
+            specs.append(
+                LazyPairSpec(
+                    pair_index=start_index + len(specs),
+                    split=left.record.split,
+                    reference=left.record,
+                    target=right.record,
+                    pair_type=_classify_spatial_pair_type(left.record, right.record),
+                )
+            )
+    return specs
+
+
+def count_pair_types(specs: list[LazyPairSpec]) -> dict[str, int]:
+    counts = {pair_type: 0 for pair_type in PAIR_TYPES}
+    for spec in specs:
+        counts.setdefault(spec.pair_type, 0)
+        counts[spec.pair_type] += 1
+    return counts
+
+
+def pair_type_metric_columns(counts: dict[str, int]) -> dict[str, int]:
+    return {f"pair_type_{pair_type}": int(counts.get(pair_type, 0)) for pair_type in PAIR_TYPES}
+
+
+def _reindex_pair_specs(specs: list[LazyPairSpec]) -> list[LazyPairSpec]:
+    return [replace(spec, pair_index=index) for index, spec in enumerate(specs)]
+
+
+def _select_pair_specs(
+    specs: list[LazyPairSpec],
+    *,
+    limit_pairs: int,
+    seed: int,
+    shuffle: bool,
+    pair_type_weights: dict[str, float],
+) -> list[LazyPairSpec]:
+    if limit_pairs <= 0:
+        selected = list(specs)
+        if shuffle:
+            rng = random.Random(seed)
+            rng.shuffle(selected)
+        return _reindex_pair_specs(selected)
+
+    by_type: dict[str, list[LazyPairSpec]] = {pair_type: [] for pair_type in PAIR_TYPES}
+    for spec in specs:
+        by_type.setdefault(spec.pair_type, []).append(spec)
+    rng = random.Random(seed)
+    if shuffle:
+        for items in by_type.values():
+            rng.shuffle(items)
+
+    positions = {pair_type: 0 for pair_type in by_type}
+    selected: list[LazyPairSpec] = []
+    while len(selected) < limit_pairs:
+        available = [
+            pair_type
+            for pair_type, items in by_type.items()
+            if positions.get(pair_type, 0) < len(items) and pair_type_weights.get(pair_type, 0.0) > 0.0
+        ]
+        if not available:
+            break
+        total_weight = sum(pair_type_weights.get(pair_type, 0.0) for pair_type in available)
+        threshold = rng.random() * total_weight
+        cumulative = 0.0
+        chosen = available[-1]
+        for pair_type in available:
+            cumulative += pair_type_weights.get(pair_type, 0.0)
+            if cumulative >= threshold:
+                chosen = pair_type
+                break
+        selected.append(by_type[chosen][positions[chosen]])
+        positions[chosen] += 1
+    return _reindex_pair_specs(selected)
+
+
+def _effective_pair_type_weights(pair_mode: str, pair_type_weights: dict[str, float] | None) -> dict[str, float]:
+    if pair_type_weights is None:
+        weights = dict(DEFAULT_PAIR_TYPE_WEIGHTS)
+    else:
+        weights = {pair_type: float(pair_type_weights.get(pair_type, 0.0)) for pair_type in PAIR_TYPES}
+    if pair_mode == "same-position":
+        weights = {pair_type: 0.0 for pair_type in PAIR_TYPES}
+        weights[PAIR_TYPE_SAME_POSITION_VIEW] = 1.0
+    elif pair_mode == "cross-camera":
+        weights = {pair_type: 0.0 for pair_type in PAIR_TYPES}
+        weights[PAIR_TYPE_CROSS_CAMERA] = 1.0
+    elif pair_mode == "cross-fov":
+        weights = {pair_type: 0.0 for pair_type in PAIR_TYPES}
+        weights[PAIR_TYPE_CROSS_FOV] = 1.0
+    if sum(weights.values()) <= 0.0:
+        raise ValueError("at least one requested pair type weight must be positive")
+    return weights
+
+
+def build_lazy_pair_specs(
+    records: list[RenderRecord],
+    *,
+    split: str,
+    pair_mode: str,
+    reference_variant: str,
+    target_variants: tuple[str, ...],
+    cross_variants: tuple[str, ...],
+    cross_camera_offsets: tuple[int, ...],
+    cross_fov_offsets: tuple[int, ...],
+    image_source: str,
+    limit_pairs: int,
+    seed: int,
+    shuffle: bool,
+    pair_type_weights: dict[str, float] | None = None,
+    spatial_index_planet_radius_m: float = DEFAULT_PLANET_RADIUS_M,
+    spatial_index_footprint_samples: int = 5,
+    spatial_index_margin_m: float = 2000.0,
+    spatial_index_height_km: tuple[int, ...] = (),
+) -> tuple[list[LazyPairSpec], dict[str, int]]:
+    if pair_mode == "spatial-index":
+        weights = _effective_pair_type_weights(pair_mode, pair_type_weights)
+        height_km_filter = set(spatial_index_height_km)
+        footprints = build_camera_spatial_footprints(
+            records,
+            split=split,
+            image_source=image_source,
+            planet_radius_m=spatial_index_planet_radius_m,
+            sample_grid=spatial_index_footprint_samples,
+            bbox_margin_m=spatial_index_margin_m,
+            height_km_filter=height_km_filter,
+        )
+        specs = build_spatial_index_pair_specs(
+            records,
+            split=split,
+            image_source=image_source,
+            footprints=footprints,
+            start_index=0,
+        )
+        selected = _select_pair_specs(
+            specs,
+            limit_pairs=limit_pairs,
+            seed=seed,
+            shuffle=shuffle,
+            pair_type_weights=weights,
+        )
+        return selected, count_pair_types(selected)
+
+    weights = _effective_pair_type_weights(pair_mode, pair_type_weights)
+    requested_cross_fov = pair_mode == "cross-fov" or (
+        pair_mode == "mixed" and weights.get(PAIR_TYPE_CROSS_FOV, 0.0) > 0.0
+    )
+    if requested_cross_fov:
+        dataset_ids = {
+            _record_dataset_id(record)
+            for record in records
+            if _eligible_record(record, split=split, image_source=image_source)
+        }
+        if len(dataset_ids) < 2:
+            raise ValueError("cross-fov pair mode requires at least two render manifests/datasets")
+
+    all_specs: list[LazyPairSpec] = []
+    if pair_mode == "same-position" or (pair_mode == "mixed" and weights.get(PAIR_TYPE_SAME_POSITION_VIEW, 0.0) > 0.0):
+        all_specs.extend(
+            build_pair_specs(
+                records,
+                split=split,
+                reference_variant=reference_variant,
+                target_variants=target_variants,
+                image_source=image_source,
+                limit_pairs=0,
+                seed=seed,
+                shuffle=False,
+            )
+        )
+    if pair_mode == "cross-camera" or (pair_mode == "mixed" and weights.get(PAIR_TYPE_CROSS_CAMERA, 0.0) > 0.0):
+        all_specs.extend(
+            build_cross_camera_pair_specs(
+                records,
+                split=split,
+                cross_variants=cross_variants,
+                offsets=cross_camera_offsets,
+                image_source=image_source,
+                start_index=len(all_specs),
+            )
+        )
+    if pair_mode == "cross-fov" or (pair_mode == "mixed" and weights.get(PAIR_TYPE_CROSS_FOV, 0.0) > 0.0):
+        all_specs.extend(
+            build_cross_fov_pair_specs(
+                records,
+                split=split,
+                cross_variants=cross_variants,
+                offsets=cross_fov_offsets,
+                image_source=image_source,
+                start_index=len(all_specs),
+            )
+        )
+    selected = _select_pair_specs(
+        all_specs,
+        limit_pairs=limit_pairs,
+        seed=seed,
+        shuffle=shuffle,
+        pair_type_weights=weights,
+    )
+    return selected, count_pair_types(selected)
 
 
 def _clamp_origin(center: float, *, crop_size: int, full_size: int) -> int:
@@ -327,6 +1078,14 @@ def _random_crop_origin(rng: random.Random, *, crop_size: int, full_size: int) -
     return rng.randint(0, full_size - crop_size)
 
 
+def _validated_crop_window(crop: CropWindow, *, width: int, height: int, label: str) -> CropWindow:
+    if crop.x0 < 0 or crop.y0 < 0 or crop.x1 <= crop.x0 or crop.y1 <= crop.y0:
+        raise ValueError(f"{label} has invalid bounds: {crop}")
+    if crop.x1 > width or crop.y1 > height:
+        raise ValueError(f"{label} exceeds image bounds {width}x{height}: {crop}")
+    return crop
+
+
 def _project_crop_pair(
     view_a: torch.Tensor,
     view_b: torch.Tensor,
@@ -339,6 +1098,8 @@ def _project_crop_pair(
     absolute_depth_tolerance_m: float,
     relative_depth_tolerance: float,
     rng: random.Random,
+    fixed_crop_a: CropWindow | None = None,
+    fixed_crop_b: CropWindow | None = None,
 ) -> tuple[SyntheticPair, float, int, CropWindow, CropWindow]:
     if depth_a.shape != depth_b.shape:
         raise ValueError(f"depth shape mismatch: {depth_a.shape} vs {depth_b.shape}")
@@ -350,14 +1111,25 @@ def _project_crop_pair(
             f"view_b={tuple(view_b.shape)} depth_b={depth_b.shape}"
         )
 
-    crop_h_a = min(int(crop_size), height_a)
-    crop_w_a = min(int(crop_size), width_a)
-    crop_h_b = min(int(crop_size), height_b)
-    crop_w_b = min(int(crop_size), width_b)
-    ax0 = _random_crop_origin(rng, crop_size=crop_w_a, full_size=width_a)
-    ay0 = _random_crop_origin(rng, crop_size=crop_h_a, full_size=height_a)
-    ax1 = ax0 + crop_w_a
-    ay1 = ay0 + crop_h_a
+    if fixed_crop_a is None:
+        crop_h_a = min(int(crop_size), height_a)
+        crop_w_a = min(int(crop_size), width_a)
+        ax0 = _random_crop_origin(rng, crop_size=crop_w_a, full_size=width_a)
+        ay0 = _random_crop_origin(rng, crop_size=crop_h_a, full_size=height_a)
+        ax1 = ax0 + crop_w_a
+        ay1 = ay0 + crop_h_a
+    else:
+        crop_a = _validated_crop_window(fixed_crop_a, width=width_a, height=height_a, label="fixed_crop_a")
+        ax0, ay0, ax1, ay1 = crop_a.x0, crop_a.y0, crop_a.x1, crop_a.y1
+        crop_w_a = ax1 - ax0
+        crop_h_a = ay1 - ay0
+    if fixed_crop_b is None:
+        crop_h_b = min(int(crop_size), height_b)
+        crop_w_b = min(int(crop_size), width_b)
+    else:
+        crop_b = _validated_crop_window(fixed_crop_b, width=width_b, height=height_b, label="fixed_crop_b")
+        crop_w_b = crop_b.x1 - crop_b.x0
+        crop_h_b = crop_b.y1 - crop_b.y0
 
     yy, xx = np.indices((crop_h_a, crop_w_a), dtype=np.float64)
     gx = xx + float(ax0)
@@ -396,7 +1168,10 @@ def _project_crop_pair(
         & (np.abs(sampled_depth_b - pb_z) <= tolerance)
     )
 
-    if bool(valid_global.any()):
+    if fixed_crop_b is not None:
+        bx0 = fixed_crop_b.x0
+        by0 = fixed_crop_b.y0
+    elif bool(valid_global.any()):
         bx0 = _clamp_origin(float(np.median(u_b[valid_global])), crop_size=crop_w_b, full_size=width_b)
         by0 = _clamp_origin(float(np.median(v_b[valid_global])), crop_size=crop_h_b, full_size=height_b)
     else:
@@ -464,7 +1239,8 @@ def generate_lazy_pair(
     camera_b = _cached_camera(spec.target.tsai_path)
 
     best: tuple[SyntheticPair, float, int, CropWindow, CropWindow] | None = None
-    attempts = max(1, int(max_attempts))
+    has_fixed_crop = spec.fixed_crop_a is not None or spec.fixed_crop_b is not None
+    attempts = 1 if has_fixed_crop else max(1, int(max_attempts))
     for attempt in range(attempts):
         rng = random.Random(seed + spec.pair_index * 1009 + attempt * 9176)
         pair, valid_fraction, valid_pixels, crop_a, crop_b = _project_crop_pair(
@@ -478,6 +1254,8 @@ def generate_lazy_pair(
             absolute_depth_tolerance_m=absolute_depth_tolerance_m,
             relative_depth_tolerance=relative_depth_tolerance,
             rng=rng,
+            fixed_crop_a=spec.fixed_crop_a,
+            fixed_crop_b=spec.fixed_crop_b,
         )
         if best is None or valid_fraction > best[1]:
             best = (pair, valid_fraction, valid_pixels, crop_a, crop_b)
@@ -485,6 +1263,10 @@ def generate_lazy_pair(
             break
     if best is None:
         raise RuntimeError("failed to generate lazy pair")
+    if best[1] < float(min_valid_fraction):
+        raise RuntimeError(
+            f"lazy pair valid_fraction={best[1]:.6f} below min_valid_fraction={float(min_valid_fraction):.6f}"
+        )
     pair = best[0]
     transform_config = photometric_config if photometric_config is not None else PhotometricAugmentConfig()
     if transform_config.enabled or input_local_contrast:
@@ -606,7 +1388,8 @@ def iter_lazy_pairs(
                     if not skip_bad_pairs:
                         raise
                     skipped += 1
-                    print(f"skip_bad_pair count={skipped} error={exc}", flush=True)
+                    if _should_log_bad_pair(skipped):
+                        print(f"skip_bad_pair count={skipped} error={exc}", flush=True)
                     if skipped > max_skips:
                         raise RuntimeError(f"too many lazy pair failures: {skipped}") from exc
                     while cursor < total + max_skips and len(pending) < target_prefetch:
@@ -620,12 +1403,187 @@ def iter_lazy_pairs(
                     break
 
 
+def iter_lazy_pair_specs_once(
+    specs: list[LazyPairSpec],
+    *,
+    workers: int,
+    prefetch: int,
+    cache_max_items: int,
+    crop_size: int,
+    image_source: str,
+    max_attempts: int,
+    min_valid_fraction: float,
+    absolute_depth_tolerance_m: float,
+    relative_depth_tolerance: float,
+    seed: int,
+    skip_bad_pairs: bool,
+    max_bad_pairs: int,
+) -> Iterator[LazyPairResult]:
+    if not specs:
+        raise RuntimeError("no lazy pair specs available")
+
+    cursor = 0
+    skipped = 0
+    total = len(specs)
+    max_skips = max_bad_pairs if max_bad_pairs > 0 else total
+
+    def submit(
+        executor: ProcessPoolExecutor,
+        future_map: dict[Future[LazyPairResult], tuple[float, int]],
+    ) -> None:
+        nonlocal cursor
+        pair_cursor = cursor
+        spec = specs[pair_cursor]
+        future = executor.submit(
+            generate_lazy_pair,
+            spec,
+            crop_size=crop_size,
+            image_source=image_source,
+            max_attempts=max_attempts,
+            min_valid_fraction=min_valid_fraction,
+            absolute_depth_tolerance_m=absolute_depth_tolerance_m,
+            relative_depth_tolerance=relative_depth_tolerance,
+            seed=seed + pair_cursor * 31,
+        )
+        future_map[future] = (time.perf_counter(), pair_cursor)
+        cursor += 1
+
+    with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(cache_max_items,)) as executor:
+        pending: dict[Future[LazyPairResult], tuple[float, int]] = {}
+        target_prefetch = max(1, int(prefetch))
+        while cursor < total and len(pending) < target_prefetch:
+            submit(executor, pending)
+
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                _, pair_cursor = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    if not skip_bad_pairs:
+                        raise
+                    skipped += 1
+                    spec = specs[pair_cursor]
+                    if _should_log_bad_pair(skipped):
+                        print(
+                            f"skip_bad_pair count={skipped} pair_index={spec.pair_index} error={exc}",
+                            flush=True,
+                        )
+                    if skipped > max_skips:
+                        raise RuntimeError(f"too many lazy pair failures: {skipped}") from exc
+                    while cursor < total and len(pending) < target_prefetch:
+                        submit(executor, pending)
+                    continue
+
+                while cursor < total and len(pending) < target_prefetch:
+                    submit(executor, pending)
+                yield result
+
+
 def _write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+PAIR_SPEC_MANIFEST_FIELDS = [
+    "pair_index",
+    "split",
+    "pair_type",
+    "reference_dataset_id",
+    "reference_pose_id",
+    "reference_base_id",
+    "reference_variant",
+    "target_dataset_id",
+    "target_pose_id",
+    "target_base_id",
+    "target_variant",
+    "valid_fraction",
+    "valid_pixels",
+    "attempts",
+    "crop_a_x0",
+    "crop_a_y0",
+    "crop_a_x1",
+    "crop_a_y1",
+    "crop_b_x0",
+    "crop_b_y0",
+    "crop_b_x1",
+    "crop_b_y1",
+]
+
+
+def _crop_window_row(prefix: str, crop: CropWindow | None) -> dict[str, int | str]:
+    if crop is None:
+        return {f"{prefix}_{name}": "" for name in ("x0", "y0", "x1", "y1")}
+    return {
+        f"{prefix}_x0": crop.x0,
+        f"{prefix}_y0": crop.y0,
+        f"{prefix}_x1": crop.x1,
+        f"{prefix}_y1": crop.y1,
+    }
+
+
+def _parse_crop_window(row: dict[str, str], prefix: str) -> CropWindow | None:
+    values = [row.get(f"{prefix}_{name}", "") for name in ("x0", "y0", "x1", "y1")]
+    if any(value == "" for value in values):
+        return None
+    return CropWindow(x0=int(values[0]), y0=int(values[1]), x1=int(values[2]), y1=int(values[3]))
+
+
+def _pair_spec_manifest_row(pair_index: int, result: LazyPairResult) -> dict[str, object]:
+    spec = result.spec
+    return {
+        "pair_index": pair_index,
+        "split": spec.split,
+        "pair_type": spec.pair_type,
+        "reference_dataset_id": _record_dataset_id(spec.reference),
+        "reference_pose_id": spec.reference.pose_id,
+        "reference_base_id": _record_raw_base_id(spec.reference),
+        "reference_variant": spec.reference.variant,
+        "target_dataset_id": _record_dataset_id(spec.target),
+        "target_pose_id": spec.target.pose_id,
+        "target_base_id": _record_raw_base_id(spec.target),
+        "target_variant": spec.target.variant,
+        "valid_fraction": f"{result.valid_fraction:.6f}",
+        "valid_pixels": int(result.valid_pixels),
+        "attempts": int(result.attempt_count),
+        **_crop_window_row("crop_a", result.crop_a),
+        **_crop_window_row("crop_b", result.crop_b),
+    }
+
+
+def write_pair_spec_manifest(path: Path, results: list[LazyPairResult]) -> None:
+    rows = [_pair_spec_manifest_row(index, result) for index, result in enumerate(results)]
+    _write_rows(path, rows, PAIR_SPEC_MANIFEST_FIELDS)
+
+
+def read_pair_spec_manifest(path: Path, records: list[RenderRecord]) -> list[LazyPairSpec]:
+    by_key = {(_record_dataset_id(record), record.pose_id): record for record in records}
+    specs: list[LazyPairSpec] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            reference_key = (row["reference_dataset_id"], row["reference_pose_id"])
+            target_key = (row["target_dataset_id"], row["target_pose_id"])
+            try:
+                reference = by_key[reference_key]
+                target = by_key[target_key]
+            except KeyError as exc:
+                raise ValueError(f"pair spec manifest references missing record: {exc}") from exc
+            specs.append(
+                LazyPairSpec(
+                    pair_index=len(specs),
+                    split=row["split"],
+                    reference=reference,
+                    target=target,
+                    pair_type=row.get("pair_type") or PAIR_TYPE_SAME_POSITION_VIEW,
+                    fixed_crop_a=_parse_crop_window(row, "crop_a"),
+                    fixed_crop_b=_parse_crop_window(row, "crop_b"),
+                )
+            )
+    return specs
 
 
 class StreamingCsvRows:
@@ -674,6 +1632,10 @@ def _summarize_float(values: list[float]) -> dict[str, float]:
         "min": float(sorted_values[0]),
         "max": float(sorted_values[-1]),
     }
+
+
+def _should_log_bad_pair(skip_count: int) -> bool:
+    return skip_count <= 20 or skip_count % 500 == 0
 
 
 def _gpu_snapshot() -> dict[str, str]:
@@ -910,6 +1872,7 @@ def run_preprocess(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[
                 "index": index,
                 "pair_index": result.spec.pair_index,
                 "split": result.spec.split,
+                "pair_type": result.spec.pair_type,
                 "base_id": result.spec.reference.base_id,
                 "variant": result.spec.target.variant,
                 "valid_fraction": f"{result.valid_fraction:.6f}",
@@ -938,7 +1901,18 @@ def run_preprocess(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[
     _write_rows(
         args.output_dir / "preprocess_metrics.csv",
         rows,
-        ["index", "pair_index", "split", "base_id", "variant", "valid_fraction", "valid_pixels", "attempts", "worker_elapsed_ms"],
+        [
+            "index",
+            "pair_index",
+            "split",
+            "pair_type",
+            "base_id",
+            "variant",
+            "valid_fraction",
+            "valid_pixels",
+            "attempts",
+            "worker_elapsed_ms",
+        ],
     )
     _write_html_report(
         args.output_dir / "run.html",
@@ -947,6 +1921,126 @@ def run_preprocess(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[
         spec_count=len(specs),
         summary=summary,
         rows=rows,
+    )
+    return summary
+
+
+def run_overlap_list(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, object]:
+    if args.pair_spec_manifest is None:
+        raise ValueError("--pair-spec-manifest is required in overlap-list mode")
+
+    start = time.perf_counter()
+    overlap_scan_all = bool(getattr(args, "overlap_scan_all", False))
+    valid_fractions: list[float] = []
+    worker_elapsed_ms: list[float] = []
+    attempts: list[float] = []
+    pair_type_counts = {pair_type: 0 for pair_type in PAIR_TYPES}
+    recent_rows: list[dict[str, object]] = []
+    metrics_fields = ["index", "source_pair_index", *PAIR_SPEC_MANIFEST_FIELDS, "worker_elapsed_ms"]
+    metrics_path = args.output_dir / "overlap_metrics.csv"
+
+    with (
+        StreamingCsvRows(args.pair_spec_manifest, PAIR_SPEC_MANIFEST_FIELDS) as manifest_writer,
+        StreamingCsvRows(metrics_path, metrics_fields) as metrics_writer,
+    ):
+        if overlap_scan_all:
+            pair_results = iter_lazy_pair_specs_once(
+                specs,
+                workers=args.workers,
+                prefetch=args.prefetch_batches,
+                cache_max_items=args.worker_cache_items,
+                crop_size=args.crop_size,
+                image_source=args.image_source,
+                max_attempts=args.max_attempts,
+                min_valid_fraction=args.min_valid_fraction,
+                absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
+                relative_depth_tolerance=args.relative_depth_tolerance,
+                seed=args.seed,
+                skip_bad_pairs=args.skip_bad_pairs,
+                max_bad_pairs=args.max_bad_pairs,
+            )
+        else:
+            pair_results = iter_lazy_pairs(
+                specs,
+                count=args.pairs,
+                workers=args.workers,
+                prefetch=args.prefetch_batches,
+                cache_max_items=args.worker_cache_items,
+                crop_size=args.crop_size,
+                image_source=args.image_source,
+                max_attempts=args.max_attempts,
+                min_valid_fraction=args.min_valid_fraction,
+                absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
+                relative_depth_tolerance=args.relative_depth_tolerance,
+                seed=args.seed,
+                skip_bad_pairs=args.skip_bad_pairs,
+                max_bad_pairs=args.max_bad_pairs,
+            )
+
+        for index, result in enumerate(
+            pair_results,
+            1,
+        ):
+            manifest_row = _pair_spec_manifest_row(index - 1, result)
+            manifest_writer.write(manifest_row)
+            metrics_row = {
+                "index": index,
+                "source_pair_index": result.spec.pair_index,
+                **manifest_row,
+                "worker_elapsed_ms": f"{result.elapsed_ms:.2f}",
+            }
+            metrics_writer.write(metrics_row)
+            recent_rows.append(metrics_row)
+            if len(recent_rows) > 20:
+                recent_rows.pop(0)
+
+            valid_fractions.append(float(result.valid_fraction))
+            worker_elapsed_ms.append(float(result.elapsed_ms))
+            attempts.append(float(result.attempt_count))
+            pair_type_counts.setdefault(result.spec.pair_type, 0)
+            pair_type_counts[result.spec.pair_type] += 1
+            if index == 1 or index % max(1, args.progress_every) == 0:
+                elapsed = time.perf_counter() - start
+                if overlap_scan_all:
+                    print(
+                        f"overlap-list accepted={index} candidate_specs={len(specs)} "
+                        f"rate={index / max(elapsed, 1.0e-6):.2f} pairs/s "
+                        f"valid={result.valid_fraction:.4f} "
+                        f"manifest={args.pair_spec_manifest}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"overlap-list {index}/{args.pairs} pairs "
+                        f"rate={index / max(elapsed, 1.0e-6):.2f} pairs/s "
+                        f"valid={result.valid_fraction:.4f} "
+                        f"manifest={args.pair_spec_manifest}",
+                        flush=True,
+                    )
+
+    elapsed = time.perf_counter() - start
+    summary = {
+        "mode": "overlap-list",
+        "overlap_scan_all": overlap_scan_all,
+        "candidate_specs": len(specs),
+        "requested_pairs": 0 if overlap_scan_all else int(args.pairs),
+        "pairs": len(valid_fractions),
+        "pair_spec_manifest": str(args.pair_spec_manifest),
+        "overlap_metrics": str(metrics_path),
+        "elapsed_s": elapsed,
+        "pairs_per_second": len(valid_fractions) / max(elapsed, 1.0e-6),
+        "pair_type_counts": pair_type_counts,
+        "worker_elapsed_ms": _summarize_float(worker_elapsed_ms),
+        "valid_fraction": _summarize_float(valid_fractions),
+        "attempts": _summarize_float(attempts),
+    }
+    _write_html_report(
+        args.output_dir / "run.html",
+        title="Lazy Pose Pair Overlap List",
+        args=args,
+        spec_count=len(specs),
+        summary=summary,
+        rows=recent_rows,
     )
     return summary
 
@@ -967,6 +2061,7 @@ def _load_model(args: argparse.Namespace, device: torch.device):
         train_texture_adapter=args.train_texture_adapter,
         train_descriptor_fusion=args.train_descriptor_fusion,
         train_quality_head=args.train_quality_head,
+        train_reliability_head=args.train_reliability_head,
         train_graph_matcher=args.train_graph_matcher,
     )
     if not trainable:
@@ -1252,6 +2347,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
     device = torch.device(args.device)
+    amp_dtype = amp_dtype_from_name(args.amp_dtype)
+    grad_scaler = make_grad_scaler(device, enabled=args.amp, dtype=amp_dtype)
     model, optimizer = _load_model(args, device)
     generator = torch.Generator(device=device)
     generator.manual_seed(args.seed)
@@ -1264,6 +2361,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
     train_metric_fields = [
         "step",
         "loss",
+        "amp_enabled",
+        "amp_scale",
+        "activation_checkpointing",
         "top1_accuracy",
         "mean_positive_rank",
         "points",
@@ -1276,6 +2376,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "illumination_match_points",
         "illumination_match_pairs",
         "hard_lazy_pairs",
+        *PAIR_TYPE_METRIC_FIELDS,
         "data_wait_ms",
         "augment_ms",
         "false_mine_ms",
@@ -1546,6 +2647,20 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 illumination_match_pairs=illumination_match_prefetched,
                 illumination_match_weight=args.illumination_match_weight,
                 illumination_match_probability=1.0,
+                matchability_weight=args.matchability_weight,
+                descriptor_uncertainty_weight=args.descriptor_uncertainty_weight,
+                no_match_prior_weight=args.no_match_prior_weight,
+                reliability_negative_points=args.reliability_negative_points,
+                reliability_negative_min_distance=args.reliability_negative_min_distance,
+                rotation_descriptor_consistency_weight=args.rotation_descriptor_consistency_weight,
+                orientation_consistency_weight=args.orientation_consistency_weight,
+                scale_consistency_weight=args.scale_consistency_weight,
+                affine_consistency_weight=args.affine_consistency_weight,
+                rotation_consistency_degrees=args.rotation_consistency_degrees,
+                amp_enabled=args.amp,
+                amp_dtype=amp_dtype,
+                grad_scaler=grad_scaler,
+                activation_checkpointing=args.activation_checkpointing,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -1565,9 +2680,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     and result.valid_fraction <= float(args.hard_valid_fraction_max)
                 )
             )
+            step_pair_type_columns = pair_type_metric_columns(count_pair_types([result.spec for result in results]))
             row = {
                 "step": step,
                 "loss": f"{metrics.get('loss', float('nan')):.6f}",
+                "amp_enabled": int(args.amp),
+                "amp_scale": f"{metrics.get('amp_scale', 0.0):.1f}",
+                "activation_checkpointing": int(args.activation_checkpointing),
                 "top1_accuracy": f"{metrics.get('top1_accuracy', float('nan')):.6f}",
                 "mean_positive_rank": f"{metrics.get('mean_positive_rank', float('nan')):.3f}",
                 "points": f"{metrics.get('points', 0.0):.0f}",
@@ -1580,6 +2699,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "illumination_match_points": f"{metrics.get('illumination_match_points', 0.0):.0f}",
                 "illumination_match_pairs": f"{metrics.get('illumination_match_pairs', 0.0):.0f}",
                 "hard_lazy_pairs": hard_lazy_pairs,
+                **step_pair_type_columns,
                 "data_wait_ms": f"{data_wait_ms:.2f}",
                 "augment_ms": f"{augment_ms:.2f}",
                 "false_mine_ms": f"{false_mine_ms:.2f}",
@@ -1644,6 +2764,23 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "illumination_consistency_probability": f"{args.illumination_consistency_probability:.3f}",
                 "illumination_match_weight": f"{args.illumination_match_weight:.6f}",
                 "illumination_match_probability": f"{args.illumination_match_probability:.3f}",
+                "matchability_weight": f"{args.matchability_weight:.6f}",
+                "descriptor_uncertainty_weight": f"{args.descriptor_uncertainty_weight:.6f}",
+                "no_match_prior_weight": f"{args.no_match_prior_weight:.6f}",
+                "reliability_negative_points": args.reliability_negative_points,
+                "rotation_descriptor_consistency_weight": f"{args.rotation_descriptor_consistency_weight:.6f}",
+                "orientation_consistency_weight": f"{args.orientation_consistency_weight:.6f}",
+                "scale_consistency_weight": f"{args.scale_consistency_weight:.6f}",
+                "affine_consistency_weight": f"{args.affine_consistency_weight:.6f}",
+                "matchability_loss": f"{metrics.get('matchability_loss', 0.0):.6f}",
+                "descriptor_uncertainty_loss": f"{metrics.get('descriptor_uncertainty_loss', 0.0):.6f}",
+                "no_match_prior_loss": f"{metrics.get('no_match_prior_loss', 0.0):.6f}",
+                "rotation_descriptor_consistency_loss": (
+                    f"{metrics.get('rotation_descriptor_consistency_loss', 0.0):.6f}"
+                ),
+                "orientation_consistency_loss": f"{metrics.get('orientation_consistency_loss', 0.0):.6f}",
+                "scale_consistency_loss": f"{metrics.get('scale_consistency_loss', 0.0):.6f}",
+                "affine_consistency_loss": f"{metrics.get('affine_consistency_loss', 0.0):.6f}",
                 **gpu,
             }
             rows.append(row)
@@ -1758,6 +2895,9 @@ def _save_training_state(
                 "crop_size": int(args.crop_size),
                 "batch_pairs": int(args.batch_pairs),
                 "samples_per_pair": int(args.samples_per_pair),
+                "amp": bool(args.amp),
+                "amp_dtype": str(args.amp_dtype),
+                "activation_checkpointing": bool(args.activation_checkpointing),
                 "render_manifest": str(_first_path(args.render_manifest) or ""),
                 "uint8_manifest": str(_first_path(args.uint8_manifest) or ""),
                 "render_manifests": [str(path) for path in _path_list(args.render_manifest)],
@@ -1773,6 +2913,16 @@ def _save_training_state(
                 "illumination_consistency_weight": float(args.illumination_consistency_weight),
                 "illumination_consistency_probability": float(args.illumination_consistency_probability),
                 "illumination_consistency_points": int(args.illumination_consistency_points),
+                "matchability_weight": float(args.matchability_weight),
+                "descriptor_uncertainty_weight": float(args.descriptor_uncertainty_weight),
+                "no_match_prior_weight": float(args.no_match_prior_weight),
+                "reliability_negative_points": int(args.reliability_negative_points),
+                "reliability_negative_min_distance": float(args.reliability_negative_min_distance),
+                "rotation_descriptor_consistency_weight": float(args.rotation_descriptor_consistency_weight),
+                "orientation_consistency_weight": float(args.orientation_consistency_weight),
+                "scale_consistency_weight": float(args.scale_consistency_weight),
+                "affine_consistency_weight": float(args.affine_consistency_weight),
+                "rotation_consistency_degrees": list(args.rotation_consistency_degrees),
                 "illumination_match_weight": float(args.illumination_match_weight),
                 "illumination_match_probability": float(args.illumination_match_probability),
                 "illumination_match_changed_view": str(args.illumination_match_changed_view),
@@ -1814,10 +2964,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render-manifest", type=Path, nargs="+", required=True)
     parser.add_argument("--uint8-manifest", type=Path, nargs="*", default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--mode", choices=["preprocess", "train"], default="preprocess")
+    parser.add_argument("--mode", choices=["preprocess", "overlap-list", "train"], default="preprocess")
     parser.add_argument("--split", default="train")
     parser.add_argument("--reference-variant", default="nadir")
     parser.add_argument("--target-variant", action="append", default=[])
+    parser.add_argument(
+        "--pair-mode",
+        choices=["same-position", "cross-camera", "cross-fov", "mixed", "spatial-index"],
+        default="same-position",
+    )
+    parser.add_argument("--cross-camera-offsets", type=parse_int_list, default=parse_int_list("1,2,4,8"))
+    parser.add_argument("--cross-fov-offsets", type=parse_int_list, default=parse_int_list("0,1,2,4"))
+    parser.add_argument("--cross-pair-variant", action="append", default=[])
+    parser.add_argument("--pair-type-weights", type=parse_pair_type_weights, default=DEFAULT_PAIR_TYPE_WEIGHTS.copy())
+    parser.add_argument("--spatial-index-planet-radius-m", type=float, default=DEFAULT_PLANET_RADIUS_M)
+    parser.add_argument("--spatial-index-footprint-samples", type=int, default=5)
+    parser.add_argument("--spatial-index-margin-m", type=float, default=2000.0)
+    parser.add_argument("--spatial-index-height-km", type=parse_int_list, default=[])
+    parser.add_argument("--pair-spec-manifest", type=Path, default=None)
+    parser.add_argument("--overlap-scan-all", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--image-source", choices=["uint8", "render"], default="uint8")
     parser.add_argument("--limit-pairs", type=int, default=0)
     parser.add_argument("--pairs", type=int, default=64)
@@ -1841,6 +3006,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bad-pairs", type=int, default=0)
 
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--amp-dtype", choices=["float16", "bfloat16"], default="float16")
+    parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
     parser.add_argument("--batch-pairs", type=int, default=1)
     parser.add_argument("--samples-per-pair", type=int, default=512)
@@ -1956,7 +3124,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-texture-adapter", action="store_true")
     parser.add_argument("--train-descriptor-fusion", action="store_true")
     parser.add_argument("--train-quality-head", action="store_true")
+    parser.add_argument("--train-reliability-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
+    parser.add_argument("--matchability-weight", type=float, default=0.0)
+    parser.add_argument("--descriptor-uncertainty-weight", type=float, default=0.0)
+    parser.add_argument("--no-match-prior-weight", type=float, default=0.0)
+    parser.add_argument("--reliability-negative-points", type=int, default=0)
+    parser.add_argument("--reliability-negative-min-distance", type=float, default=4.0)
+    parser.add_argument("--rotation-descriptor-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--orientation-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--scale-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--affine-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--rotation-consistency-degrees", type=parse_rotation_consistency_degrees, default=[90, 180, 270])
     parser.add_argument("--auto-visual-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-split", default="")
     parser.add_argument("--visual-device", default="")
@@ -2003,6 +3182,40 @@ def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
         _set_positive_default(args, name)
 
 
+def prepare_lazy_pair_specs(
+    args: argparse.Namespace,
+    records: list[RenderRecord],
+    *,
+    target_variants: tuple[str, ...],
+    cross_variants: tuple[str, ...],
+    effective_pair_type_weights: dict[str, float],
+) -> tuple[list[LazyPairSpec], dict[str, int], str]:
+    if args.pair_spec_manifest is not None and args.mode != "overlap-list":
+        specs = read_pair_spec_manifest(args.pair_spec_manifest, records)
+        return specs, count_pair_types(specs), "pair_spec_manifest"
+
+    specs, pair_type_counts = build_lazy_pair_specs(
+        records,
+        split=args.split,
+        pair_mode=args.pair_mode,
+        reference_variant=args.reference_variant,
+        target_variants=target_variants,
+        cross_variants=cross_variants,
+        cross_camera_offsets=tuple(args.cross_camera_offsets),
+        cross_fov_offsets=tuple(args.cross_fov_offsets),
+        image_source=args.image_source,
+        limit_pairs=args.limit_pairs,
+        seed=args.seed,
+        shuffle=args.shuffle,
+        pair_type_weights=effective_pair_type_weights,
+        spatial_index_planet_radius_m=args.spatial_index_planet_radius_m,
+        spatial_index_footprint_samples=args.spatial_index_footprint_samples,
+        spatial_index_margin_m=args.spatial_index_margin_m,
+        spatial_index_height_km=tuple(args.spatial_index_height_km),
+    )
+    return specs, pair_type_counts, "generated"
+
+
 def main() -> int:
     args = parse_args()
     if args.workers <= 0:
@@ -2013,8 +3226,18 @@ def main() -> int:
         raise ValueError("--crop-size must be positive")
     if args.mode == "preprocess" and args.pairs <= 0:
         raise ValueError("--pairs must be positive in preprocess mode")
+    if args.mode == "overlap-list" and not args.overlap_scan_all and args.pairs <= 0:
+        raise ValueError("--pairs must be positive in sampled overlap-list mode")
     if args.mode == "train" and args.steps <= 0:
         raise ValueError("--steps must be positive in train mode")
+    if args.mode == "overlap-list" and args.pair_spec_manifest is None:
+        raise ValueError("--pair-spec-manifest is required in overlap-list mode")
+    if args.spatial_index_planet_radius_m <= 0.0:
+        raise ValueError("--spatial-index-planet-radius-m must be positive")
+    if args.spatial_index_footprint_samples < 2:
+        raise ValueError("--spatial-index-footprint-samples must be at least 2")
+    if args.spatial_index_margin_m < 0.0:
+        raise ValueError("--spatial-index-margin-m must be nonnegative")
     if args.gpu_snapshot_every <= 0:
         raise ValueError("--gpu-snapshot-every must be positive")
     if args.gpu_sample_interval_s <= 0.0:
@@ -2145,15 +3368,14 @@ def main() -> int:
     uint8_manifests = _path_list(args.uint8_manifest)
     records = _read_all_render_records(render_manifests, uint8_manifests)
     target_variants = tuple(args.target_variant) if args.target_variant else DEFAULT_TARGET_VARIANTS
-    specs = build_pair_specs(
+    cross_variants = tuple(dict.fromkeys(args.cross_pair_variant or (args.reference_variant, *target_variants)))
+    effective_pair_type_weights = _effective_pair_type_weights(args.pair_mode, args.pair_type_weights)
+    specs, pair_type_counts, pair_source = prepare_lazy_pair_specs(
+        args,
         records,
-        split=args.split,
-        reference_variant=args.reference_variant,
         target_variants=target_variants,
-        image_source=args.image_source,
-        limit_pairs=args.limit_pairs,
-        seed=args.seed,
-        shuffle=args.shuffle,
+        cross_variants=cross_variants,
+        effective_pair_type_weights=effective_pair_type_weights,
     )
     if not specs:
         raise RuntimeError("no lazy pair specs found")
@@ -2165,7 +3387,23 @@ def main() -> int:
         "uint8_manifests": [str(path) for path in uint8_manifests],
         "records": len(records),
         "specs": len(specs),
+        "pair_source": pair_source,
+        "pair_spec_manifest": str(args.pair_spec_manifest or ""),
+        "pair_mode": args.pair_mode,
+        "pair_type_counts": pair_type_counts,
+        "pair_type_weights": effective_pair_type_weights,
+        "spatial_index": {
+            "planet_radius_m": float(args.spatial_index_planet_radius_m),
+            "footprint_samples": int(args.spatial_index_footprint_samples),
+            "margin_m": float(args.spatial_index_margin_m),
+            "height_km": list(args.spatial_index_height_km),
+        },
         "target_variants": list(target_variants),
+        "cross_pair_variants": list(cross_variants),
+        "cross_camera_offsets": list(args.cross_camera_offsets),
+        "cross_fov_offsets": list(args.cross_fov_offsets),
+        "amp": {"enabled": bool(args.amp), "dtype": str(args.amp_dtype)},
+        "activation_checkpointing": bool(args.activation_checkpointing),
         "photometric_augmentation": vars(_photometric_config_from_args(args)),
         "illumination_consistency": {
             "enabled": float(args.illumination_consistency_weight) > 0.0,
@@ -2190,6 +3428,8 @@ def main() -> int:
 
     if args.mode == "preprocess":
         summary = run_preprocess(args, specs)
+    elif args.mode == "overlap-list":
+        summary = run_overlap_list(args, specs)
     else:
         summary = run_train(args, specs)
     print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)

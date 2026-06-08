@@ -2,6 +2,8 @@
 
 本文档说明 PlanetaryFeatureMatch 当前第一阶段 C++/LibTorch 训练、推理和评估流程。当前实现已经不是参数校验桩，而是可以读取真实图像、执行最小训练循环、写出 checkpoint，并继续完成特征提取、匹配、评估和导出。
 
+Python lazy pose 2048 训练入口使用 `scripts/benchmark_lazy_pose_pairs.py`，参数体系和 C++ CLI 不同。当前 2048 原图、离线 overlap list、跨相机/跨 FOV、GraphMatcher 拒配训练参数说明见：[Lazy Pose 2048 训练参数说明](lazy_pose_training_parameters_20260608.html)。
+
 ## 目标
 
 PlanetaryFeatureMatch 面向火星、月球和小行星影像，目标是训练一个同时支持稀疏关键点匹配和半稠密对应的局部特征模型。第一阶段的目标是打通真实图像闭环：

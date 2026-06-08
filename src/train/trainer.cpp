@@ -2179,38 +2179,8 @@ torch::Tensor blend_rotation_invariant_texture_descriptor(const torch::Tensor& d
 torch::Tensor canonicalize_descriptor_map_by_orientation(const torch::Tensor& descriptors,
                                                          const torch::Tensor& orientation)
 {
-    if (!descriptors.defined() || !orientation.defined() || descriptors.dim() != 4 || orientation.dim() != 4 ||
-        descriptors.size(1) < 4 || descriptors.size(1) % 4 != 0 || orientation.size(0) != descriptors.size(0) ||
-        orientation.size(1) < 2)
-    {
-        return descriptors;
-    }
-
-    auto orientation_map = orientation.to(descriptors.device(), torch::kFloat32);
-    if (orientation_map.size(2) != descriptors.size(2) || orientation_map.size(3) != descriptors.size(3))
-    {
-        orientation_map = torch::nn::functional::interpolate(
-            orientation_map, torch::nn::functional::InterpolateFuncOptions()
-                                 .size(std::vector<int64_t>{descriptors.size(2), descriptors.size(3)})
-                                 .mode(torch::kBilinear)
-                                 .align_corners(false));
-    }
-
-    auto axis_x = orientation_map.narrow(1, 0, 1);
-    auto axis_y = orientation_map.narrow(1, 1, 1);
-    auto axis_norm = (axis_x * axis_x + axis_y * axis_y).sqrt();
-    auto turns = torch::round(torch::atan2(axis_y, axis_x) / (PI * 0.5)).to(torch::kLong).remainder(4);
-    turns = torch::where(turns.lt(0), turns + 4, turns);
-    turns = torch::where(axis_norm.gt(1.0e-6F), turns, torch::zeros_like(turns));
-
-    const auto group_channels = descriptors.size(1) / 4;
-    auto canonical = torch::zeros_like(descriptors);
-    for (int64_t turn = 0; turn < 4; ++turn)
-    {
-        auto shifted = turn == 0 ? descriptors : torch::roll(descriptors, {-turn * group_channels}, {1});
-        canonical = canonical + shifted * turns.eq(turn).to(descriptors.dtype());
-    }
-    return canonical.contiguous();
+    (void)orientation;
+    return descriptors;
 }
 
 torch::Tensor make_pairwise_texture_teacher_descriptor_loss(const torch::Tensor& descriptors_a,

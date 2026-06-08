@@ -338,6 +338,17 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertEqual(selected, [pair_paths[0], pair_paths[2]])
 
+    def test_sample_descriptors_matches_grid_dtype_to_descriptor_map(self):
+        descriptor_map = torch.ones(1, 2, 3, 3, dtype=torch.float16)
+        points = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        sampled = torch.ones(1, 2, 1, 1, dtype=torch.float16)
+
+        with mock.patch.object(train.F, "grid_sample", return_value=sampled) as grid_sample:
+            result = train.sample_descriptors(descriptor_map, points)
+
+        self.assertEqual(result.dtype, torch.float16)
+        self.assertEqual(grid_sample.call_args.args[1].dtype, torch.float16)
+
     def test_sample_descriptors_uses_xy_coordinates(self):
         descriptor_map = torch.zeros(1, 2, 3, 4)
         yy, xx = torch.meshgrid(torch.arange(3), torch.arange(4), indexing="ij")
@@ -435,6 +446,50 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertLess(float(masked), float(unmasked))
 
+    def test_reliability_supervision_losses_reward_expected_points(self):
+        positive = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+        negative = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+        high_positive = torch.tensor([[[[0.9, 0.1]]]], dtype=torch.float32)
+        high_negative = torch.tensor([[[[0.1, 0.9]]]], dtype=torch.float32)
+
+        self.assertLess(
+            float(train.matchability_supervision_loss(high_positive, positive, negative)),
+            float(train.matchability_supervision_loss(high_negative, positive, negative)),
+        )
+        self.assertLess(
+            float(train.no_match_prior_supervision_loss(high_negative, negative, positive)),
+            float(train.no_match_prior_supervision_loss(high_positive, negative, positive)),
+        )
+        self.assertLess(
+            float(train.descriptor_uncertainty_supervision_loss(high_negative, negative, positive)),
+            float(train.descriptor_uncertainty_supervision_loss(high_positive, negative, positive)),
+        )
+
+    def test_rotation_consistency_losses_are_low_for_rot90_aligned_maps(self):
+        descriptors = torch.zeros(1, 2, 2, 2)
+        descriptors[0, 0] = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        descriptors[0, 1] = 1.0 - descriptors[0, 0]
+        rotated_descriptors = torch.rot90(descriptors, k=1, dims=(-2, -1))
+        orientation = torch.zeros(1, 2, 2, 2)
+        orientation[:, 0] = 1.0
+        rotated_orientation = torch.zeros_like(orientation)
+        rotated_orientation[:, 1] = 1.0
+        rotated_orientation = torch.rot90(rotated_orientation, k=1, dims=(-2, -1))
+        scale = torch.ones(1, 1, 2, 2)
+        affine = torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.float32).view(1, 4, 1, 1).expand(1, 4, 2, 2)
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32)
+
+        self.assertLess(
+            float(train.rotation_descriptor_consistency_loss(descriptors, rotated_descriptors, points, 90)),
+            1.0e-5,
+        )
+        self.assertLess(
+            float(train.orientation_consistency_loss(orientation, rotated_orientation, points, 90)),
+            1.0e-5,
+        )
+        self.assertLess(float(train.scale_consistency_loss(scale, scale, points, 90)), 1.0e-5)
+        self.assertLess(float(train.affine_consistency_loss(affine, affine, points, 0)), 1.0e-5)
+
     def test_descriptor_false_match_suppression_penalizes_high_wrong_candidate(self):
         descriptor_a = torch.zeros(1, 2, 1, 3)
         descriptor_b = torch.zeros(1, 2, 1, 3)
@@ -487,7 +542,7 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertLess(float(masked), float(unmasked))
 
-    def test_paired_cyclic_similarity_accepts_quarter_channel_shift(self):
+    def test_paired_cyclic_similarity_rejects_quarter_channel_shift(self):
         desc_a = torch.zeros(1, 8)
         desc_b = torch.zeros(1, 8)
         desc_a[0, 1] = 1.0
@@ -495,13 +550,13 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         similarity = train.paired_cyclic_similarity(desc_a, desc_b)
 
-        self.assertAlmostEqual(float(similarity[0]), 1.0, places=6)
+        self.assertAlmostEqual(float(similarity[0]), 0.0, places=6)
 
-    def test_false_match_negative_loss_penalizes_cyclic_wrong_pair(self):
+    def test_false_match_negative_loss_penalizes_high_wrong_pair(self):
         descriptor_a = torch.zeros(1, 8, 1, 1)
         descriptor_b = torch.zeros(1, 8, 1, 1)
         descriptor_a[0, 1, 0, 0] = 1.0
-        descriptor_b[0, 3, 0, 0] = 1.0
+        descriptor_b[0, 1, 0, 0] = 1.0
         points = torch.tensor([[0.0, 0.0]])
 
         loss = train.false_match_negative_loss(
@@ -1308,6 +1363,65 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.descriptor_projection.weight.grad)
 
+    def test_descriptor_parameters_can_include_reliability_head(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=1,
+        )
+
+        selected = train.descriptor_parameters(
+            model,
+            train_descriptor_head=False,
+            train_reliability_head=True,
+        )
+
+        selected_ids = {id(parameter) for parameter in selected}
+        self.assertIn(id(model.sparse_head.matchability.weight), selected_ids)
+        self.assertIn(id(model.sparse_head.descriptor_uncertainty.weight), selected_ids)
+        self.assertIn(id(model.sparse_head.no_match_prior.weight), selected_ids)
+        self.assertNotIn(id(model.sparse_head.descriptor_skip.weight), selected_ids)
+
+    def test_graph_matcher_correspondence_loss_backpropagates_to_reliability_maps(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=1,
+        )
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
+        descriptors_b = descriptors_a.clone()
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+        matchability_a = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+        matchability_b = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+        uncertainty_a = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+        uncertainty_b = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+        no_match_a = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+        no_match_b = torch.full((1, 1, 4, 4), 0.5, requires_grad=True)
+
+        loss = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            no_match_points=2,
+            no_match_weight=0.5,
+            matchability_a=matchability_a,
+            matchability_b=matchability_b,
+            descriptor_uncertainty_a=uncertainty_a,
+            descriptor_uncertainty_b=uncertainty_b,
+            no_match_prior_a=no_match_a,
+            no_match_prior_b=no_match_b,
+        )
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+        for tensor in (matchability_a, matchability_b, uncertainty_a, uncertainty_b, no_match_a, no_match_b):
+            self.assertIsNotNone(tensor.grad)
+            self.assertGreater(float(tensor.grad.abs().sum()), 0.0)
+
     def test_graph_matcher_correspondence_loss_disables_candidate_mask_for_supervision(self):
         model = pfm_model.PlanetaryFeatureMatcher(
             base_channels=4,
@@ -1806,6 +1920,31 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "8",
             "--hard-pair-glob",
             "*pair_004541*.pt",
+            "--train-reliability-head",
+            "--matchability-weight",
+            "0.11",
+            "--descriptor-uncertainty-weight",
+            "0.12",
+            "--no-match-prior-weight",
+            "0.13",
+            "--reliability-negative-points",
+            "9",
+            "--reliability-negative-min-distance",
+            "3.5",
+            "--rotation-descriptor-consistency-weight",
+            "0.21",
+            "--orientation-consistency-weight",
+            "0.22",
+            "--scale-consistency-weight",
+            "0.23",
+            "--affine-consistency-weight",
+            "0.24",
+            "--rotation-consistency-degrees",
+            "90,270",
+            "--amp",
+            "--amp-dtype",
+            "float16",
+            "--activation-checkpointing",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -1838,6 +1977,20 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.training_weak_texture_fraction, 0.25)
         self.assertEqual(args.training_spatial_bins, 8)
         self.assertEqual(args.hard_pair_glob, ["*pair_004541*.pt"])
+        self.assertTrue(args.train_reliability_head)
+        self.assertAlmostEqual(args.matchability_weight, 0.11)
+        self.assertAlmostEqual(args.descriptor_uncertainty_weight, 0.12)
+        self.assertAlmostEqual(args.no_match_prior_weight, 0.13)
+        self.assertEqual(args.reliability_negative_points, 9)
+        self.assertAlmostEqual(args.reliability_negative_min_distance, 3.5)
+        self.assertAlmostEqual(args.rotation_descriptor_consistency_weight, 0.21)
+        self.assertAlmostEqual(args.orientation_consistency_weight, 0.22)
+        self.assertAlmostEqual(args.scale_consistency_weight, 0.23)
+        self.assertAlmostEqual(args.affine_consistency_weight, 0.24)
+        self.assertEqual(args.rotation_consistency_degrees, [90, 270])
+        self.assertTrue(args.amp)
+        self.assertEqual(args.amp_dtype, "float16")
+        self.assertTrue(args.activation_checkpointing)
 
     def test_parse_args_enables_lightglue_accept_loss_for_graph_training_by_default(self):
         argv = [
@@ -3146,6 +3299,182 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(metrics["points"], 16.0)
         self.assertEqual(metrics["grad_l2"], 0.0)
         self.assertAlmostEqual(metrics["top1_accuracy"], 0.25)
+
+    def test_train_step_uses_grad_scaler_for_amp_before_optimizer_step(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_amp.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        calls: list[str] = []
+
+        class RecordingScaler:
+            def scale(self, loss):
+                calls.append("scale")
+                return loss
+
+            def unscale_(self, optimizer):
+                calls.append("unscale")
+
+            def step(self, optimizer):
+                calls.append("step")
+                optimizer.step()
+
+            def update(self):
+                calls.append("update")
+
+            def get_scale(self):
+                return 128.0
+
+        def fake_descriptor_loss(*_args, **_kwargs):
+            return parameter * 2.0, {
+                "top1_accuracy": 1.0,
+                "top5_accuracy": 1.0,
+                "top10_accuracy": 1.0,
+                "mean_positive_rank": 1.0,
+                "mean_positive_score": 1.0,
+                "mean_negative_score": 0.0,
+            }
+
+        original_clip = train.clip_and_measure_gradients
+
+        def record_clip(parameters, *, max_grad_norm=0.0):
+            calls.append("clip")
+            return original_clip(parameters, max_grad_norm=max_grad_norm)
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss", side_effect=fake_descriptor_loss),
+            mock.patch.object(train, "clip_and_measure_gradients", side_effect=record_clip),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                amp_enabled=True,
+                amp_dtype=torch.bfloat16,
+                grad_scaler=RecordingScaler(),
+                activation_checkpointing=True,
+            )
+
+        self.assertEqual(calls, ["scale", "unscale", "clip", "step", "update"])
+        self.assertAlmostEqual(float(parameter.detach()), 0.8, places=5)
+        self.assertEqual(metrics["amp_enabled"], 1.0)
+        self.assertEqual(metrics["amp_scale"], 128.0)
+        self.assertEqual(metrics["activation_checkpointing"], 1.0)
+
+    def test_train_step_updates_grad_scaler_after_nonfinite_gradient_skip(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_amp_skip.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        calls: list[str] = []
+
+        class RecordingScaler:
+            def scale(self, loss):
+                calls.append("scale")
+                return loss
+
+            def unscale_(self, optimizer):
+                calls.append("unscale")
+
+            def step(self, optimizer):
+                calls.append("step")
+                optimizer.step()
+
+            def update(self):
+                calls.append("update")
+
+            def get_scale(self):
+                return 64.0
+
+        def fake_descriptor_loss(*_args, **_kwargs):
+            return parameter * 2.0, {
+                "top1_accuracy": 1.0,
+                "top5_accuracy": 1.0,
+                "top10_accuracy": 1.0,
+                "mean_positive_rank": 1.0,
+                "mean_positive_score": 1.0,
+                "mean_negative_score": 0.0,
+            }
+
+        def raise_nonfinite_gradient(_parameters, *, max_grad_norm=0.0):
+            calls.append("clip")
+            raise FloatingPointError("nonfinite gradients")
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss", side_effect=fake_descriptor_loss),
+            mock.patch.object(train, "clip_and_measure_gradients", side_effect=raise_nonfinite_gradient),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                skip_nonfinite_steps=True,
+                amp_enabled=True,
+                amp_dtype=torch.bfloat16,
+                grad_scaler=RecordingScaler(),
+            )
+
+        self.assertEqual(calls, ["scale", "unscale", "clip", "update"])
+        self.assertEqual(metrics["skipped"], 1.0)
+        self.assertAlmostEqual(float(parameter.detach()), 1.0, places=5)
 
     def test_load_training_model_prefers_pytorch_state_when_provided(self):
         class Args:

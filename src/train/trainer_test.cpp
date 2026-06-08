@@ -2531,7 +2531,7 @@ static void trainer_descriptor_training_enables_texture_target_without_pairwise_
     PFM_REQUIRE(pfm::testing::descriptor_texture_target_weight_for_test() > 0.0);
 }
 
-static void trainer_descriptor_orientation_canonicalization_rolls_channel_groups()
+static void trainer_descriptor_orientation_canonicalization_leaves_channels_unchanged()
 {
     auto descriptors = torch::zeros({1, 4, 1, 4}, torch::kFloat32);
     descriptors.index_put_({0, 0, 0, 0}, 1.0F);
@@ -2546,9 +2546,7 @@ static void trainer_descriptor_orientation_canonicalization_rolls_channel_groups
 
     auto canonical = pfm::testing::canonicalize_descriptor_map_by_orientation_for_test(descriptors, orientation);
 
-    auto expected = torch::zeros_like(descriptors);
-    expected.index_put_({0, 0, 0, torch::indexing::Slice()}, 1.0F);
-    PFM_REQUIRE(torch::allclose(canonical, expected, 1.0e-6, 1.0e-6));
+    PFM_REQUIRE(torch::allclose(canonical, descriptors, 1.0e-6, 1.0e-6));
 }
 
 static void trainer_descriptor_finetune_anchor_penalizes_teacher_drift()
@@ -3642,8 +3640,8 @@ void register_trainer_tests()
                   trainer_texture_blend_does_not_overwrite_learned_descriptor);
     register_test("trainer_descriptor_training_enables_texture_target_without_pairwise_teacher",
                   trainer_descriptor_training_enables_texture_target_without_pairwise_teacher);
-    register_test("trainer_descriptor_orientation_canonicalization_rolls_channel_groups",
-                  trainer_descriptor_orientation_canonicalization_rolls_channel_groups);
+    register_test("trainer_descriptor_orientation_canonicalization_leaves_channels_unchanged",
+                  trainer_descriptor_orientation_canonicalization_leaves_channels_unchanged);
     register_test("trainer_descriptor_finetune_anchor_penalizes_teacher_drift",
                   trainer_descriptor_finetune_anchor_penalizes_teacher_drift);
     register_test("trainer_descriptor_finetune_anchor_weight_preserves_rotation_baseline",

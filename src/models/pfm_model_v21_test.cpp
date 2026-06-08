@@ -48,6 +48,9 @@ static void pfm_v21_model_exposes_python_state_keys()
     PFM_REQUIRE(hasStateKey(model, "dual_fpn.keypoint_from_stage3.weight"));
     PFM_REQUIRE(hasStateKey(model, "sparse_head.keypoint_context.conv1.weight"));
     PFM_REQUIRE(hasStateKey(model, "sparse_head.keypoint_offsets.weight"));
+    PFM_REQUIRE(hasStateKey(model, "sparse_head.matchability.weight"));
+    PFM_REQUIRE(hasStateKey(model, "sparse_head.descriptor_uncertainty.weight"));
+    PFM_REQUIRE(hasStateKey(model, "sparse_head.no_match_prior.weight"));
     PFM_REQUIRE(hasStateKey(model, "texture_adapter.residual.weight"));
     PFM_REQUIRE(hasStateKey(model, "descriptor_fusion.input_projection.weight"));
     PFM_REQUIRE(hasStateKey(model, "quality_head.predictor.0.weight"));
@@ -76,6 +79,21 @@ static void pfm_v21_forward_single_returns_python_feature_shapes()
     PFM_REQUIRE(output.quality.sizes() == torch::IntArrayRef({1, 1, 8, 8}));
     PFM_REQUIRE(output.local_contrast.sizes() == torch::IntArrayRef({1, 1, 8, 8}));
     PFM_REQUIRE(torch::isfinite(output.descriptors).all().item<bool>());
+}
+
+static void pfm_v21_forward_single_returns_reliability_maps()
+{
+    auto model = pfm::v21::PfmV21FeatureMatcher(smallConfig());
+    model->eval();
+    torch::NoGradGuard no_grad;
+
+    const auto output = model->forwardSingle(torch::rand({1, 1, 32, 32}, torch::kFloat32));
+
+    PFM_REQUIRE(output.matchability.sizes() == output.heatmap.sizes());
+    PFM_REQUIRE(output.descriptor_uncertainty.sizes() == output.heatmap.sizes());
+    PFM_REQUIRE(output.no_match_prior.sizes() == output.heatmap.sizes());
+    PFM_REQUIRE(output.matchability.min().item<float>() >= 0.0F);
+    PFM_REQUIRE(output.matchability.max().item<float>() <= 1.0F);
 }
 
 static void pfm_v21_graph_matcher_accepts_full_metadata()
@@ -522,6 +540,8 @@ void register_pfm_model_v21_tests()
     register_test("pfm v21 model exposes python state keys", pfm_v21_model_exposes_python_state_keys);
     register_test("pfm v21 forward single returns python feature shapes",
                   pfm_v21_forward_single_returns_python_feature_shapes);
+    register_test("pfm v21 forward single returns reliability maps",
+                  pfm_v21_forward_single_returns_reliability_maps);
     register_test("pfm v21 graph matcher accepts full metadata", pfm_v21_graph_matcher_accepts_full_metadata);
     register_test("pfm v21 graph matcher scores include accept probability",
                   pfm_v21_graph_matcher_scores_include_accept_probability);

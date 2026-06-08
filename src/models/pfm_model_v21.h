@@ -42,6 +42,12 @@ struct PfmV21SparseHeadOutput
     torch::Tensor affine;
     /// 关键点亚像素偏移图。
     torch::Tensor keypoint_offsets;
+    /// 关键点可匹配性图。
+    torch::Tensor matchability;
+    /// 描述子不确定性图。
+    torch::Tensor descriptor_uncertainty;
+    /// 无对应点先验图。
+    torch::Tensor no_match_prior;
 };
 
 struct PfmV21DenseHeadOutput
@@ -114,6 +120,12 @@ struct PfmV21RawFeatureMaps
     torch::Tensor quality;
     /// 局部纹理对比度图。
     torch::Tensor local_contrast;
+    /// 关键点可匹配性图。
+    torch::Tensor matchability;
+    /// 描述子不确定性图。
+    torch::Tensor descriptor_uncertainty;
+    /// 无对应点先验图。
+    torch::Tensor no_match_prior;
 };
 
 class PfmV21ZeroResidualContextBlockImpl : public torch::nn::Module
@@ -235,12 +247,13 @@ class PfmV21SparseHeadImpl : public torch::nn::Module
     torch::nn::Conv2d _descriptor_viewpoint_attention{nullptr};
     torch::nn::Conv2d _descriptor_orientation_alignment{nullptr};
     torch::nn::Conv2d _descriptor_dilated_context{nullptr};
-    torch::nn::Conv2d _descriptor_branch_quality{nullptr};
-    torch::nn::Conv2d _descriptor_rotation_fusion{nullptr};
     torch::nn::Conv2d _descriptor_skip{nullptr};
     torch::nn::Conv2d _scale{nullptr};
     torch::nn::Conv2d _orientation{nullptr};
     torch::nn::Conv2d _affine{nullptr};
+    torch::nn::Conv2d _matchability{nullptr};
+    torch::nn::Conv2d _descriptor_uncertainty{nullptr};
+    torch::nn::Conv2d _no_match_prior{nullptr};
 };
 
 TORCH_MODULE(PfmV21SparseHead);

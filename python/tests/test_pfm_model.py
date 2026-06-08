@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import torch
@@ -25,6 +26,27 @@ class PFMModelTest(unittest.TestCase):
             (2, 32, 4, 5),
         ])
 
+    def test_activation_checkpointing_preserves_python_forward_backward(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=1,
+        )
+        image = torch.randn(1, 1, 32, 40)
+
+        with mock.patch.object(
+            pfm_model,
+            "activation_checkpoint",
+            wraps=pfm_model.activation_checkpoint,
+        ) as checkpoint:
+            descriptors = model.learned_descriptor_map_single(image, activation_checkpointing=True)
+            loss = descriptors.square().mean()
+            loss.backward()
+
+        self.assertGreater(checkpoint.call_count, 0)
+        self.assertIsNotNone(model.sparse_head.descriptor_skip.weight.grad)
+
     def test_sparse_head_outputs_libtorch_maps_and_normalized_descriptors(self):
         head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16)
         output = head(torch.randn(2, 8, 16, 20))
@@ -37,6 +59,17 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(output.keypoint_offsets.shape), (2, 2, 16, 20))
         self.assertLessEqual(float(output.keypoint_offsets.detach().abs().max()), 0.5)
         self.assertTrue(torch.allclose(output.descriptors.norm(dim=1), torch.ones(2, 16, 20), atol=1.0e-5))
+
+    def test_sparse_head_outputs_reliability_maps(self):
+        head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16)
+        output = head(torch.randn(2, 8, 16, 20))
+
+        self.assertEqual(tuple(output.matchability.shape), tuple(output.heatmap.shape))
+        self.assertEqual(tuple(output.descriptor_uncertainty.shape), tuple(output.heatmap.shape))
+        self.assertEqual(tuple(output.no_match_prior.shape), tuple(output.heatmap.shape))
+        for tensor in (output.matchability, output.descriptor_uncertainty, output.no_match_prior):
+            self.assertTrue(bool(torch.all(tensor >= 0.0)))
+            self.assertTrue(bool(torch.all(tensor <= 1.0)))
 
     def test_sparse_head_accepts_separate_keypoint_and_descriptor_features(self):
         head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16)
@@ -555,6 +588,41 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(meta.shape), (2, 16))
         self.assertTrue(torch.allclose(meta[:, 4], scores))
         self.assertTrue(torch.allclose(meta[:, 12], scores))
+
+    def test_prepare_graph_keypoint_metadata_uses_reliability_columns(self):
+        keypoints = torch.tensor([[0.0, 0.0], [4.0, 2.0]], dtype=torch.float32)
+        matchability = torch.tensor([[0.8], [0.2]], dtype=torch.float32)
+        descriptor_uncertainty = torch.tensor([[0.1], [0.7]], dtype=torch.float32)
+        no_match_prior = torch.tensor([[0.05], [0.9]], dtype=torch.float32)
+
+        meta = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints,
+            meta_dim=16,
+            matchability=matchability,
+            descriptor_uncertainty=descriptor_uncertainty,
+            no_match_prior=no_match_prior,
+        )
+
+        self.assertTrue(torch.allclose(meta[:, 12:13], matchability))
+        self.assertTrue(torch.allclose(meta[:, 14:15], descriptor_uncertainty))
+        self.assertTrue(torch.allclose(meta[:, 15:16], no_match_prior))
+
+    def test_graph_matcher_uses_no_match_prior_for_dustbin_logits(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=1, keypoint_meta_dim=16)
+        descriptors = torch.eye(2, dtype=torch.float32)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        metadata = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints,
+            meta_dim=16,
+            matchability=torch.full((2, 1), 0.5),
+            descriptor_uncertainty=torch.full((2, 1), 0.5),
+            no_match_prior=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+        )
+
+        output = graph(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
+
+        self.assertGreater(float(output.logits[1, -1].detach()), float(output.logits[0, -1].detach()))
+        self.assertGreater(float(output.logits[-1, 1].detach()), float(output.logits[-1, 0].detach()))
 
     def test_normalize_channels_handles_large_finite_values_without_zeroing(self):
         tensor = torch.tensor([[[[1.0e30]], [[2.0e30]], [[-3.0e30]]]], dtype=torch.float32)

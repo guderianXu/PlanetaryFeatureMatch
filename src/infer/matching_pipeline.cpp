@@ -407,21 +407,7 @@ torch::Tensor pythonRawMutualDescriptorSimilarityScores(const torch::Tensor& des
     auto desc_b = descriptors_b.to(torch::kCPU, torch::kFloat32).contiguous();
     desc_a = desc_a / desc_a.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
     desc_b = desc_b / desc_b.pow(2).sum(1, true).clamp_min(1.0e-12).sqrt();
-    const auto channels = desc_a.size(1);
-    if (channels < 4 || channels % 4 != 0)
-    {
-        return torch::matmul(desc_a, desc_b.transpose(0, 1));
-    }
-
-    const auto group_channels = channels / 4;
-    std::vector<torch::Tensor> scores;
-    scores.reserve(4);
-    for (int64_t turns = 0; turns < 4; ++turns)
-    {
-        const auto shifted_b = turns == 0 ? desc_b : torch::roll(desc_b, {turns * group_channels}, {1});
-        scores.push_back(torch::matmul(desc_a, shifted_b.transpose(0, 1)));
-    }
-    return std::get<0>(torch::stack(scores, 0).max(0));
+    return torch::matmul(desc_a, desc_b.transpose(0, 1));
 }
 
 double normalizeAngle(double angle)
@@ -1943,11 +1929,16 @@ MatchSet matchFeatureSets(const FeatureSet& features_a, const FeatureSet& featur
     return matchFeatureSetsWithMatcher(features_a, features_b, matcher, graph_options);
 }
 
-MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const FeatureSet& features_b, int64_t max_matches)
+MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const FeatureSet& features_b, int64_t max_matches,
+                                         double min_score)
 {
     if (max_matches <= 0)
     {
         throw std::invalid_argument("max_matches must be positive");
+    }
+    if (!std::isfinite(min_score))
+    {
+        throw std::invalid_argument("min_score must be finite");
     }
     if (!features_a.descriptors.defined() || !features_b.descriptors.defined() || features_a.descriptors.dim() != 2 ||
         features_b.descriptors.dim() != 2)
@@ -1977,7 +1968,7 @@ MatchSet matchFeatureSetsPythonRawMutual(const FeatureSet& features_a, const Fea
     for (int64_t source = 0; source < scores.size(0); ++source)
     {
         const auto target = target_data[source];
-        if (best_source_data[target] == source)
+        if (best_source_data[target] == source && score_data[source] >= static_cast<float>(min_score))
         {
             order.push_back(source);
         }

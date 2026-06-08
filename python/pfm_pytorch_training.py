@@ -11,6 +11,7 @@ import os
 import random
 import subprocess
 import sys
+from contextlib import nullcontext
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from patch_descriptor_training import (
 
 
 GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
+AMP_DTYPE_CHOICES = ("float16", "bfloat16")
 REJECTION_TRAINING_DEFAULTS = {
     "graph_matcher_loss_weight": 0.50,
     "graph_matcher_no_match_points": 64,
@@ -58,12 +60,36 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_positive_pairs",
     "graph_matcher_extra_no_match_points",
 )
+RELIABILITY_LOSS_METRIC_KEYS = (
+    "matchability_loss",
+    "descriptor_uncertainty_loss",
+    "no_match_prior_loss",
+    "reliability_points",
+    "rotation_descriptor_consistency_loss",
+    "orientation_consistency_loss",
+    "scale_consistency_loss",
+    "affine_consistency_loss",
+    "rotation_consistency_points",
+    "rotation_consistency_pairs",
+)
 
 
 @dataclass(frozen=True)
 class PseudoLabelMatches:
     points_a_xy: torch.Tensor
     points_b_xy: torch.Tensor
+
+
+@dataclass(frozen=True)
+class TrainingSparseMaps:
+    descriptors: torch.Tensor
+    heatmap: torch.Tensor
+    matchability: torch.Tensor
+    descriptor_uncertainty: torch.Tensor
+    no_match_prior: torch.Tensor
+    scale: torch.Tensor
+    orientation: torch.Tensor
+    affine: torch.Tensor
 
 
 class PairArchiveCache:
@@ -581,18 +607,14 @@ def _descriptor_rows_at_indices(descriptors: torch.Tensor, selected_indices: tor
 
 
 def _cyclic_similarity_matrix(desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+    """Legacy entry point for descriptor similarity; now uses strict cosine only."""
     if desc_a.dim() != 2 or desc_b.dim() != 2:
         raise ValueError("descriptors must have shape NxD")
     if desc_a.size(1) != desc_b.size(1):
         raise ValueError("descriptor dimensions must match")
     desc_a = normalize_descriptor_batch(desc_a)
     desc_b = normalize_descriptor_batch(desc_b)
-    channels = desc_a.size(1)
-    if channels < 4 or channels % 4 != 0:
-        return desc_a @ desc_b.T
-    group = channels // 4
-    scores = [desc_a @ torch.roll(desc_b, shifts=turns * group, dims=1).T for turns in range(4)]
-    return torch.stack(scores, dim=0).max(dim=0).values
+    return desc_a @ desc_b.T
 
 
 def _mutual_nearest_descriptor_matches(
@@ -1065,9 +1087,15 @@ def sample_descriptors(descriptor_map: torch.Tensor, points_xy: torch.Tensor) ->
         return descriptor_map.new_empty((0, descriptor_map.size(1)))
     height = descriptor_map.size(2)
     width = descriptor_map.size(3)
-    grid = _normalize_xy(points_xy, height, width).view(1, -1, 1, 2)
+    grid = _normalize_xy(points_xy, height, width).to(dtype=descriptor_map.dtype).view(1, -1, 1, 2)
     sampled = F.grid_sample(descriptor_map, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
     return sampled.squeeze(0).squeeze(-1).transpose(0, 1).contiguous()
+
+
+def sample_optional_map_values(feature_map: torch.Tensor | None, points_xy: torch.Tensor) -> torch.Tensor | None:
+    if feature_map is None:
+        return None
+    return sample_descriptors(feature_map, points_xy)
 
 
 def normalize_descriptor_batch(descriptors: torch.Tensor, *, eps: float = 1.0e-3) -> torch.Tensor:
@@ -1242,18 +1270,14 @@ def descriptor_false_match_suppression_loss(
 
 
 def paired_cyclic_similarity(desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+    """Legacy entry point for paired descriptor similarity; now uses strict cosine only."""
     if desc_a.dim() != 2 or desc_b.dim() != 2:
         raise ValueError("descriptors must have shape NxD")
     if desc_a.shape != desc_b.shape:
         raise ValueError("descriptor tensors must have the same shape")
     desc_a = normalize_descriptor_batch(desc_a)
     desc_b = normalize_descriptor_batch(desc_b)
-    channels = desc_a.size(1)
-    if channels < 4 or channels % 4 != 0:
-        return (desc_a * desc_b).sum(dim=1)
-    group = channels // 4
-    scores = [(desc_a * torch.roll(desc_b, shifts=turns * group, dims=1)).sum(dim=1) for turns in range(4)]
-    return torch.stack(scores, dim=0).max(dim=0).values
+    return (desc_a * desc_b).sum(dim=1)
 
 
 def false_match_negative_loss(
@@ -1407,6 +1431,12 @@ def graph_matcher_correspondence_loss(
     random_attention_layers: bool = False,
     max_attention_work_fraction: float = 1.0,
     width_keep_ratio: float = 1.0,
+    matchability_a: torch.Tensor | None = None,
+    matchability_b: torch.Tensor | None = None,
+    descriptor_uncertainty_a: torch.Tensor | None = None,
+    descriptor_uncertainty_b: torch.Tensor | None = None,
+    no_match_prior_a: torch.Tensor | None = None,
+    no_match_prior_b: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
     return_components: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1553,10 +1583,16 @@ def graph_matcher_correspondence_loss(
     meta_a = pfm_model.prepare_graph_keypoint_metadata(
         points_a_xy,
         meta_dim=model.config.graph_keypoint_meta_dim,
+        matchability=sample_optional_map_values(matchability_a, points_a_xy),
+        descriptor_uncertainty=sample_optional_map_values(descriptor_uncertainty_a, points_a_xy),
+        no_match_prior=sample_optional_map_values(no_match_prior_a, points_a_xy),
     ).to(desc_a.device)
     meta_b = pfm_model.prepare_graph_keypoint_metadata(
         points_b_xy,
         meta_dim=model.config.graph_keypoint_meta_dim,
+        matchability=sample_optional_map_values(matchability_b, points_b_xy),
+        descriptor_uncertainty=sample_optional_map_values(descriptor_uncertainty_b, points_b_xy),
+        no_match_prior=sample_optional_map_values(no_match_prior_b, points_b_xy),
     ).to(desc_b.device)
     meta_a = apply_graph_metadata_mode(meta_a, metadata_mode)
     meta_b = apply_graph_metadata_mode(meta_b, metadata_mode)
@@ -1945,10 +1981,244 @@ def heatmap_point_loss(
     return positive_loss + float(negative_weight) * heatmap.to(torch.float32).mean()
 
 
+def _binary_map_point_loss(
+    score_map: torch.Tensor,
+    positive_points_xy: torch.Tensor,
+    negative_points_xy: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if score_map.dim() != 4 or score_map.size(0) != 1 or score_map.size(1) != 1:
+        raise ValueError("score_map must have shape 1x1xHxW")
+    terms: list[torch.Tensor] = []
+    if positive_points_xy.numel() > 0:
+        positive_scores = sample_descriptors(score_map, positive_points_xy).reshape(-1).to(torch.float32)
+        terms.append(
+            F.binary_cross_entropy(
+                positive_scores.clamp(1.0e-6, 1.0 - 1.0e-6),
+                torch.ones_like(positive_scores),
+            )
+        )
+    if negative_points_xy is not None and negative_points_xy.numel() > 0:
+        negative_scores = sample_descriptors(score_map, negative_points_xy).reshape(-1).to(torch.float32)
+        terms.append(
+            F.binary_cross_entropy(
+                negative_scores.clamp(1.0e-6, 1.0 - 1.0e-6),
+                torch.zeros_like(negative_scores),
+            )
+        )
+    if not terms:
+        return score_map.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
+def matchability_supervision_loss(
+    matchability: torch.Tensor,
+    positive_points_xy: torch.Tensor,
+    negative_points_xy: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return _binary_map_point_loss(matchability, positive_points_xy, negative_points_xy)
+
+
+def no_match_prior_supervision_loss(
+    no_match_prior: torch.Tensor,
+    no_match_points_xy: torch.Tensor,
+    positive_points_xy: torch.Tensor | None = None,
+) -> torch.Tensor:
+    positive_points = no_match_points_xy
+    negative_points = positive_points_xy if positive_points_xy is not None else None
+    return _binary_map_point_loss(no_match_prior, positive_points, negative_points)
+
+
+def descriptor_uncertainty_supervision_loss(
+    descriptor_uncertainty: torch.Tensor,
+    false_or_no_match_points_xy: torch.Tensor,
+    positive_points_xy: torch.Tensor | None = None,
+) -> torch.Tensor:
+    positive_points = false_or_no_match_points_xy
+    negative_points = positive_points_xy if positive_points_xy is not None else None
+    return _binary_map_point_loss(descriptor_uncertainty, positive_points, negative_points)
+
+
+def _rotation_k(rotation_degrees: int) -> int:
+    if int(rotation_degrees) % 90 != 0:
+        raise ValueError("rotation_degrees must be a multiple of 90")
+    return (int(rotation_degrees) // 90) % 4
+
+
+def rotate_points_xy_90(points_xy: torch.Tensor, height: int, width: int, rotation_degrees: int) -> torch.Tensor:
+    if points_xy.dim() != 2 or points_xy.size(1) != 2:
+        raise ValueError("points_xy must have shape Nx2")
+    k = _rotation_k(rotation_degrees)
+    x = points_xy[:, 0]
+    y = points_xy[:, 1]
+    if k == 0:
+        return points_xy.clone()
+    if k == 1:
+        return torch.stack([y, points_xy.new_tensor(float(width - 1)) - x], dim=1)
+    if k == 2:
+        return torch.stack(
+            [
+                points_xy.new_tensor(float(width - 1)) - x,
+                points_xy.new_tensor(float(height - 1)) - y,
+            ],
+            dim=1,
+        )
+    return torch.stack([points_xy.new_tensor(float(height - 1)) - y, x], dim=1)
+
+
+def rotate_orientation_vectors(vectors: torch.Tensor, rotation_degrees: int) -> torch.Tensor:
+    if vectors.dim() != 2 or vectors.size(1) != 2:
+        raise ValueError("orientation vectors must have shape Nx2")
+    k = _rotation_k(rotation_degrees)
+    if k == 0:
+        return vectors
+    x = vectors[:, 0]
+    y = vectors[:, 1]
+    if k == 1:
+        return torch.stack([-y, x], dim=1)
+    if k == 2:
+        return -vectors
+    return torch.stack([y, -x], dim=1)
+
+
+def _rotation_matrix_2d(rotation_degrees: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    k = _rotation_k(rotation_degrees)
+    if k == 0:
+        values = [1.0, 0.0, 0.0, 1.0]
+    elif k == 1:
+        values = [0.0, -1.0, 1.0, 0.0]
+    elif k == 2:
+        values = [-1.0, 0.0, 0.0, -1.0]
+    else:
+        values = [0.0, 1.0, -1.0, 0.0]
+    return torch.tensor(values, dtype=dtype, device=device).view(2, 2)
+
+
+def rotation_descriptor_consistency_loss(
+    descriptors_reference: torch.Tensor,
+    descriptors_rotated: torch.Tensor,
+    points_xy: torch.Tensor,
+    rotation_degrees: int,
+    *,
+    max_points: int = 0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    selected = _limited_points(points_xy, max_points=max_points, generator=generator)
+    if selected.numel() == 0:
+        return descriptors_reference.sum() * 0.0
+    rotated_points = rotate_points_xy_90(selected, descriptors_reference.size(2), descriptors_reference.size(3), rotation_degrees)
+    reference = normalize_descriptor_batch(sample_descriptors(descriptors_reference, selected))
+    rotated = normalize_descriptor_batch(sample_descriptors(descriptors_rotated, rotated_points))
+    return (1.0 - (reference * rotated).sum(dim=1).clamp(-1.0, 1.0)).mean()
+
+
+def orientation_consistency_loss(
+    orientation_reference: torch.Tensor,
+    orientation_rotated: torch.Tensor,
+    points_xy: torch.Tensor,
+    rotation_degrees: int,
+    *,
+    max_points: int = 0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    selected = _limited_points(points_xy, max_points=max_points, generator=generator)
+    if selected.numel() == 0:
+        return orientation_reference.sum() * 0.0
+    rotated_points = rotate_points_xy_90(selected, orientation_reference.size(2), orientation_reference.size(3), rotation_degrees)
+    reference = normalize_descriptor_batch(sample_descriptors(orientation_reference, selected), eps=1.0e-6)
+    rotated = normalize_descriptor_batch(sample_descriptors(orientation_rotated, rotated_points), eps=1.0e-6)
+    target = rotate_orientation_vectors(reference, rotation_degrees)
+    return (1.0 - (target * rotated).sum(dim=1).clamp(-1.0, 1.0)).mean()
+
+
+def scale_consistency_loss(
+    scale_reference: torch.Tensor,
+    scale_rotated: torch.Tensor,
+    points_xy: torch.Tensor,
+    rotation_degrees: int,
+    *,
+    max_points: int = 0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    selected = _limited_points(points_xy, max_points=max_points, generator=generator)
+    if selected.numel() == 0:
+        return scale_reference.sum() * 0.0
+    rotated_points = rotate_points_xy_90(selected, scale_reference.size(2), scale_reference.size(3), rotation_degrees)
+    reference = sample_descriptors(scale_reference.clamp_min(1.0e-6).log(), selected)
+    rotated = sample_descriptors(scale_rotated.clamp_min(1.0e-6).log(), rotated_points)
+    return F.smooth_l1_loss(rotated, reference)
+
+
+def affine_consistency_loss(
+    affine_reference: torch.Tensor,
+    affine_rotated: torch.Tensor,
+    points_xy: torch.Tensor,
+    rotation_degrees: int,
+    *,
+    max_points: int = 0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    selected = _limited_points(points_xy, max_points=max_points, generator=generator)
+    if selected.numel() == 0:
+        return affine_reference.sum() * 0.0
+    rotated_points = rotate_points_xy_90(selected, affine_reference.size(2), affine_reference.size(3), rotation_degrees)
+    reference = sample_descriptors(affine_reference, selected).view(-1, 2, 2)
+    rotated = sample_descriptors(affine_rotated, rotated_points).view(-1, 2, 2)
+    rotation = _rotation_matrix_2d(rotation_degrees, device=reference.device, dtype=reference.dtype)
+    target = rotation @ reference @ rotation.transpose(0, 1)
+    return F.smooth_l1_loss(rotated, target)
+
+
 def compute_descriptor_maps(model, pair: SyntheticPair) -> tuple[torch.Tensor, torch.Tensor]:
     return (
         model.descriptor_map_single(pair.view_a.unsqueeze(0)),
         model.descriptor_map_single(pair.view_b.unsqueeze(0)),
+    )
+
+
+def learned_training_sparse_maps_single(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    image: torch.Tensor,
+    *,
+    train_blended_descriptors: bool = False,
+    texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+    activation_checkpointing: bool = False,
+) -> TrainingSparseMaps:
+    if image.dim() != 4:
+        raise ValueError("image must have shape BxCxHxW")
+    features = (
+        model.backbone(image, activation_checkpointing=True)
+        if activation_checkpointing
+        else model.backbone(image)
+    )
+    if hasattr(model, "dual_fpn"):
+        p2_keypoint, p2_descriptor = (
+            model.dual_fpn(features, activation_checkpointing=True)
+            if activation_checkpointing
+            else model.dual_fpn(features)
+        )
+        sparse = (
+            model.sparse_head(p2_keypoint, p2_descriptor, activation_checkpointing=True)
+            if activation_checkpointing
+            else model.sparse_head(p2_keypoint, p2_descriptor)
+        )
+    else:
+        sparse = (
+            model.sparse_head(features[1], activation_checkpointing=True)
+            if activation_checkpointing
+            else model.sparse_head(features[1])
+        )
+    descriptors = sparse.descriptors
+    if train_blended_descriptors:
+        descriptors = model.fuse_descriptor_maps(descriptors, image, texture_blend_weight=texture_blend_weight)
+    return TrainingSparseMaps(
+        descriptors=descriptors,
+        heatmap=sparse.heatmap,
+        matchability=sparse.matchability,
+        descriptor_uncertainty=sparse.descriptor_uncertainty,
+        no_match_prior=sparse.no_match_prior,
+        scale=sparse.scale,
+        orientation=sparse.orientation,
+        affine=sparse.affine,
     )
 
 
@@ -1958,19 +2228,16 @@ def learned_descriptor_and_heatmap_single(
     *,
     train_blended_descriptors: bool = False,
     texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+    activation_checkpointing: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if image.dim() != 4:
-        raise ValueError("image must have shape BxCxHxW")
-    features = model.backbone(image)
-    if hasattr(model, "dual_fpn"):
-        p2_keypoint, p2_descriptor = model.dual_fpn(features)
-        sparse = model.sparse_head(p2_keypoint, p2_descriptor)
-    else:
-        sparse = model.sparse_head(features[1])
-    descriptors = sparse.descriptors
-    if train_blended_descriptors:
-        descriptors = model.fuse_descriptor_maps(descriptors, image, texture_blend_weight=texture_blend_weight)
-    return descriptors, sparse.heatmap
+    sparse_maps = learned_training_sparse_maps_single(
+        model,
+        image,
+        train_blended_descriptors=train_blended_descriptors,
+        texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
+    )
+    return sparse_maps.descriptors, sparse_maps.heatmap
 
 
 def compute_training_descriptor_map(
@@ -1979,26 +2246,41 @@ def compute_training_descriptor_map(
     *,
     train_blended_descriptors: bool = False,
     texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+    activation_checkpointing: bool = False,
 ) -> torch.Tensor:
     if image.dim() != 4:
         raise ValueError("image must have shape BxCxHxW")
     if train_blended_descriptors:
         if hasattr(model, "descriptor_map_single"):
-            return model.descriptor_map_single(image, texture_blend_weight=texture_blend_weight)
+            return (
+                model.descriptor_map_single(
+                    image,
+                    texture_blend_weight=texture_blend_weight,
+                    activation_checkpointing=True,
+                )
+                if activation_checkpointing
+                else model.descriptor_map_single(image, texture_blend_weight=texture_blend_weight)
+            )
         descriptors, _ = learned_descriptor_and_heatmap_single(
             model,
             image,
             train_blended_descriptors=True,
             texture_blend_weight=texture_blend_weight,
+            activation_checkpointing=activation_checkpointing,
         )
         return descriptors
     if hasattr(model, "learned_descriptor_map_single"):
-        return model.learned_descriptor_map_single(image)
+        return (
+            model.learned_descriptor_map_single(image, activation_checkpointing=True)
+            if activation_checkpointing
+            else model.learned_descriptor_map_single(image)
+        )
     descriptors, _ = learned_descriptor_and_heatmap_single(
         model,
         image,
         train_blended_descriptors=False,
         texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
     )
     return descriptors
 
@@ -2009,12 +2291,14 @@ def compute_student_teacher_descriptor_map_single(
     *,
     train_blended_descriptors: bool = False,
     texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+    activation_checkpointing: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     student = compute_training_descriptor_map(
         model,
         image,
         train_blended_descriptors=train_blended_descriptors,
         texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
     )
     with torch.no_grad():
         teacher = model.texture_descriptor_map_single(image)
@@ -2028,6 +2312,7 @@ def compute_student_teacher_descriptor_maps(
     train_blended_descriptors: bool = False,
     texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
     include_heatmaps: bool = False,
+    activation_checkpointing: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[
     torch.Tensor,
     torch.Tensor,
@@ -2041,12 +2326,14 @@ def compute_student_teacher_descriptor_maps(
         pair.view_a.unsqueeze(0),
         train_blended_descriptors=train_blended_descriptors,
         texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
     )
     student_b, heatmap_b = learned_descriptor_and_heatmap_single(
         model,
         pair.view_b.unsqueeze(0),
         train_blended_descriptors=train_blended_descriptors,
         texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
     )
     with torch.no_grad():
         teacher_a = model.texture_descriptor_map_single(pair.view_a.unsqueeze(0))
@@ -2068,6 +2355,7 @@ def descriptor_parameters(
     train_texture_adapter: bool = False,
     train_descriptor_fusion: bool = False,
     train_quality_head: bool = False,
+    train_reliability_head: bool = False,
     train_graph_matcher: bool = False,
 ) -> list[torch.nn.Parameter]:
     selected: list[torch.nn.Parameter] = []
@@ -2105,6 +2393,14 @@ def descriptor_parameters(
         trainable = trainable or (train_texture_adapter and name.startswith("texture_adapter."))
         trainable = trainable or (train_descriptor_fusion and name.startswith("descriptor_fusion."))
         trainable = trainable or (train_quality_head and name.startswith("quality_head."))
+        trainable = trainable or (
+            train_reliability_head
+            and (
+                name.startswith("sparse_head.matchability")
+                or name.startswith("sparse_head.descriptor_uncertainty")
+                or name.startswith("sparse_head.no_match_prior")
+            )
+        )
         trainable = trainable or (train_graph_matcher and name.startswith("graph_matcher."))
         if trainable:
             parameter.requires_grad_(True)
@@ -2128,6 +2424,34 @@ def require_finite_scalar(value: torch.Tensor, *, name: str) -> None:
         raise ValueError(f"{name} must be a scalar")
     if not bool(torch.isfinite(value.detach()).all()):
         raise FloatingPointError(f"non-finite {name}")
+
+
+def amp_dtype_from_name(name: str) -> torch.dtype:
+    if name == "float16":
+        return torch.float16
+    if name == "bfloat16":
+        return torch.bfloat16
+    raise ValueError(f"unsupported AMP dtype: {name}")
+
+
+def autocast_context(device: torch.device, *, enabled: bool, dtype: torch.dtype):
+    if not enabled:
+        return nullcontext()
+    if device.type not in {"cuda", "cpu"}:
+        return nullcontext()
+    return torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=True)
+
+
+def make_grad_scaler(device: torch.device, *, enabled: bool, dtype: torch.dtype):
+    if not enabled or device.type != "cuda" or dtype is not torch.float16:
+        return None
+    return torch.amp.GradScaler("cuda", enabled=True)
+
+
+def grad_scaler_scale(grad_scaler) -> float:
+    if grad_scaler is None or not hasattr(grad_scaler, "get_scale"):
+        return 0.0
+    return float(grad_scaler.get_scale())
 
 
 def clip_and_measure_gradients(parameters: list[torch.nn.Parameter], *, max_grad_norm: float = 0.0) -> float:
@@ -2304,6 +2628,20 @@ def train_step(
     graph_matcher_train_random_attention_layers: bool = False,
     graph_matcher_train_max_attention_work_fraction: float = 1.0,
     graph_matcher_train_width_keep_ratio: float = 1.0,
+    matchability_weight: float = 0.0,
+    descriptor_uncertainty_weight: float = 0.0,
+    no_match_prior_weight: float = 0.0,
+    reliability_negative_points: int = 0,
+    reliability_negative_min_distance: float = 4.0,
+    rotation_descriptor_consistency_weight: float = 0.0,
+    orientation_consistency_weight: float = 0.0,
+    scale_consistency_weight: float = 0.0,
+    affine_consistency_weight: float = 0.0,
+    rotation_consistency_degrees: list[int] | None = None,
+    amp_enabled: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
+    grad_scaler=None,
+    activation_checkpointing: bool = False,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
@@ -2313,6 +2651,24 @@ def train_step(
 ) -> dict[str, float]:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
+    for name, value in (
+        ("matchability_weight", matchability_weight),
+        ("descriptor_uncertainty_weight", descriptor_uncertainty_weight),
+        ("no_match_prior_weight", no_match_prior_weight),
+        ("rotation_descriptor_consistency_weight", rotation_descriptor_consistency_weight),
+        ("orientation_consistency_weight", orientation_consistency_weight),
+        ("scale_consistency_weight", scale_consistency_weight),
+        ("affine_consistency_weight", affine_consistency_weight),
+    ):
+        if value < 0.0:
+            raise ValueError(f"{name} must be nonnegative")
+    if reliability_negative_points < 0:
+        raise ValueError("reliability_negative_points must be nonnegative")
+    if reliability_negative_min_distance < 0.0:
+        raise ValueError("reliability_negative_min_distance must be nonnegative")
+    rotation_consistency_degrees = rotation_consistency_degrees or [90, 180, 270]
+    for degree in rotation_consistency_degrees:
+        _rotation_k(degree)
     optimizer.zero_grad(set_to_none=True)
     metric_rows: list[dict[str, float]] = []
     graph_metric_rows: list[dict[str, float]] = []
@@ -2328,6 +2684,18 @@ def train_step(
     illumination_consistency_pairs_used = 0
     illumination_match_points = 0
     illumination_match_pairs_used = 0
+    matchability_loss_sum = 0.0
+    descriptor_uncertainty_loss_sum = 0.0
+    no_match_prior_loss_sum = 0.0
+    reliability_loss_count = 0
+    reliability_points = 0
+    rotation_descriptor_loss_sum = 0.0
+    orientation_loss_sum = 0.0
+    scale_loss_sum = 0.0
+    affine_loss_sum = 0.0
+    rotation_loss_count = 0
+    rotation_consistency_points = 0
+    rotation_consistency_pairs_used = 0
     pose_counts = {
         "pose_easy_pairs": 0.0,
         "pose_medium_pairs": 0.0,
@@ -2339,6 +2707,40 @@ def train_step(
     loss_values: list[float] = []
     valid_micro_batches = 0
     parameters = [group_param for group in optimizer.param_groups for group_param in group["params"]]
+    reliability_loss_enabled = (
+        matchability_weight > 0.0 or descriptor_uncertainty_weight > 0.0 or no_match_prior_weight > 0.0
+    )
+    rotation_loss_enabled = (
+        rotation_descriptor_consistency_weight > 0.0
+        or orientation_consistency_weight > 0.0
+        or scale_consistency_weight > 0.0
+        or affine_consistency_weight > 0.0
+    )
+    sparse_maps_required = reliability_loss_enabled or rotation_loss_enabled
+    use_amp = bool(amp_enabled)
+    use_grad_scaler = use_amp and grad_scaler is not None
+    use_activation_checkpointing = bool(activation_checkpointing)
+    grad_scaler_unscaled = False
+
+    def auxiliary_loss_metrics() -> dict[str, float]:
+        reliability_denominator = float(max(1, reliability_loss_count))
+        rotation_denominator = float(max(1, rotation_loss_count))
+        return {
+            "matchability_loss": matchability_loss_sum / reliability_denominator,
+            "descriptor_uncertainty_loss": descriptor_uncertainty_loss_sum / reliability_denominator,
+            "no_match_prior_loss": no_match_prior_loss_sum / reliability_denominator,
+            "reliability_points": float(reliability_points),
+            "rotation_descriptor_consistency_loss": rotation_descriptor_loss_sum / rotation_denominator,
+            "orientation_consistency_loss": orientation_loss_sum / rotation_denominator,
+            "scale_consistency_loss": scale_loss_sum / rotation_denominator,
+            "affine_consistency_loss": affine_loss_sum / rotation_denominator,
+            "rotation_consistency_points": float(rotation_consistency_points),
+            "rotation_consistency_pairs": float(rotation_consistency_pairs_used),
+            "amp_enabled": 1.0 if use_amp else 0.0,
+            "amp_scale": grad_scaler_scale(grad_scaler) if use_grad_scaler else 0.0,
+            "activation_checkpointing": 1.0 if use_activation_checkpointing else 0.0,
+        }
+
     try:
         for _ in range(gradient_accumulation_steps):
             if forced_pair_paths is not None:
@@ -2367,21 +2769,49 @@ def train_step(
                     pair = load_pair_for_training(pair_path, device=device, pair_cache=pair_cache)
                 pair = crop_pair_for_training(pair, crop_size=training_crop_size, generator=generator)
                 pair = resize_pair_for_training(pair, max_image_size=training_max_image_size)
-                descriptor_maps = compute_student_teacher_descriptor_maps(
-                    model,
-                    pair,
-                    train_blended_descriptors=train_blended_descriptors,
-                    texture_blend_weight=texture_blend_weight,
-                    include_heatmaps=True,
-                )
-                if len(descriptor_maps) == 4:
-                    descriptors_a, descriptors_b, teacher_a, teacher_b = descriptor_maps
-                    heatmap_a = None
-                    heatmap_b = None
-                elif len(descriptor_maps) == 6:
-                    descriptors_a, descriptors_b, teacher_a, teacher_b, heatmap_a, heatmap_b = descriptor_maps
+                sparse_maps_a: TrainingSparseMaps | None = None
+                sparse_maps_b: TrainingSparseMaps | None = None
+                if sparse_maps_required:
+                    with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                        sparse_maps_a = learned_training_sparse_maps_single(
+                            model,
+                            pair.view_a.unsqueeze(0),
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            activation_checkpointing=use_activation_checkpointing,
+                        )
+                        sparse_maps_b = learned_training_sparse_maps_single(
+                            model,
+                            pair.view_b.unsqueeze(0),
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            activation_checkpointing=use_activation_checkpointing,
+                        )
+                    descriptors_a = sparse_maps_a.descriptors
+                    descriptors_b = sparse_maps_b.descriptors
+                    heatmap_a = sparse_maps_a.heatmap
+                    heatmap_b = sparse_maps_b.heatmap
+                    with torch.no_grad(), autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                        teacher_a = model.texture_descriptor_map_single(pair.view_a.unsqueeze(0))
+                        teacher_b = model.texture_descriptor_map_single(pair.view_b.unsqueeze(0))
                 else:
-                    raise ValueError("compute_student_teacher_descriptor_maps returned an unsupported tuple length")
+                    with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                        descriptor_maps = compute_student_teacher_descriptor_maps(
+                            model,
+                            pair,
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            include_heatmaps=True,
+                            activation_checkpointing=use_activation_checkpointing,
+                        )
+                    if len(descriptor_maps) == 4:
+                        descriptors_a, descriptors_b, teacher_a, teacher_b = descriptor_maps
+                        heatmap_a = None
+                        heatmap_b = None
+                    elif len(descriptor_maps) == 6:
+                        descriptors_a, descriptors_b, teacher_a, teacher_b, heatmap_a, heatmap_b = descriptor_maps
+                    else:
+                        raise ValueError("compute_student_teacher_descriptor_maps returned an unsupported tuple length")
                 points_a, points_b = sample_feature_correspondences(
                     pair,
                     feature_height=descriptors_a.size(2),
@@ -2427,12 +2857,83 @@ def train_step(
                         false_match_points += online_false_a.size(0)
                         false_match_pairs += 1
                 pair_losses: list[torch.Tensor] = []
-                if points_a.size(0) > 0 and (synthetic_loss_weight > 0.0 or graph_matcher_loss_weight > 0.0):
+                if points_a.size(0) > 0 and (
+                    synthetic_loss_weight > 0.0
+                    or graph_matcher_loss_weight > 0.0
+                    or reliability_loss_enabled
+                    or rotation_loss_enabled
+                ):
                     pose_multiplier = pose_difficulty_loss_multiplier(
                         pose_metadata,
                         pair_path,
                         strength=pose_difficulty_loss_weight,
                     )
+                    if reliability_loss_enabled and sparse_maps_a is not None and sparse_maps_b is not None:
+                        negative_count = int(reliability_negative_points)
+                        if negative_count <= 0:
+                            negative_count = max(
+                                int(graph_matcher_no_match_points),
+                                min(int(samples_per_pair), int(points_a.size(0))),
+                            )
+                        neg_a_points = sample_unmatched_feature_points(
+                            feature_height=descriptors_a.size(2),
+                            feature_width=descriptors_a.size(3),
+                            reference_points=points_a,
+                            count=negative_count,
+                            min_distance=reliability_negative_min_distance,
+                            generator=generator,
+                            device=descriptors_a.device,
+                        )
+                        neg_b_points = sample_unmatched_feature_points(
+                            feature_height=descriptors_b.size(2),
+                            feature_width=descriptors_b.size(3),
+                            reference_points=points_b,
+                            count=negative_count,
+                            min_distance=reliability_negative_min_distance,
+                            generator=generator,
+                            device=descriptors_b.device,
+                        )
+                        if matchability_weight > 0.0:
+                            matchability_loss = 0.5 * (
+                                matchability_supervision_loss(sparse_maps_a.matchability, points_a, neg_a_points)
+                                + matchability_supervision_loss(sparse_maps_b.matchability, points_b, neg_b_points)
+                            )
+                            pair_losses.append(float(matchability_weight) * matchability_loss)
+                            matchability_loss_sum += float(matchability_loss.detach().cpu())
+                        if descriptor_uncertainty_weight > 0.0:
+                            uncertainty_loss = 0.5 * (
+                                descriptor_uncertainty_supervision_loss(
+                                    sparse_maps_a.descriptor_uncertainty,
+                                    neg_a_points,
+                                    points_a,
+                                )
+                                + descriptor_uncertainty_supervision_loss(
+                                    sparse_maps_b.descriptor_uncertainty,
+                                    neg_b_points,
+                                    points_b,
+                                )
+                            )
+                            pair_losses.append(float(descriptor_uncertainty_weight) * uncertainty_loss)
+                            descriptor_uncertainty_loss_sum += float(uncertainty_loss.detach().cpu())
+                        if no_match_prior_weight > 0.0:
+                            no_match_loss = 0.5 * (
+                                no_match_prior_supervision_loss(
+                                    sparse_maps_a.no_match_prior,
+                                    neg_a_points,
+                                    points_a,
+                                )
+                                + no_match_prior_supervision_loss(
+                                    sparse_maps_b.no_match_prior,
+                                    neg_b_points,
+                                    points_b,
+                                )
+                            )
+                            pair_losses.append(float(no_match_prior_weight) * no_match_loss)
+                            no_match_prior_loss_sum += float(no_match_loss.detach().cpu())
+                        reliability_loss_count += 1
+                        reliability_points += int(
+                            points_a.size(0) + points_b.size(0) + neg_a_points.size(0) + neg_b_points.size(0)
+                        )
                     if synthetic_loss_weight > 0.0:
                         loss, metrics = descriptor_map_pair_loss(
                             descriptors_a,
@@ -2462,41 +2963,54 @@ def train_step(
                         metrics = paired_descriptor_metrics(desc_a.detach(), desc_b.detach())
                     if graph_matcher_loss_weight > 0.0:
                         graph_online_false_enabled = graph_online_false_can_train and online_false_a.size(0) > 0
-                        graph_loss, graph_components = graph_matcher_correspondence_loss(
-                            model,
-                            descriptors_a,
-                            descriptors_b,
-                            points_a,
-                            points_b,
-                            metadata_mode=graph_matcher_metadata_mode,
-                            no_match_points=graph_matcher_no_match_points,
-                            no_match_weight=graph_matcher_no_match_weight,
-                            no_match_min_distance=graph_matcher_no_match_min_distance,
-                            assignment_weight=graph_matcher_assignment_weight,
-                            accept_weight=graph_matcher_accept_weight,
-                            accept_negative_topk=graph_matcher_accept_negative_topk,
-                            prune_ranking_weight=graph_matcher_prune_ranking_weight,
-                            prune_ranking_margin=graph_matcher_prune_ranking_margin,
-                            stop_confidence_weight=graph_matcher_stop_confidence_weight,
-                            stop_confidence_margin=graph_matcher_stop_confidence_margin,
-                            raw_preservation_weight=graph_matcher_raw_preservation_weight,
-                            raw_preservation_margin=graph_matcher_raw_preservation_margin,
-                            raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
-                            hard_negative_dustbin_weight=graph_matcher_hard_negative_dustbin_weight,
-                            hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
-                            hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
-                            hard_negative_dustbin_spatial_min_distance=graph_matcher_hard_negative_dustbin_spatial_min_distance,
-                            semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
-                            semi_dense_min_score=graph_matcher_semi_dense_min_score,
-                            extra_no_match_points_a_xy=online_false_a if graph_online_false_enabled else None,
-                            extra_no_match_points_b_xy=online_false_b if graph_online_false_enabled else None,
-                            max_attention_layers=graph_matcher_train_max_attention_layers,
-                            random_attention_layers=graph_matcher_train_random_attention_layers,
-                            max_attention_work_fraction=graph_matcher_train_max_attention_work_fraction,
-                            width_keep_ratio=graph_matcher_train_width_keep_ratio,
-                            generator=generator,
-                            return_components=True,
-                        )
+                        with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                            graph_loss, graph_components = graph_matcher_correspondence_loss(
+                                model,
+                                descriptors_a,
+                                descriptors_b,
+                                points_a,
+                                points_b,
+                                metadata_mode=graph_matcher_metadata_mode,
+                                no_match_points=graph_matcher_no_match_points,
+                                no_match_weight=graph_matcher_no_match_weight,
+                                no_match_min_distance=graph_matcher_no_match_min_distance,
+                                assignment_weight=graph_matcher_assignment_weight,
+                                accept_weight=graph_matcher_accept_weight,
+                                accept_negative_topk=graph_matcher_accept_negative_topk,
+                                prune_ranking_weight=graph_matcher_prune_ranking_weight,
+                                prune_ranking_margin=graph_matcher_prune_ranking_margin,
+                                stop_confidence_weight=graph_matcher_stop_confidence_weight,
+                                stop_confidence_margin=graph_matcher_stop_confidence_margin,
+                                raw_preservation_weight=graph_matcher_raw_preservation_weight,
+                                raw_preservation_margin=graph_matcher_raw_preservation_margin,
+                                raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
+                                hard_negative_dustbin_weight=graph_matcher_hard_negative_dustbin_weight,
+                                hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
+                                hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
+                                hard_negative_dustbin_spatial_min_distance=(
+                                    graph_matcher_hard_negative_dustbin_spatial_min_distance
+                                ),
+                                semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
+                                semi_dense_min_score=graph_matcher_semi_dense_min_score,
+                                extra_no_match_points_a_xy=online_false_a if graph_online_false_enabled else None,
+                                extra_no_match_points_b_xy=online_false_b if graph_online_false_enabled else None,
+                                max_attention_layers=graph_matcher_train_max_attention_layers,
+                                random_attention_layers=graph_matcher_train_random_attention_layers,
+                                max_attention_work_fraction=graph_matcher_train_max_attention_work_fraction,
+                                width_keep_ratio=graph_matcher_train_width_keep_ratio,
+                                matchability_a=sparse_maps_a.matchability if sparse_maps_a is not None else None,
+                                matchability_b=sparse_maps_b.matchability if sparse_maps_b is not None else None,
+                                descriptor_uncertainty_a=(
+                                    sparse_maps_a.descriptor_uncertainty if sparse_maps_a is not None else None
+                                ),
+                                descriptor_uncertainty_b=(
+                                    sparse_maps_b.descriptor_uncertainty if sparse_maps_b is not None else None
+                                ),
+                                no_match_prior_a=sparse_maps_a.no_match_prior if sparse_maps_a is not None else None,
+                                no_match_prior_b=sparse_maps_b.no_match_prior if sparse_maps_b is not None else None,
+                                generator=generator,
+                                return_components=True,
+                            )
                         graph_metric_rows.append(
                             {
                                 key: float(value.detach().cpu())
@@ -2507,6 +3021,114 @@ def train_step(
                             | {"points": float(points_a.size(0))}
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
+                    if rotation_loss_enabled and sparse_maps_a is not None and sparse_maps_b is not None:
+                        degree_index = int(
+                            torch.randint(
+                                0,
+                                len(rotation_consistency_degrees),
+                                (1,),
+                                device=points_a.device,
+                                generator=generator,
+                            ).item()
+                        )
+                        rotation_degrees = int(rotation_consistency_degrees[degree_index])
+                        k = _rotation_k(rotation_degrees)
+                        with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                            rotated_sparse_a = learned_training_sparse_maps_single(
+                                model,
+                                torch.rot90(pair.view_a.unsqueeze(0), k=k, dims=(-2, -1)),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                activation_checkpointing=use_activation_checkpointing,
+                            )
+                            rotated_sparse_b = learned_training_sparse_maps_single(
+                                model,
+                                torch.rot90(pair.view_b.unsqueeze(0), k=k, dims=(-2, -1)),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                activation_checkpointing=use_activation_checkpointing,
+                            )
+                        if rotation_descriptor_consistency_weight > 0.0:
+                            descriptor_rotation_loss = 0.5 * (
+                                rotation_descriptor_consistency_loss(
+                                    sparse_maps_a.descriptors,
+                                    rotated_sparse_a.descriptors,
+                                    points_a,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                                + rotation_descriptor_consistency_loss(
+                                    sparse_maps_b.descriptors,
+                                    rotated_sparse_b.descriptors,
+                                    points_b,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                            )
+                            pair_losses.append(
+                                float(rotation_descriptor_consistency_weight) * descriptor_rotation_loss
+                            )
+                            rotation_descriptor_loss_sum += float(descriptor_rotation_loss.detach().cpu())
+                        if orientation_consistency_weight > 0.0:
+                            orientation_loss = 0.5 * (
+                                orientation_consistency_loss(
+                                    sparse_maps_a.orientation,
+                                    rotated_sparse_a.orientation,
+                                    points_a,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                                + orientation_consistency_loss(
+                                    sparse_maps_b.orientation,
+                                    rotated_sparse_b.orientation,
+                                    points_b,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                            )
+                            pair_losses.append(float(orientation_consistency_weight) * orientation_loss)
+                            orientation_loss_sum += float(orientation_loss.detach().cpu())
+                        if scale_consistency_weight > 0.0:
+                            scale_loss = 0.5 * (
+                                scale_consistency_loss(
+                                    sparse_maps_a.scale,
+                                    rotated_sparse_a.scale,
+                                    points_a,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                                + scale_consistency_loss(
+                                    sparse_maps_b.scale,
+                                    rotated_sparse_b.scale,
+                                    points_b,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                            )
+                            pair_losses.append(float(scale_consistency_weight) * scale_loss)
+                            scale_loss_sum += float(scale_loss.detach().cpu())
+                        if affine_consistency_weight > 0.0:
+                            affine_loss = 0.5 * (
+                                affine_consistency_loss(
+                                    sparse_maps_a.affine,
+                                    rotated_sparse_a.affine,
+                                    points_a,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                                + affine_consistency_loss(
+                                    sparse_maps_b.affine,
+                                    rotated_sparse_b.affine,
+                                    points_b,
+                                    rotation_degrees,
+                                    generator=generator,
+                                )
+                            )
+                            pair_losses.append(float(affine_consistency_weight) * affine_loss)
+                            affine_loss_sum += float(affine_loss.detach().cpu())
+                        rotation_loss_count += 1
+                        rotation_consistency_points += int(points_a.size(0) + points_b.size(0))
+                        rotation_consistency_pairs_used += 1
                     record_pose_training_metrics(
                         pose_metadata,
                         pair_path,
@@ -2603,18 +3225,21 @@ def train_step(
                     changed_pair = illumination_consistency_pairs.get(pair_key)
                     if changed_pair is not None:
                         changed_pair = move_pair_to_device(changed_pair, device=device)
-                        changed_descriptors_a = compute_training_descriptor_map(
-                            model,
-                            changed_pair.view_a.unsqueeze(0),
-                            train_blended_descriptors=train_blended_descriptors,
-                            texture_blend_weight=texture_blend_weight,
-                        )
-                        changed_descriptors_b = compute_training_descriptor_map(
-                            model,
-                            changed_pair.view_b.unsqueeze(0),
-                            train_blended_descriptors=train_blended_descriptors,
-                            texture_blend_weight=texture_blend_weight,
-                        )
+                        with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                            changed_descriptors_a = compute_training_descriptor_map(
+                                model,
+                                changed_pair.view_a.unsqueeze(0),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                activation_checkpointing=use_activation_checkpointing,
+                            )
+                            changed_descriptors_b = compute_training_descriptor_map(
+                                model,
+                                changed_pair.view_b.unsqueeze(0),
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                activation_checkpointing=use_activation_checkpointing,
+                            )
                         consistency_loss_a = descriptor_consistency_loss(
                             descriptors_a,
                             changed_descriptors_a,
@@ -2661,28 +3286,34 @@ def train_step(
                             changed_teacher_a, changed_teacher_b = teacher_a, teacher_b
                         elif view_a_unchanged:
                             changed_descriptors_a, changed_teacher_a = descriptors_a, teacher_a
-                            changed_descriptors_b, changed_teacher_b = compute_student_teacher_descriptor_map_single(
-                                model,
-                                changed_match_pair.view_b.unsqueeze(0),
-                                train_blended_descriptors=train_blended_descriptors,
-                                texture_blend_weight=texture_blend_weight,
-                            )
+                            with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                                changed_descriptors_b, changed_teacher_b = compute_student_teacher_descriptor_map_single(
+                                    model,
+                                    changed_match_pair.view_b.unsqueeze(0),
+                                    train_blended_descriptors=train_blended_descriptors,
+                                    texture_blend_weight=texture_blend_weight,
+                                    activation_checkpointing=use_activation_checkpointing,
+                                )
                         elif view_b_unchanged:
                             changed_descriptors_b, changed_teacher_b = descriptors_b, teacher_b
-                            changed_descriptors_a, changed_teacher_a = compute_student_teacher_descriptor_map_single(
-                                model,
-                                changed_match_pair.view_a.unsqueeze(0),
-                                train_blended_descriptors=train_blended_descriptors,
-                                texture_blend_weight=texture_blend_weight,
-                            )
+                            with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                                changed_descriptors_a, changed_teacher_a = compute_student_teacher_descriptor_map_single(
+                                    model,
+                                    changed_match_pair.view_a.unsqueeze(0),
+                                    train_blended_descriptors=train_blended_descriptors,
+                                    texture_blend_weight=texture_blend_weight,
+                                    activation_checkpointing=use_activation_checkpointing,
+                                )
                         else:
-                            changed_maps = compute_student_teacher_descriptor_maps(
-                                model,
-                                changed_match_pair,
-                                train_blended_descriptors=train_blended_descriptors,
-                                texture_blend_weight=texture_blend_weight,
-                                include_heatmaps=False,
-                            )
+                            with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                                changed_maps = compute_student_teacher_descriptor_maps(
+                                    model,
+                                    changed_match_pair,
+                                    train_blended_descriptors=train_blended_descriptors,
+                                    texture_blend_weight=texture_blend_weight,
+                                    include_heatmaps=False,
+                                    activation_checkpointing=use_activation_checkpointing,
+                                )
                             changed_descriptors_a, changed_descriptors_b, changed_teacher_a, changed_teacher_b = (
                                 changed_maps[:4]
                             )
@@ -2719,13 +3350,22 @@ def train_step(
             micro_loss = torch.stack(losses).mean()
             loss_values.append(float(micro_loss.detach().cpu()) if bool(torch.isfinite(micro_loss.detach()).all()) else float("nan"))
             require_finite_scalar(micro_loss, name="training loss")
-            (micro_loss / float(gradient_accumulation_steps)).backward()
+            scaled_micro_loss = micro_loss / float(gradient_accumulation_steps)
+            if use_grad_scaler:
+                grad_scaler.scale(scaled_micro_loss).backward()
+            else:
+                scaled_micro_loss.backward()
             valid_micro_batches += 1
         if valid_micro_batches == 0:
             raise RuntimeError("no valid correspondences sampled")
+        if use_grad_scaler:
+            grad_scaler.unscale_(optimizer)
+            grad_scaler_unscaled = True
         grad_norm = clip_and_measure_gradients(parameters, max_grad_norm=max_grad_norm)
     except FloatingPointError:
         optimizer.zero_grad(set_to_none=True)
+        if use_grad_scaler and grad_scaler_unscaled:
+            grad_scaler.update()
         if not skip_nonfinite_steps:
             raise
         if not metric_rows:
@@ -2737,6 +3377,7 @@ def train_step(
             sampled_count=sampled_count,
         )
         metrics.update(aggregate_graph_matcher_loss_metrics(graph_metric_rows))
+        metrics.update(auxiliary_loss_metrics())
         metrics["pseudo_label_points"] = float(pseudo_label_points)
         metrics["pseudo_keypoint_points"] = float(pseudo_keypoint_points)
         metrics["pseudo_label_pairs"] = float(pseudo_label_pairs)
@@ -2758,13 +3399,18 @@ def train_step(
             else 1.0
         )
         return metrics
-    optimizer.step()
+    if use_grad_scaler:
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
+    else:
+        optimizer.step()
     return {
         "loss": sum(loss_values) / float(len(loss_values)),
         "grad_l2": grad_norm,
         "skipped": 0.0,
         **averaged_step_metrics(metric_rows, sampled_count),
         **aggregate_graph_matcher_loss_metrics(graph_metric_rows),
+        **auxiliary_loss_metrics(),
         "pseudo_label_points": float(pseudo_label_points),
         "pseudo_keypoint_points": float(pseudo_keypoint_points),
         "pseudo_label_pairs": float(pseudo_label_pairs),
@@ -3324,6 +3970,20 @@ def evaluate_descriptor_retrieval(
     return aggregate_descriptor_metrics(rows)
 
 
+def parse_rotation_consistency_degrees(value: str) -> list[int]:
+    degrees: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        degree = int(item)
+        _rotation_k(degree)
+        degrees.append(degree)
+    if not degrees:
+        raise argparse.ArgumentTypeError("rotation consistency degrees must not be empty")
+    return degrees
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune the current PFM model in PyTorch from warp correspondences")
     parser.add_argument("--checkpoint", type=Path, default=None)
@@ -3333,6 +3993,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-cache-dir", action="append", type=Path, default=[])
     parser.add_argument("--output-dir", type=Path, default=Path("runs/pytorch_pfm_finetune"))
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--amp-dtype", choices=AMP_DTYPE_CHOICES, default="float16")
+    parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=0)
     parser.add_argument("--save-every-epoch", action="store_true")
@@ -3412,6 +4075,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-texture-adapter", action="store_true")
     parser.add_argument("--train-descriptor-fusion", action="store_true")
     parser.add_argument("--train-quality-head", action="store_true")
+    parser.add_argument("--train-reliability-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
     parser.add_argument("--graph-matcher-loss-weight", type=float, default=1.0)
     parser.add_argument(
@@ -3449,6 +4113,16 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Enable a safe no-match/dustbin training preset for descriptor false matches and GraphMatcher rejection.",
     )
+    parser.add_argument("--matchability-weight", type=float, default=0.0)
+    parser.add_argument("--descriptor-uncertainty-weight", type=float, default=0.0)
+    parser.add_argument("--no-match-prior-weight", type=float, default=0.0)
+    parser.add_argument("--reliability-negative-points", type=int, default=0)
+    parser.add_argument("--reliability-negative-min-distance", type=float, default=4.0)
+    parser.add_argument("--rotation-descriptor-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--orientation-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--scale-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--affine-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--rotation-consistency-degrees", type=parse_rotation_consistency_degrees, default=[90, 180, 270])
     parser.add_argument("--freeze-descriptor-head", action="store_true")
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
@@ -3582,6 +4256,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-semi-dense-no-match-points must be nonnegative")
     if args.graph_matcher_semi_dense_min_score < 0.0:
         parser.error("--graph-matcher-semi-dense-min-score must be nonnegative")
+    if args.matchability_weight < 0.0:
+        parser.error("--matchability-weight must be nonnegative")
+    if args.descriptor_uncertainty_weight < 0.0:
+        parser.error("--descriptor-uncertainty-weight must be nonnegative")
+    if args.no_match_prior_weight < 0.0:
+        parser.error("--no-match-prior-weight must be nonnegative")
+    if args.reliability_negative_points < 0:
+        parser.error("--reliability-negative-points must be nonnegative")
+    if args.reliability_negative_min_distance < 0.0:
+        parser.error("--reliability-negative-min-distance must be nonnegative")
+    if args.rotation_descriptor_consistency_weight < 0.0:
+        parser.error("--rotation-descriptor-consistency-weight must be nonnegative")
+    if args.orientation_consistency_weight < 0.0:
+        parser.error("--orientation-consistency-weight must be nonnegative")
+    if args.scale_consistency_weight < 0.0:
+        parser.error("--scale-consistency-weight must be nonnegative")
+    if args.affine_consistency_weight < 0.0:
+        parser.error("--affine-consistency-weight must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -3735,6 +4427,9 @@ def save_pytorch_training_state(
             "source_pytorch_state": str(args.init_pytorch_state) if args.init_pytorch_state is not None else None,
             "training_step": int(step),
             "epoch_progress": float(epoch_progress),
+            "amp": bool(args.amp),
+            "amp_dtype": str(args.amp_dtype),
+            "activation_checkpointing": bool(args.activation_checkpointing),
         },
         path,
     )
@@ -3747,6 +4442,8 @@ def main() -> int:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
+    amp_dtype = amp_dtype_from_name(args.amp_dtype)
+    grad_scaler = make_grad_scaler(device, enabled=args.amp, dtype=amp_dtype)
     model, config = load_training_model(args)
     trainable = descriptor_parameters(
         model,
@@ -3755,10 +4452,21 @@ def main() -> int:
         train_descriptor_head=not args.freeze_descriptor_head,
         train_sparse_context=args.train_sparse_context,
         train_keypoint_head=args.pseudo_keypoint_weight > 0.0,
-        train_geometry_head=args.train_geometry_head,
+        train_geometry_head=(
+            args.train_geometry_head
+            or args.orientation_consistency_weight > 0.0
+            or args.scale_consistency_weight > 0.0
+            or args.affine_consistency_weight > 0.0
+        ),
         train_texture_adapter=args.train_texture_adapter,
         train_descriptor_fusion=args.train_descriptor_fusion,
         train_quality_head=args.train_quality_head,
+        train_reliability_head=(
+            args.train_reliability_head
+            or args.matchability_weight > 0.0
+            or args.descriptor_uncertainty_weight > 0.0
+            or args.no_match_prior_weight > 0.0
+        ),
         train_graph_matcher=args.train_graph_matcher,
     )
     if not trainable:
@@ -3921,6 +4629,9 @@ def main() -> int:
                 "loss",
                 "grad_l2",
                 "skipped",
+                "amp_enabled",
+                "amp_scale",
+                "activation_checkpointing",
                 "teacher_weight",
                 "synthetic_loss_weight",
                 "hard_negative_weight",
@@ -3936,6 +4647,13 @@ def main() -> int:
                 "graph_matcher_train_max_attention_work_fraction",
                 "graph_matcher_train_width_keep_ratio",
                 "graph_matcher_online_false_no_match",
+                "matchability_weight",
+                "descriptor_uncertainty_weight",
+                "no_match_prior_weight",
+                "rotation_descriptor_consistency_weight",
+                "orientation_consistency_weight",
+                "scale_consistency_weight",
+                "affine_consistency_weight",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -3955,6 +4673,7 @@ def main() -> int:
                 "graph_matcher_attention_work_fraction",
                 "graph_matcher_positive_pairs",
                 "graph_matcher_extra_no_match_points",
+                *RELIABILITY_LOSS_METRIC_KEYS,
                 "points",
                 "pseudo_label_points",
                 "pseudo_keypoint_points",
@@ -4098,12 +4817,26 @@ def main() -> int:
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
                 graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
                 graph_matcher_train_width_keep_ratio=args.graph_matcher_train_width_keep_ratio,
+                matchability_weight=args.matchability_weight,
+                descriptor_uncertainty_weight=args.descriptor_uncertainty_weight,
+                no_match_prior_weight=args.no_match_prior_weight,
+                reliability_negative_points=args.reliability_negative_points,
+                reliability_negative_min_distance=args.reliability_negative_min_distance,
+                rotation_descriptor_consistency_weight=args.rotation_descriptor_consistency_weight,
+                orientation_consistency_weight=args.orientation_consistency_weight,
+                scale_consistency_weight=args.scale_consistency_weight,
+                affine_consistency_weight=args.affine_consistency_weight,
+                rotation_consistency_degrees=args.rotation_consistency_degrees,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=forced_pair_paths,
                 prefetched_pairs=prefetched_pairs,
                 pair_cache=pair_cache,
+                amp_enabled=args.amp,
+                amp_dtype=amp_dtype,
+                grad_scaler=grad_scaler,
+                activation_checkpointing=args.activation_checkpointing,
             )
             writer.writerow(
                 {
@@ -4145,6 +4878,13 @@ def main() -> int:
                     "graph_matcher_online_false_no_match": int(
                         bool(args.graph_matcher_online_false_no_match and args.train_graph_matcher)
                     ),
+                    "matchability_weight": args.matchability_weight,
+                    "descriptor_uncertainty_weight": args.descriptor_uncertainty_weight,
+                    "no_match_prior_weight": args.no_match_prior_weight,
+                    "rotation_descriptor_consistency_weight": args.rotation_descriptor_consistency_weight,
+                    "orientation_consistency_weight": args.orientation_consistency_weight,
+                    "scale_consistency_weight": args.scale_consistency_weight,
+                    "affine_consistency_weight": args.affine_consistency_weight,
                     **metrics,
                 }
             )
@@ -4168,6 +4908,9 @@ def main() -> int:
                     f"gacc={metrics.get('graph_matcher_accept_loss', 0.0):.6f} "
                     f"gprune={metrics.get('graph_matcher_prune_ranking_loss', 0.0):.6f} "
                     f"gstop={metrics.get('graph_matcher_stop_confidence_loss', 0.0):.6f} "
+                    f"matchab={metrics.get('matchability_loss', 0.0):.6f} "
+                    f"nomprior={metrics.get('no_match_prior_loss', 0.0):.6f} "
+                    f"rotdesc={metrics.get('rotation_descriptor_consistency_loss', 0.0):.6f} "
                     f"skip={int(metrics['skipped'])} "
                     f"top1={metrics['top1_accuracy']:.4f} top5={metrics['top5_accuracy']:.4f} "
                     f"rank={metrics['mean_positive_rank']:.2f} "

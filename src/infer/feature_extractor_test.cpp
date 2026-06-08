@@ -335,7 +335,7 @@ static void decode_feature_maps_pools_descriptors_along_predicted_orientation()
     PFM_REQUIRE_CLOSE(features.descriptors.index({0, 1}).item<float>(), 0.124035F, 1.0e-5F);
 }
 
-static void decode_feature_maps_canonicalizes_four_way_descriptor_orientation()
+static void decode_feature_maps_does_not_canonicalize_descriptor_channels()
 {
     auto heatmap = torch::zeros({1, 1, 1, 1}, torch::kFloat32);
     heatmap.index_put_({0, 0, 0, 0}, 10.0F);
@@ -354,8 +354,8 @@ static void decode_feature_maps_canonicalizes_four_way_descriptor_orientation()
     const auto features = pfm::decode_feature_maps(maps, config, torch::Tensor());
 
     PFM_REQUIRE(features.descriptors.sizes() == torch::IntArrayRef({1, 4}));
-    PFM_REQUIRE_CLOSE(features.descriptors.index({0, 0}).item<float>(), 1.0F, 1.0e-6F);
-    PFM_REQUIRE_CLOSE(features.descriptors.index({0, 1}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.descriptors.index({0, 0}).item<float>(), 0.0F, 1.0e-6F);
+    PFM_REQUIRE_CLOSE(features.descriptors.index({0, 1}).item<float>(), 1.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.descriptors.index({0, 2}).item<float>(), 0.0F, 1.0e-6F);
     PFM_REQUIRE_CLOSE(features.descriptors.index({0, 3}).item<float>(), 0.0F, 1.0e-6F);
 }
@@ -496,8 +496,8 @@ void register_feature_extractor_tests()
                   decode_feature_maps_keeps_zero_score_grid_cells_when_positive_scores_exist);
     register_test("decode_feature_maps_pools_descriptors_along_predicted_orientation",
                   decode_feature_maps_pools_descriptors_along_predicted_orientation);
-    register_test("decode_feature_maps_canonicalizes_four_way_descriptor_orientation",
-                  decode_feature_maps_canonicalizes_four_way_descriptor_orientation);
+    register_test("decode_feature_maps_does_not_canonicalize_descriptor_channels",
+                  decode_feature_maps_does_not_canonicalize_descriptor_channels);
     register_test("decode_feature_maps_filters_dense_points_with_mask",
                   decode_feature_maps_filters_dense_points_with_mask);
     register_test("decode_dense_features_returns_exact_points_and_confidence",

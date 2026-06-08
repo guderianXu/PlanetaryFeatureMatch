@@ -473,47 +473,6 @@ void appendOrientationPooledDescriptor(std::vector<float>& output, const float* 
     }
 }
 
-int64_t predictedOrientationQuarterTurn(const float* orientation_data, int64_t height, int64_t width, int64_t y,
-                                        int64_t x)
-{
-    const auto spatial_offset = y * width + x;
-    const auto axis_x = orientation_data[spatial_offset];
-    const auto axis_y = orientation_data[height * width + spatial_offset];
-    const auto axis_norm = std::sqrt(axis_x * axis_x + axis_y * axis_y);
-    if (!std::isfinite(axis_norm) || axis_norm <= 1.0e-6F)
-    {
-        return 0;
-    }
-    const auto angle = std::atan2(static_cast<double>(axis_y), static_cast<double>(axis_x));
-    auto turns = static_cast<int64_t>(std::llround(angle / (PI * 0.5)));
-    turns %= 4;
-    if (turns < 0)
-    {
-        turns += 4;
-    }
-    return turns;
-}
-
-void canonicalizeLastDescriptorOrientation(std::vector<float>& descriptors, int64_t descriptor_channels,
-                                           int64_t quarter_turns)
-{
-    // 描述子通道按 0/90/180/270 度分组时，将最后一行滚动到局部方向坐标系。
-    if (quarter_turns == 0 || descriptor_channels < 4 || descriptor_channels % 4 != 0 ||
-        static_cast<int64_t>(descriptors.size()) < descriptor_channels)
-    {
-        return;
-    }
-    const auto group_channels = descriptor_channels / 4;
-    const auto left_shift = (quarter_turns * group_channels) % descriptor_channels;
-    const auto begin = descriptors.size() - static_cast<std::size_t>(descriptor_channels);
-    std::vector<float> original(descriptors.begin() + static_cast<std::ptrdiff_t>(begin), descriptors.end());
-    for (int64_t channel = 0; channel < descriptor_channels; ++channel)
-    {
-        descriptors[begin + static_cast<std::size_t>(channel)] =
-            original[static_cast<std::size_t>((channel + left_shift) % descriptor_channels)];
-    }
-}
-
 torch::Tensor prepare_decode_mask(const torch::Tensor& mask, int64_t height, int64_t width)
 {
     // mask 使用原图或特征图坐标均可，统一最近邻缩放到当前解码分辨率。
@@ -618,12 +577,6 @@ FeatureSet decode_feature_maps(const RawFeatureMaps& maps, const FeatureDecodeCo
         const auto spatial_offset = y * width + x;
         appendOrientationPooledDescriptor(sparse_descriptors, descriptor_data, orientation_data, valid_mask_data,
                                           descriptor_channels, height, width, y, x, config.descriptor_pool_radius);
-        if (config.descriptor_orientation_canonicalization)
-        {
-            canonicalizeLastDescriptorOrientation(
-                sparse_descriptors, descriptor_channels,
-                predictedOrientationQuarterTurn(orientation_data, height, width, y, x));
-        }
         sparse_scale.push_back(scale_data[spatial_offset]);
         for (int64_t channel = 0; channel < orientation.size(1); ++channel)
         {

@@ -42,7 +42,7 @@ static void cache_match_eval_descriptor_grid_uses_row_major_python_keypoints()
     PFM_REQUIRE(features.feature_map_height == 3);
 }
 
-static void cache_match_eval_raw_mutual_counts_cyclic_shifted_identity_warp_match()
+static void cache_match_eval_raw_mutual_rejects_channel_shifted_identity_warp_match()
 {
     pfm::PairArchiveSample pair;
     pair.path = "memory_pair.pt";
@@ -56,18 +56,19 @@ static void cache_match_eval_raw_mutual_counts_cyclic_shifted_identity_warp_matc
     config.max_keypoints = 1;
     config.min_intensity = 0.0;
 
-    const auto result = pfm::evaluatePythonRawMutualDescriptorMaps(pair, descriptors_a, descriptors_b, config, 1, 0.1);
+    const auto result = pfm::evaluatePythonRawMutualDescriptorMaps(pair, descriptors_a, descriptors_b, config, 1, 0.1,
+                                                                   0.1);
 
-    PFM_REQUIRE(result.matches == 1);
-    PFM_REQUIRE(result.correct == 1);
+    PFM_REQUIRE(result.matches == 0);
+    PFM_REQUIRE(result.correct == 0);
     PFM_REQUIRE(result.wrong == 0);
-    PFM_REQUIRE_CLOSE(result.precision, 1.0, 1.0e-6);
+    PFM_REQUIRE_CLOSE(result.precision, 0.0, 1.0e-6);
 }
 
 void register_cache_match_eval_tests()
 {
     register_test("cache_match_eval_descriptor_grid_uses_row_major_python_keypoints",
                   cache_match_eval_descriptor_grid_uses_row_major_python_keypoints);
-    register_test("cache_match_eval_raw_mutual_counts_cyclic_shifted_identity_warp_match",
-                  cache_match_eval_raw_mutual_counts_cyclic_shifted_identity_warp_match);
+    register_test("cache_match_eval_raw_mutual_rejects_channel_shifted_identity_warp_match",
+                  cache_match_eval_raw_mutual_rejects_channel_shifted_identity_warp_match);
 }

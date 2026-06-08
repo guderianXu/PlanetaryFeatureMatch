@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from pfm_model_descriptors import geometry_aware_descriptor_pool, make_xy_grid, normalize_channels_stable
 
@@ -39,6 +40,9 @@ class SparseHeadOutput:
     orientation: torch.Tensor
     affine: torch.Tensor
     keypoint_offsets: torch.Tensor
+    matchability: torch.Tensor
+    descriptor_uncertainty: torch.Tensor
+    no_match_prior: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,9 @@ class RawFeatureMaps:
     keypoint_offsets: torch.Tensor
     quality: torch.Tensor
     local_contrast: torch.Tensor
+    matchability: torch.Tensor | None = None
+    descriptor_uncertainty: torch.Tensor | None = None
+    no_match_prior: torch.Tensor | None = None
 
 
 def _group_count(channels: int) -> int:
@@ -105,6 +112,16 @@ def _make_stage(input_channels: int, output_channels: int) -> nn.Sequential:
         nn.BatchNorm2d(output_channels),
         nn.ReLU(inplace=True),
     )
+
+
+def _checkpoint_tensor_call(enabled: bool, function, *inputs: torch.Tensor):
+    if not enabled or not torch.is_grad_enabled():
+        return function(*inputs)
+    return activation_checkpoint(function, *inputs, use_reentrant=False)
+
+
+def _checkpoint_module(enabled: bool, module: nn.Module, *inputs: torch.Tensor):
+    return _checkpoint_tensor_call(enabled, lambda *args: module(*args), *inputs)
 
 
 class ZeroResidualContextBlock(nn.Module):
@@ -151,14 +168,14 @@ class Backbone(nn.Module):
         self.stage3_refine = _make_stage_refinement(base_channels * 4)
         self.stage4_refine = _make_stage_refinement(base_channels * 8)
 
-    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, x: torch.Tensor, *, activation_checkpointing: bool = False) -> list[torch.Tensor]:
         if x.dim() != 4 or x.size(1) != self.input_channels:
             raise ValueError("input tensor must have shape BxCxHxW with the configured channel count")
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        y1 = self.stage1_refine(self.stage1(x))
-        y2 = self.stage2_refine(self.stage2(y1))
-        y3 = self.stage3_refine(self.stage3(y2))
-        y4 = self.stage4_refine(self.stage4(y3))
+        y1 = _checkpoint_module(activation_checkpointing, self.stage1_refine, self.stage1(x))
+        y2 = _checkpoint_module(activation_checkpointing, self.stage2_refine, self.stage2(y1))
+        y3 = _checkpoint_module(activation_checkpointing, self.stage3_refine, self.stage3(y2))
+        y4 = _checkpoint_module(activation_checkpointing, self.stage4_refine, self.stage4(y3))
         return [y1, y2, y3, y4]
 
     def sanitize_nonfinite_state(self) -> None:
@@ -193,31 +210,52 @@ class DualFPNLite(nn.Module):
         _zero_module(self.descriptor_from_stage3)
         _zero_module(self.descriptor_from_stage4)
 
-    def forward(self, features: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        if len(features) < 4:
-            raise ValueError("DualFPNLite requires backbone stages 1..4")
-        stage2 = features[1]
-        stage3 = F.interpolate(
-            self.keypoint_from_stage3(features[2]),
+    def _forward_tensors(
+        self,
+        stage1: torch.Tensor,
+        stage2: torch.Tensor,
+        stage3: torch.Tensor,
+        stage4: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del stage1
+        stage3_keypoint = F.interpolate(
+            self.keypoint_from_stage3(stage3),
             size=stage2.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
-        p2_keypoint = self.keypoint_refine(stage2 + stage3)
+        p2_keypoint = self.keypoint_refine(stage2 + stage3_keypoint)
         desc_stage3 = F.interpolate(
-            self.descriptor_from_stage3(features[2]),
+            self.descriptor_from_stage3(stage3),
             size=stage2.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
         desc_stage4 = F.interpolate(
-            self.descriptor_from_stage4(features[3]),
+            self.descriptor_from_stage4(stage4),
             size=stage2.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
         p2_descriptor = self.descriptor_refine(stage2 + desc_stage3 + desc_stage4)
         return p2_keypoint, p2_descriptor
+
+    def forward(
+        self,
+        features: list[torch.Tensor],
+        *,
+        activation_checkpointing: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if len(features) < 4:
+            raise ValueError("DualFPNLite requires backbone stages 1..4")
+        return _checkpoint_tensor_call(
+            activation_checkpointing,
+            self._forward_tensors,
+            features[0],
+            features[1],
+            features[2],
+            features[3],
+        )
 
 
 def _normalize_channels(tensor: torch.Tensor) -> torch.Tensor:
@@ -325,6 +363,12 @@ class SparseHead(nn.Module):
         self.scale = nn.Conv2d(input_channels, 1, 1)
         self.orientation = nn.Conv2d(input_channels, 2, 1)
         self.affine = nn.Conv2d(input_channels, 4, 1)
+        self.matchability = nn.Conv2d(input_channels, 1, 1)
+        self.descriptor_uncertainty = nn.Conv2d(input_channels, 1, 1)
+        self.no_match_prior = nn.Conv2d(input_channels, 1, 1)
+        _zero_module(self.matchability)
+        _zero_module(self.descriptor_uncertainty)
+        _zero_module(self.no_match_prior)
 
     def _descriptor_branch(
         self,
@@ -357,7 +401,13 @@ class SparseHead(nn.Module):
         geometry_context = self.geometry_context(descriptor_shared_context)
         return geometry_context, heatmap, descriptor_gated, keypoint_offsets
 
-    def forward(self, feature: torch.Tensor, descriptor_feature: torch.Tensor | None = None) -> SparseHeadOutput:
+    def forward(
+        self,
+        feature: torch.Tensor,
+        descriptor_feature: torch.Tensor | None = None,
+        *,
+        activation_checkpointing: bool = False,
+    ) -> SparseHeadOutput:
         if feature.dim() != 4 or feature.size(1) != self.input_channels:
             raise ValueError("feature tensor must have shape BxCxHxW with the configured channel count")
         if descriptor_feature is not None and (
@@ -366,11 +416,18 @@ class SparseHead(nn.Module):
             or descriptor_feature.shape[-2:] != feature.shape[-2:]
         ):
             raise ValueError("descriptor_feature must have shape BxCxHxW matching the keypoint feature grid")
-        geometry_context, heatmap_sum, descriptor_gated, keypoint_offsets = self._descriptor_branch(
+        descriptor_input = feature if descriptor_feature is None else descriptor_feature
+        geometry_context, heatmap_sum, descriptor_gated, keypoint_offsets = _checkpoint_tensor_call(
+            activation_checkpointing,
+            self._descriptor_branch,
             feature,
-            descriptor_feature,
+            descriptor_input,
         )
-        descriptor_sum = descriptor_gated + self.descriptor_dilated_context(descriptor_gated)
+        descriptor_sum = descriptor_gated + _checkpoint_module(
+            activation_checkpointing,
+            self.descriptor_dilated_context,
+            descriptor_gated,
+        )
         heatmap = torch.sigmoid(heatmap_sum)
         descriptors = _normalize_channels(descriptor_sum)
 
@@ -383,8 +440,28 @@ class SparseHead(nn.Module):
         affine = identity + affine_delta
 
         # 用连续几何做 canonical pooling，替代旧 C4 分支，输出仍保持 dense descriptor map。
-        descriptors = geometry_aware_descriptor_pool(descriptors, orientation, scale, affine)
-        return SparseHeadOutput(heatmap, descriptors, scale, orientation, affine, keypoint_offsets)
+        matchability = torch.sigmoid(self.matchability(geometry_context))
+        descriptor_uncertainty = torch.sigmoid(self.descriptor_uncertainty(geometry_context))
+        no_match_prior = torch.sigmoid(self.no_match_prior(geometry_context))
+        descriptors = _checkpoint_tensor_call(
+            activation_checkpointing,
+            geometry_aware_descriptor_pool,
+            descriptors,
+            orientation,
+            scale,
+            affine,
+        )
+        return SparseHeadOutput(
+            heatmap,
+            descriptors,
+            scale,
+            orientation,
+            affine,
+            keypoint_offsets,
+            matchability,
+            descriptor_uncertainty,
+            no_match_prior,
+        )
 
 
 def _shifted_feature(feature: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
@@ -500,6 +577,9 @@ def prepare_graph_keypoint_metadata(
     affine: torch.Tensor | None = None,
     quality: torch.Tensor | None = None,
     local_contrast: torch.Tensor | None = None,
+    matchability: torch.Tensor | None = None,
+    descriptor_uncertainty: torch.Tensor | None = None,
+    no_match_prior: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build v2.1 GraphMatcher metadata from selected sparse keypoints."""
 
@@ -533,8 +613,14 @@ def prepare_graph_keypoint_metadata(
         affine_columns[:, 0] = 1.0
         affine_columns[:, 3] = 1.0
     quality_column = vector(quality, 1.0)
+    matchability_column = vector(matchability, 1.0) if matchability is not None else quality_column
     contrast_column = vector(local_contrast, 0.0)
-    uncertainty_column = (1.0 - quality_column).clamp(0.0, 1.0)
+    uncertainty_column = (
+        vector(descriptor_uncertainty, 0.0)
+        if descriptor_uncertainty is not None
+        else (1.0 - quality_column).clamp(0.0, 1.0)
+    )
+    no_match_column = vector(no_match_prior, 0.0)
     metadata = torch.cat(
         [
             base[:, :4],
@@ -542,9 +628,10 @@ def prepare_graph_keypoint_metadata(
             scale_column,
             orientation_columns,
             affine_columns,
-            quality_column,
+            matchability_column,
             contrast_column,
             uncertainty_column,
+            no_match_column,
         ],
         dim=1,
     )
@@ -645,6 +732,25 @@ class PlanetaryGraphMatcher(nn.Module):
             raise ValueError("graph matcher keypoints must contain at least x/y")
         return prepare_keypoints_for_embedding(keypoints_or_meta[:, :2], meta_dim=self.keypoint_meta_dim)
 
+    @staticmethod
+    def _metadata_column(meta: torch.Tensor, index: int, default: float = 0.0) -> torch.Tensor:
+        if meta.size(1) <= index:
+            return meta.new_full((meta.size(0),), default)
+        return meta[:, index]
+
+    @classmethod
+    def _metadata_reliability_score(cls, meta: torch.Tensor) -> torch.Tensor:
+        matchability = cls._metadata_column(meta, 12, 0.5).clamp(0.0, 1.0)
+        uncertainty = cls._metadata_column(meta, 14, 0.5).clamp(0.0, 1.0)
+        no_match_prior = cls._metadata_column(meta, 15, 0.5).clamp(0.0, 1.0)
+        return (matchability - 0.5) - (uncertainty - 0.5) - (no_match_prior - 0.5)
+
+    @classmethod
+    def _pair_reliability_bias(cls, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
+        score_a = cls._metadata_reliability_score(meta_a)
+        score_b = cls._metadata_reliability_score(meta_b)
+        return 0.5 * (score_a[:, None] + score_b[None, :])
+
     def _geometry_compatibility_bias(self, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
         def column(meta: torch.Tensor, index: int, default: float = 0.0) -> torch.Tensor:
             if meta.size(1) <= index:
@@ -734,7 +840,7 @@ class PlanetaryGraphMatcher(nn.Module):
             ],
             dim=-1,
         )
-        return self.accept_head(features).squeeze(-1)
+        return self.accept_head(features).squeeze(-1) + self._pair_reliability_bias(meta_a, meta_b)
 
     def _provisional_pair_logits(
         self,
@@ -980,7 +1086,17 @@ class PlanetaryGraphMatcher(nn.Module):
             dtype=pair_logits.dtype,
             device=pair_logits.device,
         ) + self.dustbin_bias
+        if pair_logits.numel() > 0:
+            pair_logits = pair_logits + self._pair_reliability_bias(kp_a, kp_b)
         logits[: descriptors_a.size(0), : descriptors_b.size(0)] = pair_logits
+        if descriptors_a.size(0) > 0:
+            logits[: descriptors_a.size(0), descriptors_b.size(0)] = (
+                logits[: descriptors_a.size(0), descriptors_b.size(0)] - self._metadata_reliability_score(kp_a)
+            )
+        if descriptors_b.size(0) > 0:
+            logits[descriptors_a.size(0), : descriptors_b.size(0)] = (
+                logits[descriptors_a.size(0), : descriptors_b.size(0)] - self._metadata_reliability_score(kp_b)
+            )
         row_logits = logits[: descriptors_a.size(0), :]
         row_prob = torch.softmax(logits[: descriptors_a.size(0), :], dim=1)[:, : descriptors_b.size(0)]
         col_prob = torch.softmax(logits[:, : descriptors_b.size(0)], dim=0)[: descriptors_a.size(0), :]
@@ -1365,12 +1481,17 @@ class PlanetaryFeatureMatcher(nn.Module):
             graph_keypoint_meta_dim,
         )
 
-    def learned_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
+    def learned_descriptor_map_single(
+        self,
+        image: torch.Tensor,
+        *,
+        activation_checkpointing: bool = False,
+    ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
-        features = self.backbone(image)
-        p2_keypoint, p2_descriptor = self.dual_fpn(features)
-        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
+        features = self.backbone(image, activation_checkpointing=activation_checkpointing)
+        p2_keypoint, p2_descriptor = self.dual_fpn(features, activation_checkpointing=activation_checkpointing)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor, activation_checkpointing=activation_checkpointing)
         return sparse.descriptors
 
     def raw_texture_descriptor_map_single(self, image: torch.Tensor) -> torch.Tensor:
@@ -1410,12 +1531,13 @@ class PlanetaryFeatureMatcher(nn.Module):
         image: torch.Tensor,
         *,
         texture_blend_weight: float = INFERENCE_TEXTURE_BLEND_WEIGHT,
+        activation_checkpointing: bool = False,
     ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
-        features = self.backbone(image)
-        p2_keypoint, p2_descriptor = self.dual_fpn(features)
-        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
+        features = self.backbone(image, activation_checkpointing=activation_checkpointing)
+        p2_keypoint, p2_descriptor = self.dual_fpn(features, activation_checkpointing=activation_checkpointing)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor, activation_checkpointing=activation_checkpointing)
         return self.fuse_descriptor_maps(sparse.descriptors, image, texture_blend_weight=texture_blend_weight)
 
     def forward_single(
@@ -1423,12 +1545,13 @@ class PlanetaryFeatureMatcher(nn.Module):
         image: torch.Tensor,
         *,
         texture_blend_weight: float = INFERENCE_TEXTURE_BLEND_WEIGHT,
+        activation_checkpointing: bool = False,
     ) -> RawFeatureMaps:
         if image.dim() != 4:
             raise ValueError("image must have shape BxCxHxW")
-        features = self.backbone(image)
-        p2_keypoint, p2_descriptor = self.dual_fpn(features)
-        sparse = self.sparse_head(p2_keypoint, p2_descriptor)
+        features = self.backbone(image, activation_checkpointing=activation_checkpointing)
+        p2_keypoint, p2_descriptor = self.dual_fpn(features, activation_checkpointing=activation_checkpointing)
+        sparse = self.sparse_head(p2_keypoint, p2_descriptor, activation_checkpointing=activation_checkpointing)
         descriptors = self.fuse_descriptor_maps(sparse.descriptors, image, texture_blend_weight=texture_blend_weight)
         texture_saliency = make_rotation_invariant_texture_saliency(image, sparse.heatmap.size(2), sparse.heatmap.size(3))
         dense = self.dense_head(features[0], features[0])
@@ -1445,6 +1568,9 @@ class PlanetaryFeatureMatcher(nn.Module):
             sparse.keypoint_offsets,
             quality,
             texture_saliency,
+            sparse.matchability,
+            sparse.descriptor_uncertainty,
+            sparse.no_match_prior,
         )
 
 
@@ -1473,8 +1599,8 @@ def _with_default_compatible_state(
     model: PlanetaryFeatureMatcher,
     state: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    patched = dict(state)
     defaults = model.state_dict()
+    patched = {key: value for key, value in state.items() if key in defaults}
     for key, value in defaults.items():
         if key not in patched:
             patched[key] = value.detach().clone()

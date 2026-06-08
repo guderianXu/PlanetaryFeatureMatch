@@ -78,28 +78,11 @@ torch::Tensor normalizeDescriptors(const torch::Tensor& descriptors)
     return descriptors / norm;
 }
 
-bool supportsCyclicDescriptorShifts(const torch::Tensor& descriptors)
-{
-    return descriptors.size(2) >= 4 && descriptors.size(2) % 4 == 0;
-}
-
 torch::Tensor cyclicDescriptorLogits(const torch::Tensor& descriptors_a, const torch::Tensor& descriptors_b)
 {
-    // 四向通道分组的描述子允许 0/90/180/270 度循环滚动，提升旋转监督的容错性。
     auto normalized_a = normalizeDescriptors(descriptors_a);
     auto normalized_b = normalizeDescriptors(descriptors_b);
-    auto best = torch::bmm(normalized_a, normalized_b.transpose(1, 2));
-    if (!supportsCyclicDescriptorShifts(descriptors_a))
-    {
-        return best;
-    }
-    const auto shift = descriptors_a.size(2) / 4;
-    for (int64_t turn = 1; turn < 4; ++turn)
-    {
-        auto shifted_b = torch::roll(normalized_b, {turn * shift}, {2});
-        best = torch::maximum(best, torch::bmm(normalized_a, shifted_b.transpose(1, 2)));
-    }
-    return best;
+    return torch::bmm(normalized_a, normalized_b.transpose(1, 2));
 }
 
 torch::Tensor strictCandidateDescriptorLogits(const torch::Tensor& descriptors_a,

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Lazy Pose 2048 训练参数说明</title>
+<style>
+body {
+  margin: 24px;
+  font-family: Arial, "Noto Sans CJK SC", sans-serif;
+  line-height: 1.55;
+  background: #f7f8fa;
+  color: #17202a;
+}
+h1, h2, h3 { color: #102033; }
+h1 { margin-bottom: 4px; }
+section {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 4px;
+  font-size: 14px;
+}
+th, td {
+  border-bottom: 1px solid #e4e9ee;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: #edf3f8;
+  color: #16324a;
+}
+code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #eef2f6;
+  font-family: Consolas, Menlo, monospace;
+}
+pre {
+  overflow-x: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: #0f1720;
+  color: #d7e7f4;
+}
+.note { color: #475569; }
+.warn { color: #9a3412; }
+.ok { color: #166534; }
+</style>
+</head>
+<body>
+<h1>Lazy Pose 2048 训练参数说明</h1>
+<p class="note">最后更新：2026-06-08。本文说明 <code>scripts/benchmark_lazy_pose_pairs.py</code> 当前 Python lazy pose 训练入口，尤其是 2048 原图训练、离线 overlap list、跨相机/跨 FOV pair 和拒配训练相关参数。</p>
+
+<section>
+<h2>先看整体流程</h2>
+<p>当前训练拆成两个阶段，目的是避免训练时一边随机找重叠区域一边喂 GPU。</p>
+<table>
+<thead><tr><th>阶段</th><th>模式</th><th>输出/输入</th><th>作用</th></tr></thead>
+<tbody>
+<tr>
+<td>1. 预处理</td>
+<td><code>--mode overlap-list</code></td>
+<td>写出 <code>overlap_pairs.csv</code></td>
+<td>读取 render manifest、TSAI 和 depth，筛出满足重叠阈值的 pair，并把两张图的固定 crop 窗口写入 CSV。</td>
+</tr>
+<tr>
+<td>2. 训练</td>
+<td><code>--mode train</code></td>
+<td>读取 <code>--pair-spec-manifest overlap_pairs.csv</code></td>
+<td>训练时直接复用已验证的固定 crop，不再随机试错，因此 GPU 数据等待显著降低。</td>
+</tr>
+</tbody>
+</table>
+<p>当前 run 的 overlap list 结果：<code>2000</code> 对，其中 <code>same_position_view=1066</code>、<code>cross_camera=245</code>、<code>cross_fov=689</code>，平均有效重叠约 <code>0.6335</code>。</p>
+</section>
+
+<section>
+<h2>当前 run 的核心配置</h2>
+<table>
+<thead><tr><th>项目</th><th>当前值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>输入图像</td><td><code>images_u8/*.tif</code></td><td>使用 <code>--image-source uint8</code>，不是浮点 render 图。</td></tr>
+<tr><td>图像尺寸</td><td><code>2048 x 2048</code></td><td><code>--crop-size 2048</code>，当前图片本身也是 2048，所以等于整张图训练，没有再 resize。</td></tr>
+<tr><td>depth</td><td><code>2048 x 2048 float32</code></td><td>用于几何投影、warp 和 valid mask，不作为模型输入通道。</td></tr>
+<tr><td>AMP</td><td><code>--amp --amp-dtype float16</code></td><td>半精度训练，降低显存并提高速度。</td></tr>
+<tr><td>激活重算</td><td><code>--activation-checkpointing</code></td><td>保存更少中间激活，反向传播时重算，省显存但增加计算时间。</td></tr>
+<tr><td>显存</td><td>约 <code>17.6 GiB</code></td><td>当前全模型 2048 微调在 RTX 4090 上的稳定占用，16G 显卡不能直接照搬。</td></tr>
+<tr><td>GPU 利用率</td><td>训练阶段中位数 <code>100%</code></td><td>使用固定 overlap list 后，最近训练 step 的 <code>data_wait_ms</code> 基本接近 0。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>路径与运行控制</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>常见调整</th></tr></thead>
+<tbody>
+<tr><td><code>--render-manifest</code></td><td>fov090 + fov110 两个 CSV</td><td>训练数据索引，包含 <code>pose_id/base_id/variant/split/lon_deg/lat_deg/tsai_path/image_path/depth_path</code>。</td><td>增加新数据集时追加 manifest 路径。</td></tr>
+<tr><td><code>--output-dir</code></td><td><code>train_output</code> 或 <code>overlap_preprocess</code></td><td>保存指标、报告、checkpoint、GPU 采样。</td><td>每次实验必须换新目录，避免覆盖。</td></tr>
+<tr><td><code>--mode</code></td><td><code>overlap-list</code> / <code>train</code></td><td>决定是生成 overlap CSV，还是开始训练。</td><td>正式训练推荐先跑 <code>overlap-list</code>。</td></tr>
+<tr><td><code>--pair-spec-manifest</code></td><td><code>overlap_pairs.csv</code></td><td>预处理输出、训练输入。里面记录 pair 类型、图像 ID、valid fraction 和固定 crop 窗口。</td><td>已有列表可复用，能保证训练 pair 可重复。</td></tr>
+<tr><td><code>--init-pytorch-state</code></td><td><code>random_pfm_state.pt</code></td><td>初始 PyTorch 权重。当前是从随机初始化开始。</td><td>微调已有模型时换成已有 checkpoint。</td></tr>
+<tr><td><code>--steps</code></td><td><code>20000</code></td><td>训练 step 总数。</td><td>smoke 用几十到几百；正式训练再加大。</td></tr>
+<tr><td><code>--save-every-steps</code></td><td><code>500</code></td><td>每 500 step 保存 latest checkpoint。</td><td>磁盘紧张可调大；长训练不要关。</td></tr>
+<tr><td><code>--seed</code></td><td><code>1234</code></td><td>控制 shuffle、采样和增强随机性。</td><td>对比实验保持一致。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>数据和 pair 采样</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>影响</th></tr></thead>
+<tbody>
+<tr><td><code>--split</code></td><td><code>train</code></td><td>只使用 manifest 中 split 为 train 的记录。</td><td>评估/验证时可换成 val/test。</td></tr>
+<tr><td><code>--image-source</code></td><td><code>uint8</code></td><td>优先读取 uint8 图像路径。</td><td><code>render</code> 可读原 render 图，但 IO/归一化/显存压力可能不同。</td></tr>
+<tr><td><code>--crop-size</code></td><td><code>2048</code></td><td>每个 view 输入模型的 crop 边长。</td><td>显存最敏感参数。1024 会大幅省显存，但不再是 2048 训练。</td></tr>
+<tr><td><code>--limit-pairs</code></td><td><code>0</code> 正式全量</td><td>构建候选 pair 池后最多保留多少个候选；<code>0</code> 表示不截断。</td><td>正式 overlap list 应使用 <code>0</code>。短测可临时设成较小值。</td></tr>
+<tr><td><code>--overlap-scan-all</code></td><td>正式开启</td><td>overlap-list 模式逐一扫完整个候选池，把所有通过重叠阈值的 pair 写入 CSV。</td><td>开启后 <code>--pairs</code> 只保留为兼容参数，不再限制输出数量。</td></tr>
+<tr><td><code>--pairs</code></td><td>抽样预处理才使用</td><td>未开启 <code>--overlap-scan-all</code> 时，要抽到多少个有效 pair。</td><td>2000 只能用于冒烟或 GPU 验证，不适合作为正式训练列表。</td></tr>
+<tr><td><code>--pair-mode</code></td><td><code>spatial-index</code> 正式图生成</td><td>用 TSAI 相机 footprint 建空间索引，候选来自 3D bbox 相交，再交给投影重叠阈值精筛。</td><td>训练消融仍可用 <code>mixed</code>、<code>same-position</code>、<code>cross-camera</code>、<code>cross-fov</code>。</td></tr>
+<tr><td><code>--spatial-index-footprint-samples</code></td><td><code>5</code></td><td>每个相机 footprint 在图像平面每轴采样多少条 ray。</td><td>越大 bbox 越保守但建索引稍慢；后续高度变化可直接通过相机中心和 ray 进入索引。</td></tr>
+<tr><td><code>--spatial-index-margin-m</code></td><td><code>2000</code></td><td>对 footprint 3D bbox 额外外扩多少米，避免球面近似造成漏召回。</td><td>越大候选越多，但不会漏掉边界附近的 overlap。</td></tr>
+<tr><td><code>--spatial-index-height-km</code></td><td><code>100,250</code></td><td>构建空间索引前按 TSAI 路径或记录 ID 中的高度标记过滤。</td><td>当前 overlap graph 只考虑 100km 和 250km；150km、350km 的 TSAI 会被跳过。预处理只纳入运行当时图像、深度和 TSAI 都存在的记录，拷贝中的数据应标记为 partial，最终训练前再重跑全量图。</td></tr>
+<tr><td><code>--pair-type-weights</code></td><td><code>same=0.35,cross_camera=0.40,cross_fov=0.25</code></td><td>构建候选池时不同 pair 类型的抽样权重。</td><td>最终有效列表比例还会受实际重叠率影响。</td></tr>
+<tr><td><code>--cross-camera-offsets</code></td><td><code>1,2,4,8</code></td><td>同 FOV 内跨相机位置，按 base 序列错开多少个位置配对。</td><td>offset 越大，视角/位置变化越难，低重叠概率越高。</td></tr>
+<tr><td><code>--cross-fov-offsets</code></td><td><code>0,1,2</code></td><td>跨 FOV 最近邻空间位置的第几个邻居。</td><td>0 是最近邻；1/2 增加难度和多样性。</td></tr>
+<tr><td><code>--cross-pair-variant</code></td><td><code>nadir,small_01,mid_01,extreme_01</code></td><td>跨相机/跨 FOV 时允许哪些视角 variant 相互配对。</td><td>加更多 extreme 会增加难例，也会增加低重叠失败。</td></tr>
+<tr><td><code>--reference-variant</code></td><td>默认 <code>nadir</code></td><td>same-position pair 的参考视角。</td><td>通常保持 nadir。</td></tr>
+<tr><td><code>--target-variant</code></td><td>默认 small/mid/extreme 全部</td><td>same-position pair 的目标视角列表。</td><td>未显式传入时用脚本默认 9 个目标视角。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>几何重叠筛选</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>调参建议</th></tr></thead>
+<tbody>
+<tr><td><code>--min-valid-fraction</code></td><td><code>0.05</code></td><td>crop 中至少多少比例像素有有效几何对应。</td><td>提高会更干净但更难生成；降低会包含更多弱重叠样本。</td></tr>
+<tr><td><code>--max-attempts</code></td><td><code>8</code></td><td>没有固定 crop 时，每个候选随机试几次 crop。</td><td>overlap-list 预处理有用；训练读固定 crop 后基本只试一次。</td></tr>
+<tr><td><code>--absolute-depth-tolerance-m</code></td><td><code>100.0</code></td><td>投影到目标图后，允许的绝对 depth 误差。</td><td>DEM/render 深度噪声大时可适度放宽。</td></tr>
+<tr><td><code>--relative-depth-tolerance</code></td><td><code>0.005</code></td><td>按深度比例允许误差，和绝对阈值取较大者。</td><td>远距离场景更依赖这个值。</td></tr>
+<tr><td><code>--skip-bad-pairs</code></td><td>开启</td><td>遇到低重叠/读图失败候选时跳过，不中断任务。</td><td>正式预处理建议开启。</td></tr>
+<tr><td><code>--max-bad-pairs</code></td><td><code>50000</code> 预处理阶段</td><td>最多允许跳过多少个坏候选。</td><td>跨 FOV/极端视角多时必须加大。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>DataLoader 和 CPU 预取</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>影响</th></tr></thead>
+<tbody>
+<tr><td><code>--workers</code></td><td>预处理 <code>8</code>，训练 <code>6</code></td><td>并行读取图像、depth、TSAI 并生成 pair 的进程数。</td><td>太低 GPU 等待；太高会增加 CPU/内存/磁盘压力。</td></tr>
+<tr><td><code>--prefetch-batches</code></td><td>预处理 <code>16</code>，训练 <code>12</code></td><td>提前排队多少个 pair 生成任务。</td><td>提高可平滑 GPU 供给，但增加内存和进程占用。</td></tr>
+<tr><td><code>--worker-cache-items</code></td><td><code>32</code></td><td>每个 worker 缓存最近读取的 image/depth/camera。</td><td>提高可减少重复 IO，但会增加 CPU 内存。</td></tr>
+</tbody>
+</table>
+<p>当前固定 overlap list 训练后，最近训练 step 的 <code>data_wait_ms</code> 基本接近 0，说明这一组参数已经足够喂满 4090。</p>
+</section>
+
+<section>
+<h2>显存和吞吐相关</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>显存影响</th></tr></thead>
+<tbody>
+<tr><td><code>--device</code></td><td><code>cuda</code></td><td>使用 CUDA 训练。</td><td>无。</td></tr>
+<tr><td><code>--amp</code></td><td>开启</td><td>启用自动混合精度。</td><td class="ok">显著降显存。</td></tr>
+<tr><td><code>--amp-dtype</code></td><td><code>float16</code></td><td>AMP 使用 FP16。</td><td class="ok">适合 RTX 4090/多数消费卡。</td></tr>
+<tr><td><code>--activation-checkpointing</code></td><td>开启</td><td>反向传播时重算部分激活。</td><td class="ok">显著降显存，代价是训练更慢。</td></tr>
+<tr><td><code>--batch-pairs</code></td><td><code>1</code></td><td>每 step 几个 pair。</td><td>2048 下必须保持 1，调大显存会爆。</td></tr>
+<tr><td><code>--samples-per-pair</code></td><td><code>128</code></td><td>每个 pair 采多少个监督点用于 descriptor/graph/reliability。</td><td>降低到 64 可省 GraphMatcher 和 loss 部分显存。</td></tr>
+<tr><td><code>--max-grad-norm</code></td><td>默认 <code>1.0</code></td><td>梯度裁剪，抑制不稳定 step。</td><td>显存无明显影响。</td></tr>
+<tr><td><code>--skip-nonfinite-steps</code></td><td>开启</td><td>遇到 NaN/Inf loss 时跳过该 step。</td><td>显存无影响，提升长训稳定性。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>训练哪些模型模块</h2>
+<p>这些开关决定哪些参数参与反向传播。参与训练的模块越多，显存和算力压力越大。</p>
+<table>
+<thead><tr><th>参数</th><th>当前状态</th><th>作用</th><th>16G 建议</th></tr></thead>
+<tbody>
+<tr><td><code>--train-backbone</code></td><td>开启</td><td>训练底层多尺度卷积特征。</td><td class="warn">16G 首先关闭。</td></tr>
+<tr><td><code>--train-dual-fpn</code></td><td>开启</td><td>训练 keypoint/descriptor 两路 FPN。</td><td class="warn">16G 建议关闭。</td></tr>
+<tr><td><code>--train-descriptor-head</code></td><td>默认开启</td><td>训练描述子输出头，是匹配核心。</td><td>保留。</td></tr>
+<tr><td><code>--train-sparse-context</code></td><td>开启</td><td>训练 sparse head 中上下文 tower。</td><td>16G 不够时关闭。</td></tr>
+<tr><td><code>--train-keypoint-head</code></td><td>开启</td><td>训练关键点 heatmap 和 offset。</td><td>保留或按需求关闭。</td></tr>
+<tr><td><code>--train-geometry-head</code></td><td>开启</td><td>训练尺度、方向、仿射等几何头。</td><td>保留；若只做 descriptor 可关闭。</td></tr>
+<tr><td><code>--train-texture-adapter</code></td><td>开启</td><td>训练纹理描述子适配模块。</td><td>保留。</td></tr>
+<tr><td><code>--train-descriptor-fusion</code></td><td>开启</td><td>训练 learned descriptor 和 texture descriptor 的融合。</td><td>保留。</td></tr>
+<tr><td><code>--train-quality-head</code></td><td>开启</td><td>训练特征质量相关输出。</td><td>保留。</td></tr>
+<tr><td><code>--train-reliability-head</code></td><td>开启</td><td>训练 matchability、uncertainty、no-match prior。</td><td>保留。</td></tr>
+<tr><td><code>--train-graph-matcher</code></td><td>开启</td><td>训练 GraphMatcher，包括 dustbin/no-match 逻辑。</td><td>保留，但降低 attention work。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>基础 descriptor 和 hard negative loss</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值/默认</th><th>作用</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>--learning-rate</code></td><td>默认 <code>1e-4</code></td><td>AdamW 学习率。</td><td>全模型从头训可先保持；微调可降。</td></tr>
+<tr><td><code>--weight-decay</code></td><td>默认 <code>1e-4</code></td><td>权重衰减。</td><td>正则化参数。</td></tr>
+<tr><td><code>--temperature</code></td><td>默认 <code>0.07</code></td><td>descriptor 对比/分类 softmax 温度。</td><td>越小分布越尖锐。</td></tr>
+<tr><td><code>--teacher-weight</code></td><td>默认 <code>1.0</code></td><td>纹理/teacher 监督权重。</td><td>保持默认即可。</td></tr>
+<tr><td><code>--synthetic-loss-weight</code></td><td>默认 <code>1.0</code></td><td>几何合成 pair 的主监督权重。</td><td>保持默认即可。</td></tr>
+<tr><td><code>--hard-negative-weight</code></td><td>默认 <code>0.5</code></td><td>描述子 hard negative 权重。</td><td>提升区分相似错误点能力。</td></tr>
+<tr><td><code>--diversity-weight</code></td><td>默认 <code>0.10</code></td><td>鼓励采样点/特征不要过度集中。</td><td>过高可能牺牲精度。</td></tr>
+<tr><td><code>--warp-hard-negative-weight</code></td><td><code>0.0</code></td><td>基于 warp 空间的 hard negative loss。</td><td>当前关闭。</td></tr>
+<tr><td><code>--abstention-weight</code></td><td><code>0.0</code></td><td>让模型学会对不可靠匹配 abstain。</td><td>当前主要走 GraphMatcher dustbin/no-match。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>GraphMatcher 和拒配训练</h2>
+<p><code>--enable-rejection-training</code> 是一个总开关。它会自动打开 <code>--train-graph-matcher</code>、在线错配挖掘相关逻辑，并把一组 no-match/dustbin loss 权重从 0 展开为安全默认值。</p>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>显存/速度影响</th></tr></thead>
+<tbody>
+<tr><td><code>--enable-rejection-training</code></td><td>开启</td><td>启用拒配/no-match/dustbin 训练 preset。</td><td>会增加 GraphMatcher 计算。</td></tr>
+<tr><td><code>--graph-matcher-loss-weight</code></td><td>自动默认 <code>0.50</code></td><td>GraphMatcher 总 loss 权重。</td><td>越大越强调 matcher。</td></tr>
+<tr><td><code>--graph-matcher-no-match-points</code></td><td>自动默认 <code>64</code></td><td>额外采样 no-match 点数量。</td><td>越大越耗显存。</td></tr>
+<tr><td><code>--graph-matcher-no-match-weight</code></td><td>自动默认 <code>0.15</code></td><td>no-match/dustbin 监督权重。</td><td>控制拒配能力。</td></tr>
+<tr><td><code>--graph-matcher-assignment-weight</code></td><td>自动默认 <code>0.25</code></td><td>正匹配 assignment 监督权重。</td><td>保留。</td></tr>
+<tr><td><code>--graph-matcher-accept-weight</code></td><td>自动默认 <code>0.10</code></td><td>是否接受匹配的二分类监督。</td><td>保留。</td></tr>
+<tr><td><code>--graph-matcher-prune-ranking-weight</code></td><td>自动默认 <code>0.05</code></td><td>训练 matcher 对候选进行排序/裁剪。</td><td>保留。</td></tr>
+<tr><td><code>--graph-matcher-hard-negative-dustbin-weight</code></td><td>自动默认 <code>0.05</code></td><td>让 hard negative 更倾向 dustbin。</td><td>提升拒错配。</td></tr>
+<tr><td><code>--graph-matcher-train-max-attention-layers</code></td><td><code>2</code></td><td>训练时最多执行几层 graph attention。</td><td class="warn">16G 建议降到 1。</td></tr>
+<tr><td><code>--graph-matcher-train-max-attention-work-fraction</code></td><td><code>0.5</code></td><td>限制 attention 工作量比例。</td><td class="warn">16G 建议降到 0.25。</td></tr>
+<tr><td><code>--graph-matcher-train-width-keep-ratio</code></td><td><code>0.75</code></td><td>训练时保留多少候选宽度。</td><td class="warn">16G 建议降到 0.5。</td></tr>
+<tr><td><code>--false-match-mine-max-keypoints</code></td><td><code>128</code></td><td>在线挖错配时最多取多少关键点。</td><td>16G 可降到 64。</td></tr>
+<tr><td><code>--false-match-mine-max-matches</code></td><td><code>128</code></td><td>在线挖错配时最多保留多少匹配。</td><td>16G 可降到 64。</td></tr>
+<tr><td><code>--training-spatial-bins</code></td><td><code>4</code></td><td>训练点空间分桶，避免点集中在局部区域。</td><td>通常保持。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>难例 curriculum</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>--hard-variant</code></td><td><code>extreme_01/02/03</code></td><td>把目标 variant 命中这些字符串的 pair 作为 hard lazy specs。</td></tr>
+<tr><td><code>--hard-valid-fraction-max</code></td><td><code>0.45</code></td><td>有效重叠较低的 pair 更偏 hard。</td></tr>
+<tr><td><code>--hard-curriculum-max-probability</code></td><td><code>0.50</code></td><td>训练后期最多 50% 概率插入 hard pair。</td></tr>
+<tr><td><code>--hard-curriculum-warmup-steps</code></td><td><code>2000</code></td><td>前 2000 step 逐步提高 hard pair 概率。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Reliability / non-matcher 相关头</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>--matchability-weight</code></td><td><code>0.03</code></td><td>训练点是否可匹配的置信度。</td><td>用于减少不可靠特征。</td></tr>
+<tr><td><code>--descriptor-uncertainty-weight</code></td><td><code>0.02</code></td><td>训练描述子不确定性估计。</td><td>让模型知道哪些 descriptor 不可靠。</td></tr>
+<tr><td><code>--no-match-prior-weight</code></td><td><code>0.03</code></td><td>训练 no-match 先验。</td><td>辅助拒配。</td></tr>
+<tr><td><code>--reliability-negative-points</code></td><td><code>32</code></td><td>每 pair 采多少可靠性负样本点。</td><td>16G 可降到 16。</td></tr>
+<tr><td><code>--reliability-negative-min-distance</code></td><td><code>6.0</code></td><td>负样本距离正匹配至少多少像素。</td><td>避免把近邻真匹配当负样本。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>光照、局部对比度和旋转一致性</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>--photometric-augment</code></td><td>开启</td><td>训练时随机改变亮度、对比度、gamma、阴影、噪声。</td><td>提高光照鲁棒性。</td></tr>
+<tr><td><code>--photometric-probability</code></td><td>默认 <code>0.85</code></td><td>每个 pair 应用光照增强的概率。</td><td>过高可能让早期训练更难。</td></tr>
+<tr><td><code>--photometric-brightness/contrast/gamma/shadow/noise</code></td><td>默认值</td><td>控制具体光照扰动强度。</td><td>按压力测试结果再改。</td></tr>
+<tr><td><code>--input-local-contrast</code></td><td>开启</td><td>对输入做局部对比度归一化。</td><td>当前强度 <code>0.35</code>。</td></tr>
+<tr><td><code>--illumination-consistency-weight</code></td><td><code>0.0</code></td><td>额外光照一致性训练。</td><td>当前关闭。</td></tr>
+<tr><td><code>--illumination-match-weight</code></td><td><code>0.0</code></td><td>一张图改光照后仍应匹配。</td><td>当前关闭。</td></tr>
+<tr><td><code>--rotation-descriptor-consistency-weight</code></td><td><code>0.0</code></td><td>旋转后 descriptor 一致性。</td><td>当前关闭，后续做旋转鲁棒性时再打开。</td></tr>
+<tr><td><code>--orientation-consistency-weight</code></td><td><code>0.0</code></td><td>方向预测一致性。</td><td>当前关闭。</td></tr>
+<tr><td><code>--scale-consistency-weight</code></td><td><code>0.0</code></td><td>尺度预测一致性。</td><td>当前关闭。</td></tr>
+<tr><td><code>--affine-consistency-weight</code></td><td><code>0.0</code></td><td>仿射形状一致性。</td><td>当前关闭。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>监控、报告和调试</h2>
+<table>
+<thead><tr><th>参数</th><th>当前值</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>--progress-every</code></td><td>预处理 <code>100</code>，训练 <code>10</code></td><td>每多少条/step 打印一次进度。</td></tr>
+<tr><td><code>--gpu-monitor</code></td><td>开启</td><td>后台写 <code>gpu_metrics.csv</code>，避免 step 内频繁调用 <code>nvidia-smi</code>。</td></tr>
+<tr><td><code>--gpu-sample-interval-s</code></td><td><code>2.0</code></td><td>GPU 后台采样间隔。</td></tr>
+<tr><td><code>--gpu-snapshot-every</code></td><td>默认 <code>25</code></td><td>训练指标行里每隔多少 step 记录一次 GPU 快照。</td></tr>
+<tr><td><code>--no-auto-visual-report</code></td><td>开启</td><td>训练结束不自动生成匹配可视化报告。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>16G 显存建议档</h2>
+<p>当前 4090 全模型配置占用约 <code>17.6 GiB</code>，16G 机器建议保持 2048 输入，但冻结更大的前端模块，并降低 GraphMatcher 工作量。</p>
+<table>
+<thead><tr><th>改动</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>去掉 <code>--train-backbone</code></td><td>backbone 激活最多，是 16G 首先要省的部分。</td></tr>
+<tr><td>去掉 <code>--train-dual-fpn</code></td><td>FPN 也保留大分辨率特征，冻结可进一步省显存。</td></tr>
+<tr><td>必要时去掉 <code>--train-sparse-context</code></td><td>上下文 tower 也会增加反向激活。</td></tr>
+<tr><td><code>--samples-per-pair 64</code></td><td>减少 descriptor/graph/reliability 监督点。</td></tr>
+<tr><td><code>--graph-matcher-train-max-attention-layers 1</code></td><td>减少 graph attention 层数。</td></tr>
+<tr><td><code>--graph-matcher-train-max-attention-work-fraction 0.25</code></td><td>减少 attention 工作量。</td></tr>
+<tr><td><code>--graph-matcher-train-width-keep-ratio 0.5</code></td><td>减少候选宽度。</td></tr>
+<tr><td><code>--false-match-mine-max-keypoints 64</code> 和 <code>--false-match-mine-max-matches 64</code></td><td>降低在线错配挖掘开销。</td></tr>
+<tr><td><code>--reliability-negative-points 16</code></td><td>降低 reliability 负样本数量。</td></tr>
+</tbody>
+</table>
+<p>不建议在 16G 上直接调大 <code>batch-pairs</code>，也不建议关闭 AMP 或 activation checkpointing。</p>
+</section>
+
+<section>
+<h2>最常改的参数</h2>
+<table>
+<thead><tr><th>目标</th><th>优先改这些</th><th>不要先动这些</th></tr></thead>
+<tbody>
+<tr><td>减少显存</td><td><code>train-backbone</code>、<code>train-dual-fpn</code>、<code>samples-per-pair</code>、GraphMatcher work 参数</td><td><code>crop-size</code>，除非接受不再用 2048。</td></tr>
+<tr><td>提高 GPU 利用率</td><td><code>pair-spec-manifest</code>、<code>workers</code>、<code>prefetch-batches</code>、<code>worker-cache-items</code></td><td>不要在训练阶段继续在线随机筛低重叠 pair。</td></tr>
+<tr><td>增加跨域数据</td><td><code>pair-mode</code>、<code>pair-type-weights</code>、<code>cross-camera-offsets</code>、<code>cross-fov-offsets</code>、<code>cross-pair-variant</code></td><td>不要只堆 same-position。</td></tr>
+<tr><td>提升拒配能力</td><td><code>enable-rejection-training</code>、GraphMatcher no-match/dustbin 权重、reliability 权重</td><td>不要过早把 hard/no-match 权重调得很大。</td></tr>
+<tr><td>提升光照鲁棒性</td><td><code>photometric-augment</code>、local contrast、illumination consistency/match</td><td>不要在基础匹配还不稳定时把光照增强开太猛。</td></tr>
+<tr><td>提升旋转鲁棒性</td><td>后续打开 rotation/orientation/scale/affine consistency 权重并做消融</td><td>当前这次 run 这些权重是 0。</td></tr>
+</tbody>
+</table>
+</section>
+
+</body>
+</html>
