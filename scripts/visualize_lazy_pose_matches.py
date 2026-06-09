@@ -35,14 +35,21 @@ import pfm_pytorch_training  # noqa: E402
 import pytorch_cache_match_eval as match_eval  # noqa: E402
 from benchmark_lazy_pose_pairs import (  # noqa: E402
     CropWindow,
+    DEFAULT_PAIR_TYPE_WEIGHTS,
+    DEFAULT_PLANET_RADIUS_M,
     DEFAULT_TARGET_VARIANTS,
     LazyPairResult,
     LazyPairSpec,
-    _read_render_manifest,
-    _read_uint8_manifest,
+    RenderRecord,
+    _effective_pair_type_weights,
+    _read_all_render_records,
     apply_local_contrast_normalization,
-    build_pair_specs,
+    build_lazy_pair_specs,
+    count_pair_types,
     generate_lazy_pair,
+    parse_int_list,
+    parse_pair_type_weights,
+    read_pair_spec_manifest,
 )
 from illumination_stress_eval import make_illumination_variants  # noqa: E402
 from patch_descriptor_training import SyntheticPair  # noqa: E402
@@ -850,6 +857,48 @@ th {{ color: #72dce3; }}
     path.write_text(content, encoding="utf-8")
 
 
+def select_visual_pair_specs(
+    args: argparse.Namespace,
+    records: list[RenderRecord],
+) -> tuple[list[LazyPairSpec], str, dict[str, int]]:
+    if args.pair_spec_manifest is not None:
+        specs = read_pair_spec_manifest(args.pair_spec_manifest, records)
+        if args.shuffle:
+            rng = random.Random(args.seed)
+            rng.shuffle(specs)
+        if args.limit_pairs > 0:
+            specs = specs[: args.limit_pairs]
+        return specs, "pair_spec_manifest", count_pair_types(specs)
+
+    target_variants = tuple(args.target_variant) if args.target_variant else DEFAULT_TARGET_VARIANTS
+    cross_variants = tuple(dict.fromkeys(args.cross_pair_variant or (args.reference_variant, *target_variants)))
+    effective_pair_type_weights = _effective_pair_type_weights(args.pair_mode, args.pair_type_weights)
+    specs, pair_type_counts = build_lazy_pair_specs(
+        records,
+        split=args.split,
+        pair_mode=args.pair_mode,
+        reference_variant=args.reference_variant,
+        target_variants=target_variants,
+        cross_variants=cross_variants,
+        cross_camera_offsets=tuple(args.cross_camera_offsets),
+        cross_fov_offsets=tuple(args.cross_fov_offsets),
+        image_source=args.image_source,
+        limit_pairs=args.limit_pairs,
+        seed=args.seed,
+        shuffle=args.shuffle,
+        pair_type_weights=effective_pair_type_weights,
+        spatial_index_planet_radius_m=args.spatial_index_planet_radius_m,
+        spatial_index_footprint_samples=args.spatial_index_footprint_samples,
+        spatial_index_margin_m=args.spatial_index_margin_m,
+        spatial_index_height_km=tuple(args.spatial_index_height_km),
+    )
+    return specs, args.pair_mode, pair_type_counts
+
+
+def read_visual_records(render_manifest: Path, uint8_manifest: Path) -> list[RenderRecord]:
+    return _read_all_render_records([render_manifest], [uint8_manifest])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render-manifest", type=Path, required=True)
@@ -861,6 +910,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="train")
     parser.add_argument("--reference-variant", default="nadir")
     parser.add_argument("--target-variant", action="append", default=[])
+    parser.add_argument("--pair-spec-manifest", type=Path, default=None)
+    parser.add_argument(
+        "--pair-mode",
+        choices=["same-position", "cross-camera", "cross-fov", "mixed", "spatial-index"],
+        default="same-position",
+    )
+    parser.add_argument("--cross-camera-offsets", type=parse_int_list, default=parse_int_list("1,2,4,8"))
+    parser.add_argument("--cross-fov-offsets", type=parse_int_list, default=parse_int_list("0,1,2,4"))
+    parser.add_argument("--cross-pair-variant", action="append", default=[])
+    parser.add_argument("--pair-type-weights", type=parse_pair_type_weights, default=DEFAULT_PAIR_TYPE_WEIGHTS.copy())
+    parser.add_argument("--spatial-index-planet-radius-m", type=float, default=DEFAULT_PLANET_RADIUS_M)
+    parser.add_argument("--spatial-index-footprint-samples", type=int, default=5)
+    parser.add_argument("--spatial-index-margin-m", type=float, default=2000.0)
+    parser.add_argument("--spatial-index-height-km", type=parse_int_list, default=[])
+    parser.add_argument("--image-source", choices=["uint8", "render"], default="uint8")
+    parser.add_argument("--limit-pairs", type=int, default=0)
+    parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--candidate-pairs", type=int, default=36)
     parser.add_argument("--select-count", type=int, default=6)
     parser.add_argument("--seed", type=int, default=20260604)
@@ -932,19 +998,8 @@ def main() -> int:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    uint8_paths = _read_uint8_manifest(args.uint8_manifest)
-    records = _read_render_manifest(args.render_manifest, uint8_paths)
-    target_variants = tuple(args.target_variant) if args.target_variant else DEFAULT_TARGET_VARIANTS
-    specs = build_pair_specs(
-        records,
-        split=args.split,
-        reference_variant=args.reference_variant,
-        target_variants=target_variants,
-        image_source="uint8",
-        limit_pairs=0,
-        seed=args.seed,
-        shuffle=True,
-    )
+    records = read_visual_records(args.render_manifest, args.uint8_manifest)
+    specs, pair_source, pair_type_counts = select_visual_pair_specs(args, records)
     if not specs:
         raise RuntimeError("no lazy pair specs found")
     specs = specs[: max(args.candidate_pairs, args.select_count)]
@@ -960,7 +1015,7 @@ def main() -> int:
             lazy_result = generate_lazy_pair(
                 spec,
                 crop_size=args.crop_size,
-                image_source="uint8",
+                image_source=args.image_source,
                 max_attempts=args.max_attempts,
                 min_valid_fraction=args.min_valid_fraction,
                 absolute_depth_tolerance_m=args.absolute_depth_tolerance_m,
@@ -1094,6 +1149,10 @@ def main() -> int:
         },
         "records": len(records),
         "candidate_specs": len(specs),
+        "pair_source": pair_source,
+        "pair_spec_manifest": str(args.pair_spec_manifest or ""),
+        "pair_mode": args.pair_mode,
+        "pair_type_counts": pair_type_counts,
         "evaluated": len(all_results),
         "skipped": skipped,
     }

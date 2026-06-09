@@ -1039,6 +1039,81 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(specs[0].fixed_crop_a, lazy_bench.CropWindow(1, 2, 5, 6))
         self.assertEqual(specs[0].fixed_crop_b, lazy_bench.CropWindow(7, 8, 11, 12))
 
+    def test_run_visual_report_passes_training_pair_selection_to_visualizer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(
+                auto_visual_report=True,
+                render_manifest=root / "render.csv",
+                uint8_manifest=root / "uint8.csv",
+                output_dir=root / "out",
+                visual_split="",
+                split="train",
+                reference_variant="nadir",
+                target_variant=["mid_01", "extreme_03"],
+                pair_mode="spatial-index",
+                pair_type_weights={
+                    lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW: 0.0,
+                    lazy_bench.PAIR_TYPE_CROSS_CAMERA: 1.0,
+                    lazy_bench.PAIR_TYPE_CROSS_FOV: 0.0,
+                },
+                cross_pair_variant=["mid_01", "extreme_03"],
+                cross_camera_offsets=[1, 3],
+                cross_fov_offsets=[0, 2],
+                spatial_index_planet_radius_m=3396190.0,
+                spatial_index_footprint_samples=5,
+                spatial_index_margin_m=2000.0,
+                spatial_index_height_km=[100],
+                pair_spec_manifest=root / "overlap_edges.csv",
+                image_source="uint8",
+                limit_pairs=5000,
+                shuffle=True,
+                visual_candidate_pairs=24,
+                visual_select_count=6,
+                seed=123,
+                crop_size=2048,
+                visual_max_image_size=768,
+                max_attempts=8,
+                min_valid_fraction=0.05,
+                absolute_depth_tolerance_m=100.0,
+                relative_depth_tolerance=0.005,
+                visual_device="",
+                device="cuda",
+                visual_descriptor_mode="learned",
+                visual_keypoint_score_mode="texture",
+                visual_matcher_mode="graph_matcher",
+                visual_max_keypoints=512,
+                visual_max_matches=0,
+                visual_draw_matches=0,
+                visual_threshold_px=5.0,
+                visual_graph_width_prune_min_score=0.25,
+                visual_graph_early_stop_min_confidence=0.85,
+                visual_filtered_report=True,
+                visual_filtered_geometry_filter="local",
+                visual_filtered_min_margin=0.02,
+                visual_filtered_min_score=-1.0,
+                visual_filtered_max_matches=0,
+                visual_filtered_draw_matches=0,
+                input_local_contrast=True,
+                input_local_contrast_strength=0.35,
+                input_local_contrast_kernel=31,
+                visual_filtered_mutual=True,
+            )
+
+            with mock.patch.object(lazy_bench.subprocess, "run") as run:
+                report_dir = lazy_bench._run_visual_report(args, root / "state.pt")
+
+        command = run.call_args.args[0]
+        self.assertEqual(report_dir, root / "out" / "visual_report")
+        self.assertIn("--pair-spec-manifest", command)
+        self.assertEqual(command[command.index("--pair-spec-manifest") + 1], str(root / "overlap_edges.csv"))
+        self.assertIn("--pair-mode", command)
+        self.assertEqual(command[command.index("--pair-mode") + 1], "spatial-index")
+        self.assertIn("--pair-type-weights", command)
+        self.assertIn("cross_camera=1", command[command.index("--pair-type-weights") + 1])
+        self.assertIn("--spatial-index-height-km", command)
+        self.assertEqual(command[command.index("--spatial-index-height-km") + 1], "100")
+
     def test_run_overlap_list_writes_pair_spec_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

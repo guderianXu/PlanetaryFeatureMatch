@@ -15,7 +15,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from patch_descriptor_training import SyntheticPair
 from continuous_rotation_stress_eval import rotate_pair_from_view
 from illumination_stress_eval import make_illumination_variants
-from benchmark_lazy_pose_pairs import CropWindow, LazyPairSpec, LazyPairResult, RenderRecord
+from benchmark_lazy_pose_pairs import (
+    CropWindow,
+    LazyPairSpec,
+    LazyPairResult,
+    PAIR_TYPE_CROSS_CAMERA,
+    RenderRecord,
+    write_pair_spec_manifest,
+)
 import visualize_lazy_pose_matches as visual_mod
 import training_visual_report as training_report_mod
 from visualize_lazy_pose_matches import (
@@ -76,6 +83,186 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.filtered_max_matches, 0)
         self.assertEqual(args.filtered_draw_matches, 0)
         self.assertGreater(args.filtered_min_margin, 0.0)
+
+    def test_lazy_visual_selects_pair_specs_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = RenderRecord(
+                pose_id="fov090_a_mid",
+                base_id="fov090:a",
+                variant="mid_01",
+                split="train",
+                tsai_path=root / "a.tsai",
+                image_path=root / "a.tif",
+                uint8_path=root / "a.png",
+                depth_path=root / "a_depth.tif",
+                dataset_id="fov090",
+                raw_base_id="a",
+            )
+            target = RenderRecord(
+                pose_id="fov090_b_extreme",
+                base_id="fov090:b",
+                variant="extreme_03",
+                split="train",
+                tsai_path=root / "b.tsai",
+                image_path=root / "b.tif",
+                uint8_path=root / "b.png",
+                depth_path=root / "b_depth.tif",
+                dataset_id="fov090",
+                raw_base_id="b",
+            )
+            manifest = root / "overlap_edges.csv"
+            pair = SyntheticPair(
+                view_a=torch.zeros(1, 4, 4),
+                view_b=torch.zeros(1, 4, 4),
+                warp_a_to_b=torch.zeros(4, 4, 2),
+                valid_mask=torch.ones(4, 4, dtype=torch.bool),
+            )
+            write_pair_spec_manifest(
+                manifest,
+                [
+                    LazyPairResult(
+                        spec=LazyPairSpec(
+                            pair_index=0,
+                            split="train",
+                            reference=reference,
+                            target=target,
+                            pair_type=PAIR_TYPE_CROSS_CAMERA,
+                        ),
+                        pair=pair,
+                        valid_fraction=0.5,
+                        valid_pixels=16,
+                        attempt_count=1,
+                        elapsed_ms=1.0,
+                        crop_a=CropWindow(1, 2, 5, 6),
+                        crop_b=CropWindow(7, 8, 11, 12),
+                    )
+                ],
+            )
+            args = SimpleNamespace(
+                pair_spec_manifest=manifest,
+                split="train",
+                reference_variant="nadir",
+                target_variant=[],
+                pair_mode="same-position",
+                cross_pair_variant=[],
+                cross_camera_offsets=(1,),
+                cross_fov_offsets=(0,),
+                pair_type_weights={},
+                spatial_index_planet_radius_m=3396190.0,
+                spatial_index_footprint_samples=5,
+                spatial_index_margin_m=2000.0,
+                spatial_index_height_km=[],
+                image_source="uint8",
+                limit_pairs=0,
+                seed=123,
+                shuffle=False,
+            )
+
+            with mock.patch.object(visual_mod, "build_lazy_pair_specs", side_effect=AssertionError("should not build")):
+                specs, pair_source, pair_type_counts = visual_mod.select_visual_pair_specs(args, [reference, target])
+
+        self.assertEqual(pair_source, "pair_spec_manifest")
+        self.assertEqual(pair_type_counts[PAIR_TYPE_CROSS_CAMERA], 1)
+        self.assertEqual(specs[0].target.pose_id, target.pose_id)
+        self.assertEqual(specs[0].fixed_crop_a, CropWindow(1, 2, 5, 6))
+        self.assertEqual(specs[0].fixed_crop_b, CropWindow(7, 8, 11, 12))
+
+    def test_lazy_visual_reads_manifest_dataset_id_compatible_with_pair_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_dir = root / "manifests"
+            manifest_dir.mkdir()
+            render_manifest = manifest_dir / "h100km_fov090_render_manifest.csv"
+            uint8_manifest = manifest_dir / "h100km_fov090_uint8_manifest.csv"
+            render_manifest.write_text(
+                "pose_id,base_id,variant,split,lon_deg,lat_deg,tsai_path,image_path,depth_path,chunk_index\n"
+                f"pose_a,base_a,mid_01,train,0,0,{root / 'a.tsai'},{root / 'a.tif'},{root / 'a_depth.tif'},0\n"
+                f"pose_b,base_b,extreme_03,train,0,0,{root / 'b.tsai'},{root / 'b.tif'},{root / 'b_depth.tif'},0\n",
+                encoding="utf-8",
+            )
+            uint8_manifest.write_text("source_path,uint8_path\n", encoding="utf-8")
+            records = [
+                RenderRecord(
+                    pose_id="pose_a",
+                    base_id="base_a",
+                    variant="mid_01",
+                    split="train",
+                    tsai_path=root / "a.tsai",
+                    image_path=root / "a.tif",
+                    uint8_path=root / "a.tif",
+                    depth_path=root / "a_depth.tif",
+                    dataset_id="h100km_fov090",
+                    raw_base_id="base_a",
+                ),
+                RenderRecord(
+                    pose_id="pose_b",
+                    base_id="base_b",
+                    variant="extreme_03",
+                    split="train",
+                    tsai_path=root / "b.tsai",
+                    image_path=root / "b.tif",
+                    uint8_path=root / "b.tif",
+                    depth_path=root / "b_depth.tif",
+                    dataset_id="h100km_fov090",
+                    raw_base_id="base_b",
+                ),
+            ]
+            manifest = root / "overlap_edges.csv"
+            pair = SyntheticPair(
+                view_a=torch.zeros(1, 4, 4),
+                view_b=torch.zeros(1, 4, 4),
+                warp_a_to_b=torch.zeros(4, 4, 2),
+                valid_mask=torch.ones(4, 4, dtype=torch.bool),
+            )
+            write_pair_spec_manifest(
+                manifest,
+                [
+                    LazyPairResult(
+                        spec=LazyPairSpec(
+                            pair_index=0,
+                            split="train",
+                            reference=records[0],
+                            target=records[1],
+                            pair_type=PAIR_TYPE_CROSS_CAMERA,
+                        ),
+                        pair=pair,
+                        valid_fraction=0.5,
+                        valid_pixels=16,
+                        attempt_count=1,
+                        elapsed_ms=1.0,
+                        crop_a=CropWindow(0, 0, 4, 4),
+                        crop_b=CropWindow(0, 0, 4, 4),
+                    )
+                ],
+            )
+            args = SimpleNamespace(
+                pair_spec_manifest=manifest,
+                split="train",
+                reference_variant="nadir",
+                target_variant=[],
+                pair_mode="same-position",
+                cross_pair_variant=[],
+                cross_camera_offsets=(1,),
+                cross_fov_offsets=(0,),
+                pair_type_weights={},
+                spatial_index_planet_radius_m=3396190.0,
+                spatial_index_footprint_samples=5,
+                spatial_index_margin_m=2000.0,
+                spatial_index_height_km=[],
+                image_source="uint8",
+                limit_pairs=0,
+                seed=123,
+                shuffle=False,
+            )
+
+            visual_records = visual_mod.read_visual_records(render_manifest, uint8_manifest)
+            specs, pair_source, pair_type_counts = visual_mod.select_visual_pair_specs(args, visual_records)
+
+        self.assertEqual(pair_source, "pair_spec_manifest")
+        self.assertEqual(pair_type_counts[PAIR_TYPE_CROSS_CAMERA], 1)
+        self.assertEqual(specs[0].reference.dataset_id, "h100km_fov090")
+        self.assertEqual(specs[0].target.pose_id, "pose_b")
 
     def test_smooth_series_keeps_short_series_length(self) -> None:
         values = torch.tensor([1.0, 2.0, 3.0]).numpy()

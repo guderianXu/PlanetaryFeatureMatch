@@ -2159,6 +2159,14 @@ pre {{ white-space: pre-wrap; background: #101b24; border: 1px solid #26394a; bo
     (path / "index.html").write_text(body, encoding="utf-8")
 
 
+def _format_int_list_argument(values: list[int] | tuple[int, ...]) -> str:
+    return ",".join(str(int(value)) for value in values)
+
+
+def _format_pair_type_weights_argument(weights: dict[str, float]) -> str:
+    return ",".join(f"{pair_type}={float(weights.get(pair_type, 0.0)):g}" for pair_type in PAIR_TYPES)
+
+
 def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path | None:
     if not args.auto_visual_report:
         return None
@@ -2187,6 +2195,18 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         args.visual_split or args.split,
         "--reference-variant",
         args.reference_variant,
+        "--pair-mode",
+        args.pair_mode,
+        "--pair-type-weights",
+        _format_pair_type_weights_argument(args.pair_type_weights),
+        "--cross-camera-offsets",
+        _format_int_list_argument(args.cross_camera_offsets),
+        "--cross-fov-offsets",
+        _format_int_list_argument(args.cross_fov_offsets),
+        "--image-source",
+        args.image_source,
+        "--limit-pairs",
+        str(args.limit_pairs),
         "--candidate-pairs",
         str(args.visual_candidate_pairs),
         "--select-count",
@@ -2226,6 +2246,28 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         "--graph-early-stop-min-confidence",
         str(args.visual_graph_early_stop_min_confidence),
     ]
+    if args.shuffle:
+        command.append("--shuffle")
+    else:
+        command.append("--no-shuffle")
+    if args.pair_spec_manifest is not None:
+        command.extend(["--pair-spec-manifest", str(args.pair_spec_manifest)])
+    if args.spatial_index_height_km:
+        command.extend(["--spatial-index-height-km", _format_int_list_argument(args.spatial_index_height_km)])
+    command.extend(
+        [
+            "--spatial-index-planet-radius-m",
+            str(args.spatial_index_planet_radius_m),
+            "--spatial-index-footprint-samples",
+            str(args.spatial_index_footprint_samples),
+            "--spatial-index-margin-m",
+            str(args.spatial_index_margin_m),
+        ]
+    )
+    for variant in args.target_variant:
+        command.extend(["--target-variant", variant])
+    for variant in args.cross_pair_variant:
+        command.extend(["--cross-pair-variant", variant])
     command.append("--filtered-report" if args.visual_filtered_report else "--no-filtered-report")
     command.extend(
         [
