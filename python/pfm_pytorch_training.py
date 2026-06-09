@@ -35,15 +35,35 @@ from patch_descriptor_training import (
 GRAPH_INFERENCE_PRESET_CHOICES = ("off", "fast", "high_precision")
 AMP_DTYPE_CHOICES = ("float16", "bfloat16")
 REJECTION_TRAINING_DEFAULTS = {
-    "graph_matcher_loss_weight": 0.50,
-    "graph_matcher_no_match_points": 64,
-    "graph_matcher_no_match_weight": 0.15,
-    "graph_matcher_assignment_weight": 0.25,
-    "graph_matcher_accept_weight": 0.10,
-    "graph_matcher_prune_ranking_weight": 0.05,
-    "graph_matcher_hard_negative_dustbin_weight": 0.05,
-    "false_match_weight": 0.05,
+    "graph_matcher_loss_weight": 0.75,
+    "graph_matcher_no_match_points": 128,
+    "graph_matcher_no_match_weight": 0.45,
+    "graph_matcher_assignment_weight": 0.35,
+    "graph_matcher_accept_weight": 0.30,
+    "graph_matcher_prune_ranking_weight": 0.10,
+    "graph_matcher_stop_confidence_weight": 0.05,
+    "graph_matcher_hard_negative_dustbin_weight": 0.25,
+    "graph_matcher_hard_negative_dustbin_topk": 16,
+    "graph_matcher_hard_negative_dustbin_margin": 0.35,
+    "graph_matcher_semi_dense_no_match_points": 128,
+    "false_match_weight": 0.15,
+    "false_match_max_points": 192,
     "false_match_curriculum_max_probability": 1.0,
+    "keypoint_weight": 0.05,
+    "keypoint_negative_weight": 0.02,
+    "matchability_weight": 0.08,
+    "descriptor_uncertainty_weight": 0.05,
+    "no_match_prior_weight": 0.08,
+    "reliability_negative_points": 128,
+    "rotation_descriptor_consistency_weight": 0.03,
+}
+REJECTION_TRAINING_BASE_DEFAULTS = {
+    "graph_matcher_loss_weight": 1.0,
+    "graph_matcher_accept_weight": 0.2,
+    "graph_matcher_hard_negative_dustbin_topk": 8,
+    "graph_matcher_hard_negative_dustbin_margin": 0.25,
+    "false_match_max_points": 128,
+    "keypoint_negative_weight": 0.01,
 }
 GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_total_loss",
@@ -2578,6 +2598,8 @@ def train_step(
     pseudo_label_max_points: int = 0,
     pseudo_label_pair_paths: list[Path] | None = None,
     pseudo_label_probability: float = 0.0,
+    keypoint_weight: float = 0.0,
+    keypoint_negative_weight: float = 0.01,
     false_matches: dict[str, FalseMatchLabels] | None = None,
     false_match_weight: float = 0.0,
     false_match_max_points: int = 0,
@@ -2655,6 +2677,8 @@ def train_step(
         ("matchability_weight", matchability_weight),
         ("descriptor_uncertainty_weight", descriptor_uncertainty_weight),
         ("no_match_prior_weight", no_match_prior_weight),
+        ("keypoint_weight", keypoint_weight),
+        ("keypoint_negative_weight", keypoint_negative_weight),
         ("rotation_descriptor_consistency_weight", rotation_descriptor_consistency_weight),
         ("orientation_consistency_weight", orientation_consistency_weight),
         ("scale_consistency_weight", scale_consistency_weight),
@@ -2676,6 +2700,9 @@ def train_step(
     pseudo_label_points = 0
     pseudo_keypoint_points = 0
     pseudo_label_pairs = 0
+    keypoint_loss_sum = 0.0
+    keypoint_loss_count = 0
+    keypoint_points = 0
     false_match_points = 0
     false_match_pairs = 0
     online_false_match_points = 0
@@ -2717,6 +2744,7 @@ def train_step(
         or affine_consistency_weight > 0.0
     )
     sparse_maps_required = reliability_loss_enabled or rotation_loss_enabled
+    keypoint_loss_enabled = keypoint_weight > 0.0
     use_amp = bool(amp_enabled)
     use_grad_scaler = use_amp and grad_scaler is not None
     use_activation_checkpointing = bool(activation_checkpointing)
@@ -2736,6 +2764,8 @@ def train_step(
             "affine_consistency_loss": affine_loss_sum / rotation_denominator,
             "rotation_consistency_points": float(rotation_consistency_points),
             "rotation_consistency_pairs": float(rotation_consistency_pairs_used),
+            "keypoint_loss": keypoint_loss_sum / float(max(1, keypoint_loss_count)),
+            "keypoint_points": float(keypoint_points),
             "amp_enabled": 1.0 if use_amp else 0.0,
             "amp_scale": grad_scaler_scale(grad_scaler) if use_grad_scaler else 0.0,
             "activation_checkpointing": 1.0 if use_activation_checkpointing else 0.0,
@@ -2862,6 +2892,7 @@ def train_step(
                     or graph_matcher_loss_weight > 0.0
                     or reliability_loss_enabled
                     or rotation_loss_enabled
+                    or keypoint_loss_enabled
                 ):
                     pose_multiplier = pose_difficulty_loss_multiplier(
                         pose_metadata,
@@ -2961,6 +2992,20 @@ def train_step(
                         desc_a = normalize_descriptor_batch(sample_descriptors(descriptors_a, points_a))
                         desc_b = normalize_descriptor_batch(sample_descriptors(descriptors_b, points_b))
                         metrics = paired_descriptor_metrics(desc_a.detach(), desc_b.detach())
+                    if keypoint_loss_enabled and heatmap_a is not None and heatmap_b is not None:
+                        keypoint_loss = heatmap_point_loss(
+                            heatmap_a,
+                            points_a,
+                            negative_weight=keypoint_negative_weight,
+                        ) + heatmap_point_loss(
+                            heatmap_b,
+                            points_b,
+                            negative_weight=keypoint_negative_weight,
+                        )
+                        pair_losses.append(float(keypoint_weight) * keypoint_loss)
+                        keypoint_loss_sum += float(keypoint_loss.detach().cpu())
+                        keypoint_loss_count += 1
+                        keypoint_points += int(points_a.size(0) + points_b.size(0))
                     if graph_matcher_loss_weight > 0.0:
                         graph_online_false_enabled = graph_online_false_can_train and online_false_a.size(0) > 0
                         with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
@@ -3465,9 +3510,9 @@ def aggregate_descriptor_metrics(rows: list[dict[str, float]]) -> dict[str, floa
     return result
 
 
-def _set_positive_default(args: argparse.Namespace, name: str) -> None:
+def _set_rejection_training_default(args: argparse.Namespace, name: str) -> None:
     value = getattr(args, name)
-    if value <= 0:
+    if value <= 0 or value == REJECTION_TRAINING_BASE_DEFAULTS.get(name):
         setattr(args, name, REJECTION_TRAINING_DEFAULTS[name])
 
 
@@ -3483,7 +3528,7 @@ def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
         "fast" if args.report_graph_inference_preset == "off" else args.report_graph_inference_preset
     )
     for name in REJECTION_TRAINING_DEFAULTS:
-        _set_positive_default(args, name)
+        _set_rejection_training_default(args, name)
 
 
 def aggregate_graph_matcher_loss_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
@@ -4061,6 +4106,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pseudo-label-max-points", type=int, default=128)
     parser.add_argument("--pseudo-label-curriculum-max-probability", type=float, default=0.0)
     parser.add_argument("--pseudo-label-curriculum-warmup-steps", type=int, default=100)
+    parser.add_argument("--keypoint-weight", type=float, default=0.0)
+    parser.add_argument("--keypoint-negative-weight", type=float, default=0.01)
     parser.add_argument("--false-match-csv", action="append", type=Path, default=[])
     parser.add_argument("--false-match-weight", type=float, default=0.0)
     parser.add_argument("--false-match-max-points", type=int, default=128)
@@ -4188,6 +4235,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--pseudo-keypoint-weight must be nonnegative")
     if args.pseudo_keypoint_negative_weight < 0.0:
         parser.error("--pseudo-keypoint-negative-weight must be nonnegative")
+    if args.keypoint_weight < 0.0:
+        parser.error("--keypoint-weight must be nonnegative")
+    if args.keypoint_negative_weight < 0.0:
+        parser.error("--keypoint-negative-weight must be nonnegative")
     if args.pseudo_label_max_points < 0:
         parser.error("--pseudo-label-max-points must be nonnegative")
     if args.pseudo_label_curriculum_max_probability < 0.0:
@@ -4451,7 +4502,7 @@ def main() -> int:
         train_dual_fpn=args.train_dual_fpn,
         train_descriptor_head=not args.freeze_descriptor_head,
         train_sparse_context=args.train_sparse_context,
-        train_keypoint_head=args.pseudo_keypoint_weight > 0.0,
+        train_keypoint_head=args.pseudo_keypoint_weight > 0.0 or args.keypoint_weight > 0.0,
         train_geometry_head=(
             args.train_geometry_head
             or args.orientation_consistency_weight > 0.0
@@ -4634,6 +4685,9 @@ def main() -> int:
                 "activation_checkpointing",
                 "teacher_weight",
                 "synthetic_loss_weight",
+                "keypoint_weight",
+                "keypoint_loss",
+                "keypoint_points",
                 "hard_negative_weight",
                 "diversity_weight",
                 "abstention_weight",
@@ -4776,6 +4830,8 @@ def main() -> int:
                     max_probability=args.pseudo_label_curriculum_max_probability,
                     warmup_steps=args.pseudo_label_curriculum_warmup_steps,
                 ),
+                keypoint_weight=args.keypoint_weight,
+                keypoint_negative_weight=args.keypoint_negative_weight,
                 false_matches=false_matches,
                 false_match_weight=args.false_match_weight,
                 false_match_max_points=args.false_match_max_points,
@@ -4849,6 +4905,7 @@ def main() -> int:
                     "total_epochs": total_epochs,
                     "teacher_weight": teacher_weight,
                     "synthetic_loss_weight": args.synthetic_loss_weight,
+                    "keypoint_weight": args.keypoint_weight,
                     "hard_negative_weight": hard_negative_weight,
                     "diversity_weight": diversity_weight,
                     "abstention_weight": args.abstention_weight,
@@ -4902,6 +4959,7 @@ def main() -> int:
                     f"tw={teacher_weight:.3f} syn={args.synthetic_loss_weight:.3f} "
                     f"hn={hard_negative_weight:.3f} div={diversity_weight:.3f} "
                     f"abst={args.abstention_weight:.3f} "
+                    f"kploss={metrics.get('keypoint_loss', 0.0):.6f} "
                     f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
                     f"gassign={metrics.get('graph_matcher_assignment_loss', 0.0):.6f} "
                     f"gnomatch={metrics.get('graph_matcher_no_match_loss', 0.0):.6f} "

@@ -93,15 +93,33 @@ HEIGHT_KM_PATTERNS = (
 DEFAULT_INIT_STATE = PROJECT_ROOT / "runs" / "python_diag_balanced_512_3epoch_20260603_2143" / "pytorch_pfm_state.pt"
 
 REJECTION_TRAINING_DEFAULTS = {
-    "graph_matcher_loss_weight": 0.50,
-    "graph_matcher_no_match_points": 64,
-    "graph_matcher_no_match_weight": 0.15,
-    "graph_matcher_assignment_weight": 0.25,
-    "graph_matcher_accept_weight": 0.10,
-    "graph_matcher_prune_ranking_weight": 0.05,
-    "graph_matcher_hard_negative_dustbin_weight": 0.05,
-    "false_match_weight": 0.05,
+    "graph_matcher_loss_weight": 0.75,
+    "graph_matcher_no_match_points": 128,
+    "graph_matcher_no_match_weight": 0.45,
+    "graph_matcher_assignment_weight": 0.35,
+    "graph_matcher_accept_weight": 0.30,
+    "graph_matcher_prune_ranking_weight": 0.10,
+    "graph_matcher_stop_confidence_weight": 0.05,
+    "graph_matcher_hard_negative_dustbin_weight": 0.25,
+    "graph_matcher_hard_negative_dustbin_topk": 16,
+    "graph_matcher_hard_negative_dustbin_margin": 0.35,
+    "graph_matcher_semi_dense_no_match_points": 128,
+    "false_match_weight": 0.15,
+    "false_match_max_points": 192,
     "false_match_curriculum_max_probability": 1.0,
+    "keypoint_weight": 0.05,
+    "keypoint_negative_weight": 0.02,
+    "matchability_weight": 0.08,
+    "descriptor_uncertainty_weight": 0.05,
+    "no_match_prior_weight": 0.08,
+    "reliability_negative_points": 128,
+    "rotation_descriptor_consistency_weight": 0.03,
+}
+REJECTION_TRAINING_BASE_DEFAULTS = {
+    "graph_matcher_hard_negative_dustbin_topk": 8,
+    "graph_matcher_hard_negative_dustbin_margin": 0.25,
+    "false_match_max_points": 128,
+    "keypoint_negative_weight": 0.01,
 }
 
 _IMAGE_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
@@ -2492,6 +2510,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "photometric_augment",
         "photometric_probability",
         "input_local_contrast",
+        "keypoint_weight",
+        "keypoint_loss",
+        "keypoint_points",
         "graph_matcher_loss_weight",
         "graph_matcher_assignment_weight",
         "graph_matcher_accept_weight",
@@ -2693,6 +2714,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 abstention_max_false_score=args.abstention_max_false_score,
                 abstention_topk=args.abstention_topk,
                 abstention_candidates=args.abstention_candidates,
+                keypoint_weight=args.keypoint_weight,
+                keypoint_negative_weight=args.keypoint_negative_weight,
                 max_grad_norm=args.max_grad_norm,
                 skip_nonfinite_steps=args.skip_nonfinite_steps,
                 train_blended_descriptors=args.train_blended_descriptors,
@@ -2815,6 +2838,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "photometric_augment": int(photometric_config.enabled),
                 "photometric_probability": f"{photometric_config.probability:.3f}",
                 "input_local_contrast": int(args.input_local_contrast),
+                "keypoint_weight": f"{args.keypoint_weight:.6f}",
+                "keypoint_loss": f"{metrics.get('keypoint_loss', 0.0):.6f}",
+                "keypoint_points": f"{metrics.get('keypoint_points', 0.0):.0f}",
                 "graph_matcher_loss_weight": f"{args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0:.6f}",
                 "graph_matcher_assignment_weight": (
                     f"{args.graph_matcher_assignment_weight if args.train_graph_matcher else 0.0:.6f}"
@@ -3017,6 +3043,8 @@ def _save_training_state(
                 "illumination_consistency_weight": float(args.illumination_consistency_weight),
                 "illumination_consistency_probability": float(args.illumination_consistency_probability),
                 "illumination_consistency_points": int(args.illumination_consistency_points),
+                "keypoint_weight": float(args.keypoint_weight),
+                "keypoint_negative_weight": float(args.keypoint_negative_weight),
                 "matchability_weight": float(args.matchability_weight),
                 "descriptor_uncertainty_weight": float(args.descriptor_uncertainty_weight),
                 "no_match_prior_weight": float(args.no_match_prior_weight),
@@ -3180,6 +3208,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-valid-fraction-max", type=float, default=0.0)
     parser.add_argument("--hard-curriculum-max-probability", type=float, default=0.0)
     parser.add_argument("--hard-curriculum-warmup-steps", type=int, default=100)
+    parser.add_argument("--keypoint-weight", type=float, default=0.0)
+    parser.add_argument("--keypoint-negative-weight", type=float, default=0.01)
     parser.add_argument("--false-match-csv", action="append", type=Path, default=[])
     parser.add_argument("--false-match-weight", type=float, default=0.0)
     parser.add_argument("--false-match-max-points", type=int, default=128)
@@ -3269,9 +3299,9 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _set_positive_default(args: argparse.Namespace, name: str) -> None:
+def _set_rejection_training_default(args: argparse.Namespace, name: str) -> None:
     value = getattr(args, name)
-    if value <= 0:
+    if value <= 0 or value == REJECTION_TRAINING_BASE_DEFAULTS.get(name):
         setattr(args, name, REJECTION_TRAINING_DEFAULTS[name])
 
 
@@ -3284,8 +3314,10 @@ def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
     args.inline_false_match_mining = True
     args.graph_matcher_online_false_no_match = True
     args.visual_matcher_mode = "graph_matcher"
+    if args.visual_keypoint_score_mode == "texture":
+        args.visual_keypoint_score_mode = "learned"
     for name in REJECTION_TRAINING_DEFAULTS:
-        _set_positive_default(args, name)
+        _set_rejection_training_default(args, name)
 
 
 def prepare_lazy_pair_specs(
@@ -3378,6 +3410,10 @@ def main() -> int:
         raise ValueError("--visual-graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
     if args.hard_curriculum_max_probability < 0.0 or args.hard_curriculum_max_probability > 1.0:
         raise ValueError("--hard-curriculum-max-probability must be in [0, 1]")
+    if args.keypoint_weight < 0.0:
+        raise ValueError("--keypoint-weight must be non-negative")
+    if args.keypoint_negative_weight < 0.0:
+        raise ValueError("--keypoint-negative-weight must be non-negative")
     if args.false_match_curriculum_max_probability < 0.0 or args.false_match_curriculum_max_probability > 1.0:
         raise ValueError("--false-match-curriculum-max-probability must be in [0, 1]")
     if args.false_match_weight < 0.0:

@@ -2024,13 +2024,26 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertTrue(args.enable_rejection_training)
         self.assertTrue(args.train_graph_matcher)
         self.assertTrue(args.graph_matcher_online_false_no_match)
-        self.assertEqual(args.graph_matcher_no_match_points, 64)
-        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.15)
-        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.25)
-        self.assertGreater(args.graph_matcher_accept_weight, 0.0)
-        self.assertGreater(args.graph_matcher_prune_ranking_weight, 0.0)
-        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.05)
-        self.assertAlmostEqual(args.false_match_weight, 0.05)
+        self.assertAlmostEqual(args.graph_matcher_loss_weight, 0.75)
+        self.assertEqual(args.graph_matcher_no_match_points, 128)
+        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.45)
+        self.assertAlmostEqual(args.graph_matcher_assignment_weight, 0.35)
+        self.assertAlmostEqual(args.graph_matcher_accept_weight, 0.30)
+        self.assertAlmostEqual(args.graph_matcher_prune_ranking_weight, 0.10)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.05)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.25)
+        self.assertEqual(args.graph_matcher_hard_negative_dustbin_topk, 16)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_margin, 0.35)
+        self.assertEqual(args.graph_matcher_semi_dense_no_match_points, 128)
+        self.assertAlmostEqual(args.false_match_weight, 0.15)
+        self.assertEqual(args.false_match_max_points, 192)
+        self.assertAlmostEqual(args.keypoint_weight, 0.05)
+        self.assertAlmostEqual(args.keypoint_negative_weight, 0.02)
+        self.assertEqual(args.reliability_negative_points, 128)
+        self.assertAlmostEqual(args.matchability_weight, 0.08)
+        self.assertAlmostEqual(args.descriptor_uncertainty_weight, 0.05)
+        self.assertAlmostEqual(args.no_match_prior_weight, 0.08)
+        self.assertAlmostEqual(args.rotation_descriptor_consistency_weight, 0.03)
         self.assertEqual(args.report_matcher_mode, "graph_matcher")
         self.assertEqual(args.report_graph_inference_preset, "fast")
 
@@ -2977,6 +2990,62 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(metrics["points"], 0.0)
         self.assertEqual(metrics["pseudo_label_points"], 0.0)
         self.assertEqual(metrics["pseudo_keypoint_points"], 6.0)
+
+    def test_train_step_allows_synthetic_keypoint_only_updates(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[Path("pair_a.pt")]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2) * parameter,
+                    torch.ones(1, 1, 2, 2) * parameter,
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "descriptor_map_pair_loss") as descriptor_loss,
+            mock.patch.object(train, "heatmap_point_loss", return_value=parameter * 2.0) as heatmap_loss,
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [Path("pair_a.pt")],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.25,
+                synthetic_loss_weight=0.0,
+                keypoint_weight=0.5,
+                keypoint_negative_weight=0.02,
+            )
+
+        descriptor_loss.assert_not_called()
+        self.assertEqual(heatmap_loss.call_count, 2)
+        self.assertAlmostEqual(float(parameter.detach()), 0.8, places=5)
+        self.assertEqual(metrics["points"], 2.0)
+        self.assertEqual(metrics["keypoint_points"], 4.0)
+        self.assertAlmostEqual(metrics["keypoint_loss"], 4.0)
 
     def test_train_step_adds_weighted_false_match_loss(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))
