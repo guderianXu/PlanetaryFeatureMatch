@@ -1698,6 +1698,29 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 1.0)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA autocast is required for this regression test")
+    def test_graph_matcher_stop_confidence_loss_is_safe_under_cuda_autocast(self):
+        logits = torch.zeros(4, 4, device="cuda")
+        logits[:3, :3] = torch.tensor(
+            [
+                [3.0, 0.1, -2.0],
+                [0.2, 3.2, -2.0],
+                [-2.0, -2.0, 0.0],
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long, device="cuda"),
+            scores=torch.empty((0,), dtype=torch.float32, device="cuda"),
+        )
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            loss = train.graph_matcher_stop_confidence_loss(output, positive_count=2, safe_margin=0.5)
+
+        self.assertTrue(torch.isfinite(loss))
+
     def test_graph_matcher_correspondence_loss_can_return_lightglue_components(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
@@ -1727,6 +1750,17 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("graph_matcher_prune_ranking_loss", components)
         self.assertIn("graph_matcher_stop_confidence_loss", components)
         self.assertIn("graph_matcher_total_loss", components)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA autocast is required for this regression test")
+    def test_matchability_supervision_loss_is_safe_under_cuda_autocast(self):
+        score_map = torch.sigmoid(torch.randn(1, 1, 8, 8, device="cuda"))
+        positive_points = torch.tensor([[2.0, 3.0], [5.0, 6.0]], dtype=torch.float32, device="cuda")
+        negative_points = torch.tensor([[1.0, 1.0], [6.0, 2.0]], dtype=torch.float32, device="cuda")
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            loss = train.matchability_supervision_loss(score_map, positive_points, negative_points)
+
+        self.assertTrue(torch.isfinite(loss))
 
     def test_graph_matcher_raw_preservation_loss_penalizes_degraded_raw_margin(self):
         desc = torch.eye(3)

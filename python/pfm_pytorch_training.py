@@ -1855,7 +1855,7 @@ def graph_matcher_stop_confidence_loss(
     row_confidence = torch.softmax(pair_logits, dim=1).max(dim=1).values.mean()
     column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values.mean()
     confidence = torch.minimum(row_confidence, column_confidence).clamp(1.0e-6, 1.0 - 1.0e-6)
-    return F.binary_cross_entropy(confidence, target)
+    return _binary_cross_entropy_from_probabilities(confidence, target)
 
 
 def graph_matcher_raw_preservation_loss(
@@ -2001,6 +2001,14 @@ def heatmap_point_loss(
     return positive_loss + float(negative_weight) * heatmap.to(torch.float32).mean()
 
 
+def _binary_cross_entropy_from_probabilities(probabilities: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    probabilities_f32 = probabilities.to(torch.float32).clamp(1.0e-6, 1.0 - 1.0e-6)
+    targets_f32 = targets.to(device=probabilities_f32.device, dtype=torch.float32)
+    probabilities_f32, targets_f32 = torch.broadcast_tensors(probabilities_f32, targets_f32)
+    loss = -(targets_f32 * probabilities_f32.log() + (1.0 - targets_f32) * torch.log1p(-probabilities_f32))
+    return loss.mean()
+
+
 def _binary_map_point_loss(
     score_map: torch.Tensor,
     positive_points_xy: torch.Tensor,
@@ -2012,18 +2020,12 @@ def _binary_map_point_loss(
     if positive_points_xy.numel() > 0:
         positive_scores = sample_descriptors(score_map, positive_points_xy).reshape(-1).to(torch.float32)
         terms.append(
-            F.binary_cross_entropy(
-                positive_scores.clamp(1.0e-6, 1.0 - 1.0e-6),
-                torch.ones_like(positive_scores),
-            )
+            _binary_cross_entropy_from_probabilities(positive_scores, torch.ones_like(positive_scores))
         )
     if negative_points_xy is not None and negative_points_xy.numel() > 0:
         negative_scores = sample_descriptors(score_map, negative_points_xy).reshape(-1).to(torch.float32)
         terms.append(
-            F.binary_cross_entropy(
-                negative_scores.clamp(1.0e-6, 1.0 - 1.0e-6),
-                torch.zeros_like(negative_scores),
-            )
+            _binary_cross_entropy_from_probabilities(negative_scores, torch.zeros_like(negative_scores))
         )
     if not terms:
         return score_map.sum() * 0.0
