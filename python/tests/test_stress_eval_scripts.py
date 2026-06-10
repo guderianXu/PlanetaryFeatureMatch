@@ -26,6 +26,7 @@ from benchmark_lazy_pose_pairs import (
 import visualize_lazy_pose_matches as visual_mod
 import training_visual_report as training_report_mod
 import run_graph_depth_ablation as depth_ablation_mod
+import run_graph_filter_sweep as filter_sweep_mod
 from visualize_lazy_pose_matches import (
     LazyMatchVisual,
     filter_visual_matches,
@@ -67,6 +68,11 @@ class StressEvalScriptsTest(unittest.TestCase):
             graph_width_prune_keep_ratio=0.75,
             graph_width_prune_min_score=-1.0,
             graph_early_stop_min_confidence=-1.0,
+            graph_dustbin_delta=0.1,
+            graph_acceptance_margin=0.2,
+            graph_min_raw_score=0.3,
+            graph_min_raw_margin=0.04,
+            graph_min_accept_probability=0.7,
             filtered_geometry_filter="local",
             filtered_min_margin=0.02,
             filtered_min_score=-1.0,
@@ -99,6 +105,16 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(command[command.index("--graph-max-attention-work-fraction") + 1], "0.5")
         self.assertIn("--graph-width-prune-keep-ratio", command)
         self.assertEqual(command[command.index("--graph-width-prune-keep-ratio") + 1], "0.75")
+        self.assertIn("--graph-dustbin-delta", command)
+        self.assertEqual(command[command.index("--graph-dustbin-delta") + 1], "0.1")
+        self.assertIn("--graph-acceptance-margin", command)
+        self.assertEqual(command[command.index("--graph-acceptance-margin") + 1], "0.2")
+        self.assertIn("--graph-min-raw-score", command)
+        self.assertEqual(command[command.index("--graph-min-raw-score") + 1], "0.3")
+        self.assertIn("--graph-min-raw-margin", command)
+        self.assertEqual(command[command.index("--graph-min-raw-margin") + 1], "0.04")
+        self.assertIn("--graph-min-accept-probability", command)
+        self.assertEqual(command[command.index("--graph-min-accept-probability") + 1], "0.7")
 
     def test_training_visual_report_parse_args_accepts_lightglue_graph_options(self) -> None:
         argv = [
@@ -153,6 +169,16 @@ class StressEvalScriptsTest(unittest.TestCase):
             "0.5",
             "--graph-width-prune-keep-ratio",
             "0.75",
+            "--graph-dustbin-delta",
+            "0.1",
+            "--graph-acceptance-margin",
+            "0.2",
+            "--graph-min-raw-score",
+            "0.3",
+            "--graph-min-raw-margin",
+            "0.04",
+            "--graph-min-accept-probability",
+            "0.7",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -161,6 +187,136 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.graph_max_attention_layers, 2)
         self.assertEqual(args.graph_max_attention_work_fraction, 0.5)
         self.assertEqual(args.graph_width_prune_keep_ratio, 0.75)
+        self.assertEqual(args.graph_dustbin_delta, 0.1)
+        self.assertEqual(args.graph_acceptance_margin, 0.2)
+        self.assertEqual(args.graph_min_raw_score, 0.3)
+        self.assertEqual(args.graph_min_raw_margin, 0.04)
+        self.assertEqual(args.graph_min_accept_probability, 0.7)
+
+    def test_graph_filter_sweep_builds_visual_command(self) -> None:
+        config = filter_sweep_mod.GraphFilterConfig(
+            min_score=0.05,
+            dustbin_delta=0.1,
+            acceptance_margin=0.2,
+            min_raw_score=0.3,
+            min_raw_margin=0.04,
+            min_accept_probability=0.7,
+        )
+        args = SimpleNamespace(
+            render_manifest=Path("render.csv"),
+            uint8_manifest=Path("uint8.csv"),
+            pytorch_state=Path("model.pt"),
+            run_dir=None,
+            metrics_csv=None,
+            split="train",
+            reference_variant="nadir",
+            pair_mode="spatial-index",
+            image_source="uint8",
+            candidate_pairs=12,
+            select_count=4,
+            seed=7,
+            crop_size=2048,
+            max_image_size=768,
+            device="cuda",
+            descriptor_mode="learned",
+            keypoint_score_mode="learned",
+            max_keypoints=512,
+            max_matches=0,
+            draw_matches=0,
+            threshold_px=5.0,
+            graph_max_attention_layers=2,
+            graph_max_attention_work_fraction=1.0,
+            graph_width_prune_keep_ratio=1.0,
+            graph_width_prune_min_score=-1.0,
+            graph_early_stop_min_confidence=-1.0,
+            filtered_geometry_filter="local",
+            filtered_min_margin=0.02,
+            filtered_min_score=-1.0,
+            filtered_max_matches=0,
+            filtered_draw_matches=0,
+            pair_spec_manifest=Path("pairs.csv"),
+            target_variant=["mid_01"],
+            cross_pair_variant=["mid_01"],
+            cross_camera_offsets="1,3",
+            cross_fov_offsets="0,2",
+            pair_type_weights="same_position_view=0,cross_camera=1,cross_fov=0",
+            spatial_index_height_km="100",
+            spatial_index_planet_radius_m=3396190.0,
+            spatial_index_footprint_samples=5,
+            spatial_index_margin_m=2000.0,
+            shuffle=True,
+            filtered_report=True,
+            filtered_mutual=True,
+            illumination_stress=False,
+            input_local_contrast=False,
+            input_local_contrast_strength=0.0,
+            input_local_contrast_kernel=31,
+        )
+
+        command = filter_sweep_mod.build_visual_command(args, config=config, report_dir=Path("out/cfg"))
+
+        self.assertIn("--min-score", command)
+        self.assertEqual(command[command.index("--min-score") + 1], "0.05")
+        self.assertIn("--graph-dustbin-delta", command)
+        self.assertEqual(command[command.index("--graph-dustbin-delta") + 1], "0.1")
+        self.assertIn("--graph-acceptance-margin", command)
+        self.assertEqual(command[command.index("--graph-acceptance-margin") + 1], "0.2")
+        self.assertIn("--graph-min-raw-score", command)
+        self.assertEqual(command[command.index("--graph-min-raw-score") + 1], "0.3")
+        self.assertIn("--graph-min-raw-margin", command)
+        self.assertEqual(command[command.index("--graph-min-raw-margin") + 1], "0.04")
+        self.assertIn("--graph-min-accept-probability", command)
+        self.assertEqual(command[command.index("--graph-min-accept-probability") + 1], "0.7")
+
+    def test_graph_filter_sweep_parses_float_lists_and_slugs_config(self) -> None:
+        self.assertEqual(filter_sweep_mod.parse_float_list("-1,0.05,0.5"), [-1.0, 0.05, 0.5])
+        config = filter_sweep_mod.GraphFilterConfig(
+            min_score=0.05,
+            dustbin_delta=-0.1,
+            acceptance_margin=0.2,
+            min_raw_score=-1.0,
+            min_raw_margin=0.04,
+            min_accept_probability=0.7,
+        )
+
+        self.assertEqual(
+            filter_sweep_mod.slug_for_config(config),
+            "score0p05_dustneg0p1_accept0p2_rawneg1_margin0p04_prob0p7",
+        )
+
+    def test_graph_filter_sweep_summarizes_raw_and_filtered_reports(self) -> None:
+        config = filter_sweep_mod.GraphFilterConfig(
+            min_score=0.05,
+            dustbin_delta=0.1,
+            acceptance_margin=0.2,
+            min_raw_score=0.3,
+            min_raw_margin=0.04,
+            min_accept_probability=0.7,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            report_dir = Path(temp)
+            (report_dir / "summary.csv").write_text(
+                "label,matches,correct,wrong,precision,median_error_px\n"
+                "a,10,7,3,0.700000,2.5\n"
+                "b,5,2,3,0.400000,9.0\n",
+                encoding="utf-8",
+            )
+            (report_dir / "filtered_summary.csv").write_text(
+                "label,matches,correct,wrong,precision,median_error_px\n"
+                "a,4,4,0,1.000000,1.5\n",
+                encoding="utf-8",
+            )
+
+            summary = filter_sweep_mod.summarize_report(report_dir, config=config)
+
+        self.assertEqual(summary.raw_rows, 2)
+        self.assertEqual(summary.raw_matches, 15)
+        self.assertEqual(summary.raw_correct, 9)
+        self.assertAlmostEqual(summary.raw_precision, 0.6)
+        self.assertEqual(summary.filtered_rows, 1)
+        self.assertEqual(summary.filtered_matches, 4)
+        self.assertEqual(summary.filtered_correct, 4)
+        self.assertAlmostEqual(summary.filtered_precision, 1.0)
 
     def test_lazy_visual_parse_args_defaults_to_filtered_all_match_report(self) -> None:
         argv = [

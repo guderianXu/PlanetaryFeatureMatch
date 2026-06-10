@@ -167,6 +167,11 @@ def compute_visual(
     max_matches: int,
     min_score: float,
     min_margin: float,
+    graph_dustbin_delta: float,
+    graph_acceptance_margin: float,
+    graph_min_raw_score: float,
+    graph_min_raw_margin: float,
+    graph_min_accept_probability: float,
     graph_width_prune_min_score: float,
     graph_early_stop_min_confidence: float,
     graph_max_attention_layers: int,
@@ -243,6 +248,11 @@ def compute_visual(
                 keypoints_b,
                 max_matches=max_matches,
                 min_score=min_score,
+                graph_dustbin_delta=graph_dustbin_delta,
+                graph_acceptance_margin=graph_acceptance_margin,
+                graph_min_raw_score=graph_min_raw_score,
+                graph_min_raw_margin=graph_min_raw_margin,
+                graph_min_accept_probability=graph_min_accept_probability,
                 graph_width_prune_min_score=graph_width_prune_min_score,
                 graph_early_stop_min_confidence=graph_early_stop_min_confidence,
                 graph_max_attention_layers=graph_max_attention_layers,
@@ -961,6 +971,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draw-matches", type=int, default=0)
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
+    parser.add_argument("--graph-dustbin-delta", type=float, default=0.0)
+    parser.add_argument("--graph-acceptance-margin", type=float, default=0.0)
+    parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
+    parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
+    parser.add_argument("--graph-min-accept-probability", type=float, default=-1.0)
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
@@ -991,6 +1006,14 @@ def main() -> int:
         raise ValueError("--filtered-max-matches must be nonnegative; use 0 to keep all matches")
     if args.filtered_draw_matches < 0:
         raise ValueError("--filtered-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.graph_acceptance_margin < 0.0:
+        raise ValueError("--graph-acceptance-margin must be nonnegative")
+    if args.graph_min_raw_score < -1.0:
+        raise ValueError("--graph-min-raw-score must be at least -1.0; -1 disables this filter")
+    if args.graph_min_raw_margin < 0.0:
+        raise ValueError("--graph-min-raw-margin must be nonnegative")
+    if args.graph_min_accept_probability < -1.0 or args.graph_min_accept_probability > 1.0:
+        raise ValueError("--graph-min-accept-probability must be in [-1, 1]")
     if args.graph_width_prune_min_score < -1.0:
         raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.graph_early_stop_min_confidence < -1.0:
@@ -1057,6 +1080,11 @@ def main() -> int:
                 max_matches=args.max_matches,
                 min_score=args.min_score,
                 min_margin=args.min_margin,
+                graph_dustbin_delta=args.graph_dustbin_delta,
+                graph_acceptance_margin=args.graph_acceptance_margin,
+                graph_min_raw_score=args.graph_min_raw_score,
+                graph_min_raw_margin=args.graph_min_raw_margin,
+                graph_min_accept_probability=args.graph_min_accept_probability,
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
                 graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                 graph_max_attention_layers=args.graph_max_attention_layers,
@@ -1119,6 +1147,11 @@ def main() -> int:
                     max_matches=args.filtered_max_matches,
                     min_score=args.filtered_min_score,
                     min_margin=args.filtered_min_margin,
+                    graph_dustbin_delta=args.graph_dustbin_delta,
+                    graph_acceptance_margin=args.graph_acceptance_margin,
+                    graph_min_raw_score=args.graph_min_raw_score,
+                    graph_min_raw_margin=args.graph_min_raw_margin,
+                    graph_min_accept_probability=args.graph_min_accept_probability,
                     graph_width_prune_min_score=args.graph_width_prune_min_score,
                     graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                     graph_max_attention_layers=args.graph_max_attention_layers,
@@ -1177,6 +1210,11 @@ def main() -> int:
         "evaluated": len(all_results),
         "skipped": skipped,
         "graph_inference": {
+            "graph_dustbin_delta": float(args.graph_dustbin_delta),
+            "graph_acceptance_margin": float(args.graph_acceptance_margin),
+            "graph_min_raw_score": float(args.graph_min_raw_score),
+            "graph_min_raw_margin": float(args.graph_min_raw_margin),
+            "graph_min_accept_probability": float(args.graph_min_accept_probability),
             "graph_width_prune_min_score": float(args.graph_width_prune_min_score),
             "graph_early_stop_min_confidence": float(args.graph_early_stop_min_confidence),
             "graph_max_attention_layers": int(args.graph_max_attention_layers),
@@ -1224,6 +1262,11 @@ def main() -> int:
                         max_matches=args.max_matches,
                         min_score=args.min_score,
                         min_margin=args.min_margin,
+                        graph_dustbin_delta=args.graph_dustbin_delta,
+                        graph_acceptance_margin=args.graph_acceptance_margin,
+                        graph_min_raw_score=args.graph_min_raw_score,
+                        graph_min_raw_margin=args.graph_min_raw_margin,
+                        graph_min_accept_probability=args.graph_min_accept_probability,
                         graph_width_prune_min_score=args.graph_width_prune_min_score,
                         graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
                         graph_max_attention_layers=args.graph_max_attention_layers,

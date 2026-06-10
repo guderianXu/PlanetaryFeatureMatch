@@ -13,7 +13,7 @@ PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python s
 | 脚本 | 用途 | 保留原因 |
 | --- | --- | --- |
 | `benchmark_lazy_pose_pairs.py` | 从 pose render manifest 在线构造训练 pair；`--pair-mode spatial-index --spatial-index-height-km 100,250` 用 TSAI 相机 footprint 建空间索引并只纳入 100/250km 高度，`overlap-list --overlap-scan-all` 可生成固定重叠边 CSV，`--overlap-resume` 可在已有边/metrics CSV 后续跑，`train` 模式可用 `--pair-spec-manifest` 直接读取。 | 当前全量训练主入口，dashboard 训练也围绕它读取指标。 |
-| `visualize_lazy_pose_matches.py` | 对 lazy pose pair 和 checkpoint 生成代表性匹配连线图。 | 训练结束自动报告和历史训练页依赖它。 |
+| `visualize_lazy_pose_matches.py` | 对 lazy pose pair 和 checkpoint 生成代表性匹配连线图；GraphMatcher 模式支持 `--graph-dustbin-delta`、`--graph-acceptance-margin`、`--graph-min-raw-score`、`--graph-min-raw-margin`、`--graph-min-accept-probability` 等推理过滤阈值。 | 训练结束自动报告、历史训练页和阈值扫描依赖它。 |
 | `watch_lazy_visual_report.py` | 等待训练 checkpoint 出现后自动触发 lazy 可视化报告。 | 长训练过程中自动补图使用。 |
 | `training_visual_report.py` | 对已有 cache/checkpoint 生成训练曲线、直方图、匹配图和 HTML/PDF 报告。 | 历史训练可视化和诊断主入口。 |
 
@@ -45,6 +45,7 @@ PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python s
 | `continuous_rotation_stress_eval.py` | 连续角度旋转压力测试。 | 检查非 90 度旋转适应性。 |
 | `run_graph_matcher_mode_report.py` | 用命名 GraphMatcher profile 生成报告。 | 快速复现某个 graph matcher 配置。 |
 | `run_graph_depth_ablation.py` | 固定 lazy pair、checkpoint 和 visual 参数，扫描 `--graph-max-attention-layers` 并汇总每层报告。 | P1-A 用于检查“训练 2 层、推理更多层”是否造成匹配退化，是当前稳定训练主链诊断工具。 |
+| `run_graph_filter_sweep.py` | 固定 lazy pair、checkpoint 和 visual 参数，扫描 GraphMatcher 后处理阈值组合，输出 `graph_filter_sweep_summary.csv` 和 `index.html`，每个配置子目录保留完整 visual report。 | 用于区分“模型本身错配/拒配”和“推理过滤阈值不合适”，是稳定训练后的首选后处理诊断工具。 |
 | `sweep_graph_inference_configs.py` | 扫 graph inference 阈值并生成 HTML 汇总。 | 调整 graph 推理速度/精度折中。 |
 | `stratify_graph_match_errors.py` | 按难度、失败类型汇总 GraphMatcher 报告 CSV。 | 训练后错误归因。 |
 
