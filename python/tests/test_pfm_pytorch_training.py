@@ -1698,6 +1698,32 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 1.0)
 
+    def test_graph_matcher_dustbin_diagnostics_detects_rejected_true_matches(self):
+        logits = torch.zeros(4, 4)
+        logits[:3, :3] = torch.tensor(
+            [
+                [0.1, -1.0, -1.0],
+                [-1.0, 0.2, -1.0],
+                [-1.0, -1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        logits[0, 3] = 2.0
+        logits[1, 3] = 2.0
+        logits[3, 0] = 1.5
+        logits[3, 1] = 1.5
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+        )
+
+        metrics = train.graph_matcher_dustbin_diagnostics(output, positive_count=2)
+
+        self.assertAlmostEqual(metrics["true_match_rejected_by_dustbin_ratio"], 1.0)
+        self.assertLess(metrics["positive_vs_dustbin_margin_mean"], 0.0)
+        self.assertGreater(metrics["dustbin_prob_for_true_match_mean"], metrics["true_pair_prob_mean"])
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA autocast is required for this regression test")
     def test_graph_matcher_stop_confidence_loss_is_safe_under_cuda_autocast(self):
         logits = torch.zeros(4, 4, device="cuda")
@@ -1750,6 +1776,8 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("graph_matcher_prune_ranking_loss", components)
         self.assertIn("graph_matcher_stop_confidence_loss", components)
         self.assertIn("graph_matcher_total_loss", components)
+        self.assertIn("true_match_rejected_by_dustbin_ratio", components)
+        self.assertIn("positive_vs_dustbin_margin_mean", components)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA autocast is required for this regression test")
     def test_matchability_supervision_loss_is_safe_under_cuda_autocast(self):

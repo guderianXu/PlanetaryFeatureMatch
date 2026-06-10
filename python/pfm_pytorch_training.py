@@ -79,6 +79,15 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
     "graph_matcher_extra_no_match_points",
+    "true_match_rejected_by_dustbin_ratio",
+    "positive_pair_logit_mean",
+    "positive_dustbin_logit_mean",
+    "positive_vs_dustbin_margin_mean",
+    "positive_vs_dustbin_margin_median",
+    "positive_vs_dustbin_margin_p10",
+    "positive_vs_dustbin_margin_below0_ratio",
+    "true_pair_prob_mean",
+    "dustbin_prob_for_true_match_mean",
 )
 RELIABILITY_LOSS_METRIC_KEYS = (
     "matchability_loss",
@@ -1474,8 +1483,9 @@ def graph_matcher_correspondence_loss(
         attention_work_fraction: torch.Tensor,
         positive_pairs: torch.Tensor,
         extra_no_match_points: torch.Tensor,
+        dustbin_diagnostics: dict[str, float] | None = None,
     ) -> dict[str, torch.Tensor]:
-        return {
+        result = {
             "graph_matcher_total_loss": total_loss,
             "graph_matcher_ce_loss": ce_loss,
             "graph_matcher_assignment_loss": assignment_loss,
@@ -1490,6 +1500,19 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_positive_pairs": positive_pairs,
             "graph_matcher_extra_no_match_points": extra_no_match_points,
         }
+        for key in (
+            "true_match_rejected_by_dustbin_ratio",
+            "positive_pair_logit_mean",
+            "positive_dustbin_logit_mean",
+            "positive_vs_dustbin_margin_mean",
+            "positive_vs_dustbin_margin_median",
+            "positive_vs_dustbin_margin_p10",
+            "positive_vs_dustbin_margin_below0_ratio",
+            "true_pair_prob_mean",
+            "dustbin_prob_for_true_match_mean",
+        ):
+            result[key] = total_loss.new_tensor(float((dustbin_diagnostics or {}).get(key, 0.0)))
+        return result
 
     if (
         not math.isfinite(float(max_attention_work_fraction))
@@ -1715,6 +1738,7 @@ def graph_matcher_correspondence_loss(
         attention_work_fraction = output.logits.new_tensor(float(getattr(output, "attention_work_fraction", 0.0)))
         positive_pairs = output.logits.new_tensor(float(count))
         extra_no_match_points = output.logits.new_tensor(float(extra_no_match_count))
+        dustbin_diagnostics = graph_matcher_dustbin_diagnostics(output, positive_count=count)
         return loss, components(
             loss,
             match_ce_loss,
@@ -1729,6 +1753,7 @@ def graph_matcher_correspondence_loss(
             attention_work_fraction,
             positive_pairs,
             extra_no_match_points,
+            dustbin_diagnostics,
         )
     return loss
 
@@ -1856,6 +1881,52 @@ def graph_matcher_stop_confidence_loss(
     column_confidence = torch.softmax(pair_logits, dim=0).max(dim=0).values.mean()
     confidence = torch.minimum(row_confidence, column_confidence).clamp(1.0e-6, 1.0 - 1.0e-6)
     return _binary_cross_entropy_from_probabilities(confidence, target)
+
+
+def graph_matcher_dustbin_diagnostics(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+) -> dict[str, float]:
+    count = min(int(positive_count), output.logits.size(0) - 1, output.logits.size(1) - 1)
+    if count <= 0:
+        return {
+            "true_match_rejected_by_dustbin_ratio": 0.0,
+            "positive_pair_logit_mean": 0.0,
+            "positive_dustbin_logit_mean": 0.0,
+            "positive_vs_dustbin_margin_mean": 0.0,
+            "positive_vs_dustbin_margin_median": 0.0,
+            "positive_vs_dustbin_margin_p10": 0.0,
+            "positive_vs_dustbin_margin_below0_ratio": 0.0,
+            "true_pair_prob_mean": 0.0,
+            "dustbin_prob_for_true_match_mean": 0.0,
+        }
+    device = output.logits.device
+    indices = torch.arange(count, device=device)
+    pair_logits = output.logits[:count, :count]
+    true_logits = pair_logits.diagonal().to(torch.float32)
+    row_dustbin = output.logits[:count, output.logits.size(1) - 1].to(torch.float32)
+    col_dustbin = output.logits[output.logits.size(0) - 1, :count].to(torch.float32)
+    strongest_dustbin = torch.maximum(row_dustbin, col_dustbin)
+    margin = true_logits - strongest_dustbin
+    row_prob = torch.softmax(output.logits[:count, :], dim=1)
+    col_prob = torch.softmax(output.logits[:, :count], dim=0)
+    true_pair_prob = row_prob[indices, indices].to(torch.float32)
+    dustbin_prob = torch.maximum(row_prob[:, -1], col_prob[-1, :]).to(torch.float32)
+    sorted_margin = margin.sort().values
+    p10_index = min(sorted_margin.numel() - 1, max(0, int(math.floor((sorted_margin.numel() - 1) * 0.10))))
+    rejected = margin.lt(0.0).to(torch.float32)
+    return {
+        "true_match_rejected_by_dustbin_ratio": float(rejected.mean().detach().cpu()),
+        "positive_pair_logit_mean": float(true_logits.mean().detach().cpu()),
+        "positive_dustbin_logit_mean": float(strongest_dustbin.mean().detach().cpu()),
+        "positive_vs_dustbin_margin_mean": float(margin.mean().detach().cpu()),
+        "positive_vs_dustbin_margin_median": float(margin.median().detach().cpu()),
+        "positive_vs_dustbin_margin_p10": float(sorted_margin[p10_index].detach().cpu()),
+        "positive_vs_dustbin_margin_below0_ratio": float(rejected.mean().detach().cpu()),
+        "true_pair_prob_mean": float(true_pair_prob.mean().detach().cpu()),
+        "dustbin_prob_for_true_match_mean": float(dustbin_prob.mean().detach().cpu()),
+    }
 
 
 def graph_matcher_raw_preservation_loss(
