@@ -353,6 +353,46 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.visual_matcher_mode, "graph_matcher")
         self.assertEqual(args.visual_keypoint_score_mode, "learned")
 
+    def test_parse_args_accepts_training_stability_controls(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--stability-window",
+            "300",
+            "--stability-min-steps",
+            "1500",
+            "--stability-max-nan-in-window",
+            "10",
+            "--stability-min-top1-mean",
+            "0.35",
+            "--stability-max-loss-multiplier",
+            "2.5",
+            "--stability-min-match-score",
+            "-0.25",
+            "--save-best-checkpoints",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertEqual(args.stability_window, 300)
+        self.assertEqual(args.stability_min_steps, 1500)
+        self.assertEqual(args.stability_max_nan_in_window, 10)
+        self.assertAlmostEqual(args.stability_min_top1_mean, 0.35)
+        self.assertAlmostEqual(args.stability_max_loss_multiplier, 2.5)
+        self.assertAlmostEqual(args.stability_min_match_score, -0.25)
+        self.assertTrue(args.save_best_checkpoints)
+
+    def test_graph_matcher_dustbin_diagnostic_fields_are_declared_for_training_logs(self) -> None:
+        self.assertIn("true_match_rejected_by_dustbin_ratio", lazy_bench.GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS)
+        self.assertIn("positive_vs_dustbin_margin_mean", lazy_bench.GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS)
+        self.assertIn("dustbin_prob_for_true_match_mean", lazy_bench.GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS)
+
     def test_parse_args_accepts_multiple_render_and_uint8_manifests(self) -> None:
         argv = [
             "benchmark_lazy_pose_pairs.py",

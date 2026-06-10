@@ -60,6 +60,11 @@ from pfm_pytorch_training import (  # noqa: E402
     read_false_match_labels,
     train_step,
 )
+from pfm_training_stability import (  # noqa: E402
+    StabilityThresholds,
+    TrainingStabilityTracker,
+    finite_float,
+)
 
 
 DEFAULT_TARGET_VARIANTS = (
@@ -79,6 +84,38 @@ PAIR_TYPE_CROSS_CAMERA = "cross_camera"
 PAIR_TYPE_CROSS_FOV = "cross_fov"
 PAIR_TYPES = (PAIR_TYPE_SAME_POSITION_VIEW, PAIR_TYPE_CROSS_CAMERA, PAIR_TYPE_CROSS_FOV)
 PAIR_TYPE_METRIC_FIELDS = [f"pair_type_{pair_type}" for pair_type in PAIR_TYPES]
+GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
+    "true_match_rejected_by_dustbin_ratio",
+    "positive_pair_logit_mean",
+    "positive_dustbin_logit_mean",
+    "positive_vs_dustbin_margin_mean",
+    "positive_vs_dustbin_margin_median",
+    "positive_vs_dustbin_margin_p10",
+    "positive_vs_dustbin_margin_below0_ratio",
+    "true_pair_prob_mean",
+    "dustbin_prob_for_true_match_mean",
+)
+RELIABILITY_METRIC_FIELDS = (
+    "matchability_weight",
+    "descriptor_uncertainty_weight",
+    "no_match_prior_weight",
+    "reliability_negative_points",
+    "rotation_descriptor_consistency_weight",
+    "orientation_consistency_weight",
+    "scale_consistency_weight",
+    "affine_consistency_weight",
+    "matchability_loss",
+    "descriptor_uncertainty_loss",
+    "no_match_prior_loss",
+    "rotation_descriptor_consistency_loss",
+    "orientation_consistency_loss",
+    "scale_consistency_loss",
+    "affine_consistency_loss",
+)
+STABILITY_METRIC_FIELDS = (
+    "stability_match_score",
+    "stability_stop_reason",
+)
 DEFAULT_PAIR_TYPE_WEIGHTS = {
     PAIR_TYPE_SAME_POSITION_VIEW: 0.40,
     PAIR_TYPE_CROSS_CAMERA: 0.35,
@@ -2536,12 +2573,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_attention_work_fraction",
         "graph_matcher_positive_pairs",
         "graph_matcher_extra_no_match_points",
+        *GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS,
         "abstention_weight",
         "inline_false_match_mining",
         "illumination_consistency_weight",
         "illumination_consistency_probability",
         "illumination_match_weight",
         "illumination_match_probability",
+        *RELIABILITY_METRIC_FIELDS,
+        *STABILITY_METRIC_FIELDS,
         "gpu_util_percent",
         "gpu_mem_used_mib",
         "gpu_mem_total_mib",
@@ -2621,6 +2661,26 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             sample_interval_s=args.gpu_sample_interval_s,
         )
         gpu_monitor.start()
+
+    stability_tracker = TrainingStabilityTracker(
+        thresholds=StabilityThresholds(
+            min_steps_before_early_stop=args.stability_min_steps,
+            rolling_window=args.stability_window,
+            max_nan_in_window=args.stability_max_nan_in_window,
+            max_loss_multiplier=args.stability_max_loss_multiplier,
+            min_top1_mean=args.stability_min_top1_mean,
+            min_match_score=args.stability_min_match_score,
+        )
+    )
+    checkpoint_dir = args.output_dir / "checkpoints"
+    best_match_score = -float("inf")
+    best_loss = float("inf")
+    best_by_match_checkpoint_path: Path | None = None
+    best_by_loss_checkpoint_path: Path | None = None
+    last_good_checkpoint_path: Path | None = None
+    stopped_early_reason = ""
+    stopped_early_step = 0
+    crash_report_path: Path | None = None
 
     start = time.perf_counter()
     try:
@@ -2888,6 +2948,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_extra_no_match_points": (
                     f"{metrics.get('graph_matcher_extra_no_match_points', 0.0):.0f}"
                 ),
+                **{name: f"{metrics.get(name, 0.0):.6f}" for name in GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS},
                 "abstention_weight": f"{args.abstention_weight:.6f}",
                 "inline_false_match_mining": int(args.inline_false_match_mining),
                 "illumination_consistency_weight": f"{args.illumination_consistency_weight:.6f}",
@@ -2913,6 +2974,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "affine_consistency_loss": f"{metrics.get('affine_consistency_loss', 0.0):.6f}",
                 **gpu,
             }
+            stability_decision = stability_tracker.update(step, row)
+            stability_match_score = stability_tracker.match_score(row)
+            row["stability_match_score"] = f"{stability_match_score:.6f}"
+            row["stability_stop_reason"] = stability_decision.reason
             rows.append(row)
             metrics_writer.write(row)
             if step == 1 or step % max(1, args.progress_every) == 0:
@@ -2928,7 +2993,47 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     flush=True,
                 )
             if args.save_every_steps > 0 and step % args.save_every_steps == 0:
-                _save_training_state(args.output_dir / "checkpoints" / "latest_pytorch_pfm_state.pt", model, args, step)
+                _save_training_state(checkpoint_dir / "latest_pytorch_pfm_state.pt", model, args, step)
+                if args.save_best_checkpoints and stability_decision.should_save_last_good:
+                    last_good_checkpoint_path = checkpoint_dir / "last_good_pytorch_pfm_state.pt"
+                    _save_training_state(last_good_checkpoint_path, model, args, step)
+            if args.save_best_checkpoints:
+                loss_value = finite_float(row.get("loss"))
+                if loss_value is not None and loss_value < best_loss:
+                    best_loss = loss_value
+                    best_by_loss_checkpoint_path = checkpoint_dir / "best_by_val_loss_pytorch_pfm_state.pt"
+                    _save_training_state(best_by_loss_checkpoint_path, model, args, step)
+                if stability_match_score > best_match_score:
+                    best_match_score = stability_match_score
+                    best_by_match_checkpoint_path = checkpoint_dir / "best_by_match_score_pytorch_pfm_state.pt"
+                    _save_training_state(best_by_match_checkpoint_path, model, args, step)
+            if stability_decision.should_stop:
+                stopped_early_reason = stability_decision.reason
+                stopped_early_step = step
+                crash_report_path = args.output_dir / "crash_report.json"
+                crash_report = {
+                    "stopped_early": True,
+                    "step": step,
+                    "reason": stopped_early_reason,
+                    "latest_metrics": row,
+                    "thresholds": vars(stability_tracker.thresholds),
+                    "best_match_score": best_match_score if math.isfinite(best_match_score) else None,
+                    "best_loss": best_loss if math.isfinite(best_loss) else None,
+                    "best_by_match_score_checkpoint": str(best_by_match_checkpoint_path or ""),
+                    "best_by_val_loss_checkpoint": str(best_by_loss_checkpoint_path or ""),
+                    "last_good_checkpoint": str(last_good_checkpoint_path or ""),
+                    "argv": sys.argv,
+                }
+                crash_report_path.write_text(
+                    json.dumps(crash_report, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                print(
+                    f"early stop at step={step} reason={stopped_early_reason} "
+                    f"crash_report={crash_report_path}",
+                    flush=True,
+                )
+                break
     finally:
         metrics_writer.close()
         if false_match_handle is not None:
@@ -2974,7 +3079,28 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "gpu_monitor_enabled": bool(gpu_monitor is not None),
         "gpu_sample_interval_s": float(args.gpu_sample_interval_s),
         "last_gpu": gpu_monitor.latest() if gpu_monitor is not None else _gpu_snapshot(),
+        "stopped_early": bool(stopped_early_reason),
+        "stopped_early_step": stopped_early_step,
+        "stop_reason": stopped_early_reason,
+        "best_match_score": best_match_score if math.isfinite(best_match_score) else None,
+        "best_loss": best_loss if math.isfinite(best_loss) else None,
+        "best_by_match_score_checkpoint": str(best_by_match_checkpoint_path or ""),
+        "best_by_val_loss_checkpoint": str(best_by_loss_checkpoint_path or ""),
+        "last_good_checkpoint": str(last_good_checkpoint_path or ""),
+        "crash_report": str(crash_report_path or ""),
     }
+    final_step = int(rows[-1]["step"]) if rows else 0
+    checkpoint_path = args.output_dir / "pytorch_pfm_state.pt"
+    _save_training_state(checkpoint_path, model, args, final_step)
+    summary["checkpoint"] = str(checkpoint_path)
+    report_checkpoint_path = best_by_match_checkpoint_path or checkpoint_path
+    summary["visual_report_checkpoint"] = str(report_checkpoint_path)
+    if device.type == "cuda":
+        model.to("cpu")
+        torch.cuda.empty_cache()
+    report_dir = _run_visual_report(args, report_checkpoint_path)
+    if report_dir is not None:
+        summary["visual_report"] = str(report_dir / "index.html")
     _write_rows(
         args.output_dir / "train_metrics.csv",
         rows,
@@ -2988,15 +3114,6 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         summary=summary,
         rows=rows,
     )
-    checkpoint_path = args.output_dir / "pytorch_pfm_state.pt"
-    _save_training_state(checkpoint_path, model, args, args.steps)
-    summary["checkpoint"] = str(checkpoint_path)
-    if device.type == "cuda":
-        model.to("cpu")
-        torch.cuda.empty_cache()
-    report_dir = _run_visual_report(args, checkpoint_path)
-    if report_dir is not None:
-        summary["visual_report"] = str(report_dir / "index.html")
     return summary
 
 
@@ -3133,6 +3250,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--progress-every", type=int, default=5)
     parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument("--save-best-checkpoints", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--stability-window", type=int, default=200)
+    parser.add_argument("--stability-min-steps", type=int, default=1000)
+    parser.add_argument("--stability-max-nan-in-window", type=int, default=20)
+    parser.add_argument("--stability-min-top1-mean", type=float, default=0.35)
+    parser.add_argument("--stability-max-loss-multiplier", type=float, default=3.0)
+    parser.add_argument("--stability-min-match-score", type=float, default=-0.5)
     parser.add_argument("--gpu-snapshot-every", type=int, default=25)
     parser.add_argument("--gpu-monitor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gpu-sample-interval-s", type=float, default=1.0)
@@ -3372,6 +3496,23 @@ def main() -> int:
         raise ValueError("--pair-spec-manifest is required in overlap-list mode")
     if args.overlap_start_index < 0:
         raise ValueError("--overlap-start-index must be nonnegative")
+    if args.save_every_steps < 0:
+        raise ValueError("--save-every-steps must be nonnegative")
+    if args.stability_window <= 0:
+        raise ValueError("--stability-window must be positive")
+    if args.stability_min_steps < 0:
+        raise ValueError("--stability-min-steps must be nonnegative")
+    if args.stability_max_nan_in_window < 0:
+        raise ValueError("--stability-max-nan-in-window must be nonnegative")
+    if not math.isfinite(float(args.stability_min_top1_mean)):
+        raise ValueError("--stability-min-top1-mean must be finite")
+    if (
+        not math.isfinite(float(args.stability_max_loss_multiplier))
+        or args.stability_max_loss_multiplier <= 0.0
+    ):
+        raise ValueError("--stability-max-loss-multiplier must be positive and finite")
+    if not math.isfinite(float(args.stability_min_match_score)):
+        raise ValueError("--stability-min-match-score must be finite")
     if args.spatial_index_planet_radius_m <= 0.0:
         raise ValueError("--spatial-index-planet-radius-m must be positive")
     if args.spatial_index_footprint_samples < 2:
