@@ -44,6 +44,7 @@ PYTHONPATH=python:scripts /home/xjw/.local/share/mamba/envs/plascan/bin/python s
 | `illumination_stress_eval.py` | 构造确定性光照变化，评估匹配鲁棒性。 | 分析光照不变性问题。 |
 | `continuous_rotation_stress_eval.py` | 连续角度旋转压力测试。 | 检查非 90 度旋转适应性。 |
 | `run_graph_matcher_mode_report.py` | 用命名 GraphMatcher profile 生成报告。 | 快速复现某个 graph matcher 配置。 |
+| `run_graph_depth_ablation.py` | 固定 lazy pair、checkpoint 和 visual 参数，扫描 `--graph-max-attention-layers` 并汇总每层报告。 | P1-A 用于检查“训练 2 层、推理更多层”是否造成匹配退化，是当前稳定训练主链诊断工具。 |
 | `sweep_graph_inference_configs.py` | 扫 graph inference 阈值并生成 HTML 汇总。 | 调整 graph 推理速度/精度折中。 |
 | `stratify_graph_match_errors.py` | 按难度、失败类型汇总 GraphMatcher 报告 CSV。 | 训练后错误归因。 |
 

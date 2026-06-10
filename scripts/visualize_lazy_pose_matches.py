@@ -169,6 +169,9 @@ def compute_visual(
     min_margin: float,
     graph_width_prune_min_score: float,
     graph_early_stop_min_confidence: float,
+    graph_max_attention_layers: int,
+    graph_max_attention_work_fraction: float,
+    graph_width_prune_keep_ratio: float,
     mutual: bool,
     geometry_filter: str,
     input_local_contrast: bool,
@@ -242,6 +245,9 @@ def compute_visual(
                 min_score=min_score,
                 graph_width_prune_min_score=graph_width_prune_min_score,
                 graph_early_stop_min_confidence=graph_early_stop_min_confidence,
+                graph_max_attention_layers=graph_max_attention_layers,
+                graph_max_attention_work_fraction=graph_max_attention_work_fraction,
+                graph_width_prune_keep_ratio=graph_width_prune_keep_ratio,
                 scores_a=row_scores_a,
                 scores_b=row_scores_b,
                 metadata_a=metadata_a,
@@ -957,6 +963,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-margin", type=float, default=0.0)
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
+    parser.add_argument("--graph-max-attention-layers", type=int, default=0)
+    parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
+    parser.add_argument("--graph-width-prune-keep-ratio", type=float, default=1.0)
     parser.add_argument("--mutual", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
@@ -986,6 +995,12 @@ def main() -> int:
         raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.graph_early_stop_min_confidence < -1.0:
         raise ValueError("--graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
+    if args.graph_max_attention_layers < 0:
+        raise ValueError("--graph-max-attention-layers must be nonnegative; use 0 to keep all graph layers")
+    if args.graph_max_attention_work_fraction < 0.0 or args.graph_max_attention_work_fraction > 1.0:
+        raise ValueError("--graph-max-attention-work-fraction must be in [0, 1]")
+    if args.graph_width_prune_keep_ratio < 0.0 or args.graph_width_prune_keep_ratio > 1.0:
+        raise ValueError("--graph-width-prune-keep-ratio must be in [0, 1]")
     if args.filtered_min_margin < 0.0:
         raise ValueError("--filtered-min-margin must be nonnegative")
     if args.input_local_contrast_strength < 0.0 or args.input_local_contrast_strength > 1.0:
@@ -1044,6 +1059,9 @@ def main() -> int:
                 min_margin=args.min_margin,
                 graph_width_prune_min_score=args.graph_width_prune_min_score,
                 graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
+                graph_max_attention_layers=args.graph_max_attention_layers,
+                graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
+                graph_width_prune_keep_ratio=args.graph_width_prune_keep_ratio,
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
                 input_local_contrast=args.input_local_contrast,
@@ -1103,6 +1121,9 @@ def main() -> int:
                     min_margin=args.filtered_min_margin,
                     graph_width_prune_min_score=args.graph_width_prune_min_score,
                     graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
+                    graph_max_attention_layers=args.graph_max_attention_layers,
+                    graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
+                    graph_width_prune_keep_ratio=args.graph_width_prune_keep_ratio,
                     mutual=args.filtered_mutual,
                     geometry_filter=args.filtered_geometry_filter,
                     input_local_contrast=args.input_local_contrast,
@@ -1155,6 +1176,13 @@ def main() -> int:
         "pair_type_counts": pair_type_counts,
         "evaluated": len(all_results),
         "skipped": skipped,
+        "graph_inference": {
+            "graph_width_prune_min_score": float(args.graph_width_prune_min_score),
+            "graph_early_stop_min_confidence": float(args.graph_early_stop_min_confidence),
+            "graph_max_attention_layers": int(args.graph_max_attention_layers),
+            "graph_max_attention_work_fraction": float(args.graph_max_attention_work_fraction),
+            "graph_width_prune_keep_ratio": float(args.graph_width_prune_keep_ratio),
+        },
     }
     (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     elapsed_s = time.perf_counter() - start
@@ -1198,6 +1226,9 @@ def main() -> int:
                         min_margin=args.min_margin,
                         graph_width_prune_min_score=args.graph_width_prune_min_score,
                         graph_early_stop_min_confidence=args.graph_early_stop_min_confidence,
+                        graph_max_attention_layers=args.graph_max_attention_layers,
+                        graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
+                        graph_width_prune_keep_ratio=args.graph_width_prune_keep_ratio,
                         mutual=args.mutual,
                         geometry_filter=args.geometry_filter,
                         input_local_contrast=args.input_local_contrast,

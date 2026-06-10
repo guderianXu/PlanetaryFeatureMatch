@@ -1214,6 +1214,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                 visual_threshold_px=5.0,
                 visual_graph_width_prune_min_score=0.25,
                 visual_graph_early_stop_min_confidence=0.85,
+                visual_graph_max_attention_layers=2,
+                visual_graph_max_attention_work_fraction=0.5,
+                visual_graph_width_prune_keep_ratio=0.75,
                 visual_filtered_report=True,
                 visual_filtered_geometry_filter="local",
                 visual_filtered_min_margin=0.02,
@@ -1239,6 +1242,12 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertIn("cross_camera=1", command[command.index("--pair-type-weights") + 1])
         self.assertIn("--spatial-index-height-km", command)
         self.assertEqual(command[command.index("--spatial-index-height-km") + 1], "100")
+        self.assertIn("--graph-max-attention-layers", command)
+        self.assertEqual(command[command.index("--graph-max-attention-layers") + 1], "2")
+        self.assertIn("--graph-max-attention-work-fraction", command)
+        self.assertEqual(command[command.index("--graph-max-attention-work-fraction") + 1], "0.5")
+        self.assertIn("--graph-width-prune-keep-ratio", command)
+        self.assertEqual(command[command.index("--graph-width-prune-keep-ratio") + 1], "0.75")
 
     def test_run_overlap_list_writes_pair_spec_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

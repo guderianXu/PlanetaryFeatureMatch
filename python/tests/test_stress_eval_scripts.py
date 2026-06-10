@@ -25,6 +25,7 @@ from benchmark_lazy_pose_pairs import (
 )
 import visualize_lazy_pose_matches as visual_mod
 import training_visual_report as training_report_mod
+import run_graph_depth_ablation as depth_ablation_mod
 from visualize_lazy_pose_matches import (
     LazyMatchVisual,
     filter_visual_matches,
@@ -34,6 +35,71 @@ from visualize_lazy_pose_matches import (
 
 
 class StressEvalScriptsTest(unittest.TestCase):
+    def test_graph_depth_ablation_parses_unique_positive_depths(self) -> None:
+        self.assertEqual(depth_ablation_mod.parse_depths("1,2,2,4"), [1, 2, 4])
+        with self.assertRaises(ValueError):
+            depth_ablation_mod.parse_depths("0,2")
+
+    def test_graph_depth_ablation_builds_visual_command_with_depth_control(self) -> None:
+        args = SimpleNamespace(
+            render_manifest=Path("render.csv"),
+            uint8_manifest=Path("uint8.csv"),
+            pytorch_state=Path("model.pt"),
+            run_dir=None,
+            metrics_csv=None,
+            split="train",
+            reference_variant="nadir",
+            pair_mode="spatial-index",
+            image_source="uint8",
+            candidate_pairs=12,
+            select_count=4,
+            seed=7,
+            crop_size=2048,
+            max_image_size=768,
+            device="cuda",
+            descriptor_mode="learned",
+            keypoint_score_mode="learned",
+            max_keypoints=512,
+            max_matches=0,
+            draw_matches=0,
+            threshold_px=5.0,
+            graph_max_attention_work_fraction=0.5,
+            graph_width_prune_keep_ratio=0.75,
+            graph_width_prune_min_score=-1.0,
+            graph_early_stop_min_confidence=-1.0,
+            filtered_geometry_filter="local",
+            filtered_min_margin=0.02,
+            filtered_min_score=-1.0,
+            filtered_max_matches=0,
+            filtered_draw_matches=0,
+            pair_spec_manifest=Path("pairs.csv"),
+            target_variant=["mid_01"],
+            cross_pair_variant=["mid_01"],
+            cross_camera_offsets="1,3",
+            cross_fov_offsets="0,2",
+            pair_type_weights="same_position_view=0,cross_camera=1,cross_fov=0",
+            spatial_index_height_km="100",
+            spatial_index_planet_radius_m=3396190.0,
+            spatial_index_footprint_samples=5,
+            spatial_index_margin_m=2000.0,
+            shuffle=True,
+            filtered_report=True,
+            filtered_mutual=True,
+            illumination_stress=False,
+            input_local_contrast=False,
+            input_local_contrast_strength=0.0,
+            input_local_contrast_kernel=31,
+        )
+
+        command = depth_ablation_mod.build_visual_command(args, depth=2, report_dir=Path("out/layers_2"))
+
+        self.assertIn("--graph-max-attention-layers", command)
+        self.assertEqual(command[command.index("--graph-max-attention-layers") + 1], "2")
+        self.assertIn("--graph-max-attention-work-fraction", command)
+        self.assertEqual(command[command.index("--graph-max-attention-work-fraction") + 1], "0.5")
+        self.assertIn("--graph-width-prune-keep-ratio", command)
+        self.assertEqual(command[command.index("--graph-width-prune-keep-ratio") + 1], "0.75")
+
     def test_training_visual_report_parse_args_accepts_lightglue_graph_options(self) -> None:
         argv = [
             "training_visual_report.py",
@@ -45,6 +111,12 @@ class StressEvalScriptsTest(unittest.TestCase):
             "0.25",
             "--graph-early-stop-min-confidence",
             "0.85",
+            "--graph-max-attention-layers",
+            "2",
+            "--graph-max-attention-work-fraction",
+            "0.5",
+            "--graph-width-prune-keep-ratio",
+            "0.75",
             "--graph-inference-preset",
             "fast",
             "--graph-min-accept-probability",
@@ -56,8 +128,39 @@ class StressEvalScriptsTest(unittest.TestCase):
 
         self.assertEqual(args.graph_width_prune_min_score, 0.25)
         self.assertEqual(args.graph_early_stop_min_confidence, 0.85)
+        self.assertEqual(args.graph_max_attention_layers, 2)
+        self.assertEqual(args.graph_max_attention_work_fraction, 0.5)
+        self.assertEqual(args.graph_width_prune_keep_ratio, 0.75)
         self.assertEqual(args.graph_inference_preset, "fast")
         self.assertEqual(args.graph_min_accept_probability, 0.7)
+
+    def test_lazy_visual_parse_args_accepts_graph_depth_controls(self) -> None:
+        argv = [
+            "visualize_lazy_pose_matches.py",
+            "--render-manifest",
+            "render.csv",
+            "--uint8-manifest",
+            "uint8.csv",
+            "--pytorch-state",
+            "model.pt",
+            "--output-dir",
+            "report",
+            "--matcher-mode",
+            "graph_matcher",
+            "--graph-max-attention-layers",
+            "2",
+            "--graph-max-attention-work-fraction",
+            "0.5",
+            "--graph-width-prune-keep-ratio",
+            "0.75",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = visual_mod.parse_args()
+
+        self.assertEqual(args.graph_max_attention_layers, 2)
+        self.assertEqual(args.graph_max_attention_work_fraction, 0.5)
+        self.assertEqual(args.graph_width_prune_keep_ratio, 0.75)
 
     def test_lazy_visual_parse_args_defaults_to_filtered_all_match_report(self) -> None:
         argv = [

@@ -2334,6 +2334,12 @@ def _run_visual_report(args: argparse.Namespace, checkpoint_path: Path) -> Path 
         str(args.visual_graph_width_prune_min_score),
         "--graph-early-stop-min-confidence",
         str(args.visual_graph_early_stop_min_confidence),
+        "--graph-max-attention-layers",
+        str(args.visual_graph_max_attention_layers),
+        "--graph-max-attention-work-fraction",
+        str(args.visual_graph_max_attention_work_fraction),
+        "--graph-width-prune-keep-ratio",
+        str(args.visual_graph_width_prune_keep_ratio),
     ]
     if args.shuffle:
         command.append("--shuffle")
@@ -3453,6 +3459,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-threshold-px", type=float, default=5.0)
     parser.add_argument("--visual-graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--visual-graph-early-stop-min-confidence", type=float, default=-1.0)
+    parser.add_argument("--visual-graph-max-attention-layers", type=int, default=0)
+    parser.add_argument("--visual-graph-max-attention-work-fraction", type=float, default=1.0)
+    parser.add_argument("--visual-graph-width-prune-keep-ratio", type=float, default=1.0)
     parser.add_argument("--visual-filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
@@ -3639,6 +3648,12 @@ def main() -> int:
         raise ValueError("--visual-graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.visual_graph_early_stop_min_confidence < -1.0:
         raise ValueError("--visual-graph-early-stop-min-confidence must be at least -1.0; -1 disables early stopping")
+    if args.visual_graph_max_attention_layers < 0:
+        raise ValueError("--visual-graph-max-attention-layers must be nonnegative; use 0 to keep all graph layers")
+    if args.visual_graph_max_attention_work_fraction < 0.0 or args.visual_graph_max_attention_work_fraction > 1.0:
+        raise ValueError("--visual-graph-max-attention-work-fraction must be in [0, 1]")
+    if args.visual_graph_width_prune_keep_ratio < 0.0 or args.visual_graph_width_prune_keep_ratio > 1.0:
+        raise ValueError("--visual-graph-width-prune-keep-ratio must be in [0, 1]")
     if args.hard_curriculum_max_probability < 0.0 or args.hard_curriculum_max_probability > 1.0:
         raise ValueError("--hard-curriculum-max-probability must be in [0, 1]")
     if args.keypoint_weight < 0.0:
