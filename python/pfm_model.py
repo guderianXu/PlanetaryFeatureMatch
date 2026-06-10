@@ -1600,7 +1600,11 @@ def _with_default_compatible_state(
     state: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     defaults = model.state_dict()
-    patched = {key: value for key, value in state.items() if key in defaults}
+    patched = {
+        key: value
+        for key, value in state.items()
+        if key in defaults and tuple(value.shape) == tuple(defaults[key].shape)
+    }
     for key, value in defaults.items():
         if key not in patched:
             patched[key] = value.detach().clone()
@@ -1639,15 +1643,27 @@ def load_pytorch_state(
     *,
     device: str | torch.device = "cpu",
     strict: bool = True,
+    graph_hidden_dim: int | None = None,
+    graph_attention_layers: int | None = None,
 ) -> tuple[PlanetaryFeatureMatcher, CheckpointConfig]:
     payload = torch.load(str(checkpoint), map_location=device, weights_only=False)
     config_dict = payload["config"]
+    resolved_graph_hidden_dim = (
+        int(config_dict["graph_hidden_dim"]) if graph_hidden_dim is None else int(graph_hidden_dim)
+    )
+    resolved_graph_attention_layers = (
+        int(config_dict["graph_attention_layers"]) if graph_attention_layers is None else int(graph_attention_layers)
+    )
+    if resolved_graph_hidden_dim <= 0:
+        raise ValueError("graph_hidden_dim must be positive")
+    if resolved_graph_attention_layers <= 0:
+        raise ValueError("graph_attention_layers must be positive")
     config = CheckpointConfig(
         input_channels=int(config_dict["input_channels"]),
         base_channels=int(config_dict["base_channels"]),
         descriptor_dim=int(config_dict["descriptor_dim"]),
-        graph_hidden_dim=int(config_dict["graph_hidden_dim"]),
-        graph_attention_layers=int(config_dict["graph_attention_layers"]),
+        graph_hidden_dim=resolved_graph_hidden_dim,
+        graph_attention_layers=resolved_graph_attention_layers,
         graph_keypoint_meta_dim=int(config_dict.get("graph_keypoint_meta_dim", 2)),
     )
     model = PlanetaryFeatureMatcher(

@@ -401,6 +401,35 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(config.graph_keypoint_meta_dim, 16)
         self.assertTrue(torch.allclose(loaded.sparse_head.descriptor_skip.bias, torch.full((16,), 0.25)))
 
+    def test_pytorch_state_load_can_override_graph_architecture_shape_safely(self):
+        with torch.no_grad():
+            model = pfm_model.PlanetaryFeatureMatcher(
+                input_channels=1,
+                base_channels=4,
+                descriptor_dim=16,
+                graph_hidden_dim=16,
+                graph_attention_layers=1,
+            )
+            model.sparse_head.descriptor_skip.bias.fill_(0.25)
+            model.graph_matcher.descriptor_projection.bias.fill_(0.5)
+        path = Path("/tmp/pfm_pytorch_state_graph_override.pt")
+        torch.save({"config": model.config.__dict__, "model": model.state_dict()}, path)
+
+        loaded, config = pfm_model.load_pytorch_state(
+            path,
+            device="cpu",
+            strict=False,
+            graph_hidden_dim=8,
+            graph_attention_layers=2,
+        )
+
+        self.assertEqual(config.graph_hidden_dim, 8)
+        self.assertEqual(config.graph_attention_layers, 2)
+        self.assertEqual(loaded.config.graph_hidden_dim, 8)
+        self.assertEqual(loaded.config.graph_attention_layers, 2)
+        self.assertTrue(torch.allclose(loaded.sparse_head.descriptor_skip.bias, torch.full((16,), 0.25)))
+        self.assertEqual(tuple(loaded.graph_matcher.descriptor_projection.bias.shape), (8,))
+
     def test_interpolate_pytorch_state_payloads_blends_floating_weights_only(self):
         first = {
             "config": {"base_channels": 4},

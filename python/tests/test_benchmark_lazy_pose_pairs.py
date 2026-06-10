@@ -393,6 +393,77 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertIn("positive_vs_dustbin_margin_mean", lazy_bench.GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS)
         self.assertIn("dustbin_prob_for_true_match_mean", lazy_bench.GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS)
 
+    def test_parse_args_accepts_graph_architecture_overrides(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--graph-hidden-dim",
+            "256",
+            "--graph-attention-layers",
+            "2",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertEqual(args.graph_hidden_dim, 256)
+        self.assertEqual(args.graph_attention_layers, 2)
+
+    def test_stable_graph_matcher_training_preset_uses_two_layer_low_rejection(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--enable-rejection-training",
+            "--stable-graph-matcher-training",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertTrue(args.stable_graph_matcher_training)
+        self.assertTrue(args.train_graph_matcher)
+        self.assertEqual(args.graph_hidden_dim, 256)
+        self.assertEqual(args.graph_attention_layers, 2)
+        self.assertEqual(args.graph_matcher_train_max_attention_layers, 2)
+        self.assertAlmostEqual(args.graph_matcher_train_width_keep_ratio, 1.0)
+        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.05)
+        self.assertAlmostEqual(args.graph_matcher_hard_negative_dustbin_weight, 0.02)
+        self.assertAlmostEqual(args.graph_matcher_stop_confidence_weight, 0.0)
+        self.assertAlmostEqual(args.no_match_prior_weight, 0.0)
+        self.assertEqual(args.reliability_negative_points, 32)
+
+    def test_stable_graph_matcher_training_preset_keeps_explicit_overrides(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--stable-graph-matcher-training",
+            "--graph-hidden-dim",
+            "384",
+            "--graph-matcher-no-match-weight",
+            "0.12",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertEqual(args.graph_hidden_dim, 384)
+        self.assertAlmostEqual(args.graph_matcher_no_match_weight, 0.12)
+
     def test_parse_args_accepts_multiple_render_and_uint8_manifests(self) -> None:
         argv = [
             "benchmark_lazy_pose_pairs.py",

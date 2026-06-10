@@ -158,6 +158,34 @@ REJECTION_TRAINING_BASE_DEFAULTS = {
     "false_match_max_points": 128,
     "keypoint_negative_weight": 0.01,
 }
+STABLE_GRAPH_MATCHER_TRAINING_DEFAULTS = {
+    "graph_hidden_dim": 256,
+    "graph_attention_layers": 2,
+    "graph_matcher_loss_weight": 0.75,
+    "graph_matcher_no_match_points": 64,
+    "graph_matcher_no_match_weight": 0.05,
+    "graph_matcher_assignment_weight": 0.35,
+    "graph_matcher_train_max_attention_layers": 2,
+    "graph_matcher_train_max_attention_work_fraction": 1.0,
+    "graph_matcher_train_width_keep_ratio": 1.0,
+    "graph_matcher_accept_weight": 0.08,
+    "graph_matcher_prune_ranking_weight": 0.05,
+    "graph_matcher_stop_confidence_weight": 0.0,
+    "graph_matcher_hard_negative_dustbin_weight": 0.02,
+    "graph_matcher_hard_negative_dustbin_topk": 8,
+    "graph_matcher_hard_negative_dustbin_margin": 0.20,
+    "graph_matcher_semi_dense_no_match_points": 0,
+    "false_match_weight": 0.05,
+    "false_match_max_points": 128,
+    "false_match_curriculum_max_probability": 0.5,
+    "keypoint_weight": 0.05,
+    "keypoint_negative_weight": 0.02,
+    "matchability_weight": 0.04,
+    "descriptor_uncertainty_weight": 0.02,
+    "no_match_prior_weight": 0.0,
+    "reliability_negative_points": 32,
+    "rotation_descriptor_consistency_weight": 0.03,
+}
 
 _IMAGE_CACHE: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 _DEPTH_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
@@ -2166,7 +2194,13 @@ def _load_model(args: argparse.Namespace, device: torch.device):
     checkpoint = Path(args.init_pytorch_state)
     if not checkpoint.exists():
         raise FileNotFoundError(f"--init-pytorch-state does not exist: {checkpoint}")
-    model, _ = pfm_model.load_pytorch_state(checkpoint, device=device, strict=False)
+    model, _ = pfm_model.load_pytorch_state(
+        checkpoint,
+        device=device,
+        strict=False,
+        graph_hidden_dim=args.graph_hidden_dim or None,
+        graph_attention_layers=args.graph_attention_layers or None,
+    )
     trainable = descriptor_parameters(
         model,
         train_backbone=args.train_backbone,
@@ -3268,6 +3302,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp-dtype", choices=["float16", "bfloat16"], default="float16")
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
+    parser.add_argument("--graph-hidden-dim", type=int, default=0)
+    parser.add_argument("--graph-attention-layers", type=int, default=0)
     parser.add_argument("--batch-pairs", type=int, default=1)
     parser.add_argument("--samples-per-pair", type=int, default=512)
     parser.add_argument("--learning-rate", type=float, default=1.0e-4)
@@ -3326,6 +3362,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable a safe no-match/dustbin training preset for descriptor false matches and GraphMatcher rejection.",
+    )
+    parser.add_argument(
+        "--stable-graph-matcher-training",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the 2-layer/256-hidden low-rejection GraphMatcher stabilization preset.",
     )
     parser.add_argument("--training-spatial-bins", type=int, default=0)
     parser.add_argument("--hard-variant", action="append", default=[])
@@ -3420,6 +3462,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-filtered-draw-matches", type=int, default=0)
     args = parser.parse_args()
     apply_rejection_training_defaults(args)
+    apply_stable_graph_matcher_training_defaults(args)
     return args
 
 
@@ -3427,6 +3470,22 @@ def _set_rejection_training_default(args: argparse.Namespace, name: str) -> None
     value = getattr(args, name)
     if value <= 0 or value == REJECTION_TRAINING_BASE_DEFAULTS.get(name):
         setattr(args, name, REJECTION_TRAINING_DEFAULTS[name])
+
+
+def _option_was_provided(name: str) -> bool:
+    positive = f"--{name.replace('_', '-')}"
+    negative = f"--no-{name.replace('_', '-')}"
+    for item in sys.argv[1:]:
+        if item == positive or item.startswith(f"{positive}="):
+            return True
+        if item == negative or item.startswith(f"{negative}="):
+            return True
+    return False
+
+
+def _set_stable_graph_matcher_default(args: argparse.Namespace, name: str, value: object) -> None:
+    if not _option_was_provided(name):
+        setattr(args, name, value)
 
 
 def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
@@ -3442,6 +3501,28 @@ def apply_rejection_training_defaults(args: argparse.Namespace) -> None:
         args.visual_keypoint_score_mode = "learned"
     for name in REJECTION_TRAINING_DEFAULTS:
         _set_rejection_training_default(args, name)
+
+
+def apply_stable_graph_matcher_training_defaults(args: argparse.Namespace) -> None:
+    """展开下一轮稳定性训练的低拒配 GraphMatcher preset。"""
+
+    if not getattr(args, "stable_graph_matcher_training", False):
+        return
+    args.train_graph_matcher = True
+    if not _option_was_provided("train_reliability_head"):
+        args.train_reliability_head = True
+    if not _option_was_provided("inline_false_match_mining"):
+        args.inline_false_match_mining = True
+    if not _option_was_provided("graph_matcher_online_false_no_match"):
+        args.graph_matcher_online_false_no_match = False
+    if not _option_was_provided("graph_matcher_train_random_attention_layers"):
+        args.graph_matcher_train_random_attention_layers = False
+    if not _option_was_provided("visual_matcher_mode"):
+        args.visual_matcher_mode = "graph_matcher"
+    if args.visual_keypoint_score_mode == "texture" and not _option_was_provided("visual_keypoint_score_mode"):
+        args.visual_keypoint_score_mode = "learned"
+    for name, value in STABLE_GRAPH_MATCHER_TRAINING_DEFAULTS.items():
+        _set_stable_graph_matcher_default(args, name, value)
 
 
 def prepare_lazy_pair_specs(
@@ -3513,6 +3594,15 @@ def main() -> int:
         raise ValueError("--stability-max-loss-multiplier must be positive and finite")
     if not math.isfinite(float(args.stability_min_match_score)):
         raise ValueError("--stability-min-match-score must be finite")
+    if args.graph_hidden_dim < 0:
+        raise ValueError("--graph-hidden-dim must be nonnegative; use 0 to keep checkpoint config")
+    if args.graph_attention_layers < 0:
+        raise ValueError("--graph-attention-layers must be nonnegative; use 0 to keep checkpoint config")
+    if (
+        args.graph_attention_layers > 0
+        and args.graph_matcher_train_max_attention_layers > args.graph_attention_layers
+    ):
+        raise ValueError("--graph-matcher-train-max-attention-layers cannot exceed --graph-attention-layers")
     if args.spatial_index_planet_radius_m <= 0.0:
         raise ValueError("--spatial-index-planet-radius-m must be positive")
     if args.spatial_index_footprint_samples < 2:
@@ -3689,6 +3779,11 @@ def main() -> int:
         "cross_fov_offsets": list(args.cross_fov_offsets),
         "amp": {"enabled": bool(args.amp), "dtype": str(args.amp_dtype)},
         "activation_checkpointing": bool(args.activation_checkpointing),
+        "graph_architecture_override": {
+            "graph_hidden_dim": int(args.graph_hidden_dim),
+            "graph_attention_layers": int(args.graph_attention_layers),
+            "stable_graph_matcher_training": bool(args.stable_graph_matcher_training),
+        },
         "photometric_augmentation": vars(_photometric_config_from_args(args)),
         "illumination_consistency": {
             "enabled": float(args.illumination_consistency_weight) > 0.0,
