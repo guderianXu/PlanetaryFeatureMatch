@@ -222,10 +222,7 @@ def _extra_values(
         "wrong": candidate_wrong - active_wrong,
         "precision": candidate_precision - active_precision,
     }
-    if mine_mode == "candidate_gains":
-        standard_delta = candidate_minus_active
-    else:
-        standard_delta = active_minus_candidate
+    standard_delta = candidate_minus_active
     return {
         "hard_reasons": "|".join(reasons),
         "hard_score": f"{hard_score:.6f}",
