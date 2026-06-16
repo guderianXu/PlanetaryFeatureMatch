@@ -3250,6 +3250,112 @@ class StressEvalScriptsTest(unittest.TestCase):
             "/out/eval/dual_checkpoint_rescue_selector/promotion_guard_summary.csv",
         )
 
+    def test_fov76_promotion_pipeline_allows_per_side_graph_layers(self) -> None:
+        args = SimpleNamespace(
+            pair_root=Path("/data/pairs"),
+            guard_root=Path("/data/pairs/hard_mining/guard"),
+            output_dir=Path("/out/eval"),
+            baseline_state=Path("/runs/base/state.pt"),
+            baseline_run_dir=Path("/runs/base/train_output"),
+            candidate_state=Path("/runs/cand/state.pt"),
+            candidate_run_dir=Path("/runs/cand/train_output"),
+            baseline_label="phase5g_active",
+            candidate_label="phase7b_graph8_h384",
+            guard_baseline_label="phase5g_active",
+            guard_candidate_label="phase7b_graph8_h384",
+            splits=["val"],
+            device="cuda",
+            python_executable="/env/bin/python",
+            seed=20260614,
+            crop_size=2048,
+            max_image_size=768,
+            max_keypoints=512,
+            matcher_candidate_topk=256,
+            graph_layers=4,
+            baseline_graph_layers=4,
+            candidate_graph_layers=8,
+            geometry_threshold_px=5.0,
+            filtered_min_matches=16,
+            filtered_min_matches_by_variant=[],
+            baseline_filtered_min_matches_by_variant=[],
+            candidate_filtered_min_matches_by_variant=[],
+            adaptive_geometry_rescue_variants="",
+            baseline_adaptive_geometry_rescue_variants="",
+            candidate_adaptive_geometry_rescue_variants="",
+            adaptive_geometry_rescue_threshold_px=0.0,
+            adaptive_geometry_rescue_min_match_gain=0,
+            adaptive_geometry_rescue_max_base_matches=-1,
+            adaptive_geometry_rescue_max_homography_p90_px=-1.0,
+            adaptive_geometry_rescue_max_homography_median_px=-1.0,
+            adaptive_geometry_rescue_require_score_mean_not_lower=False,
+            baseline_adaptive_geometry_rescue_threshold_px=None,
+            baseline_adaptive_geometry_rescue_min_match_gain=None,
+            baseline_adaptive_geometry_rescue_max_base_matches=None,
+            baseline_adaptive_geometry_rescue_max_homography_p90_px=None,
+            baseline_adaptive_geometry_rescue_max_homography_median_px=None,
+            baseline_adaptive_geometry_rescue_require_score_mean_not_lower=None,
+            candidate_adaptive_geometry_rescue_threshold_px=None,
+            candidate_adaptive_geometry_rescue_min_match_gain=None,
+            candidate_adaptive_geometry_rescue_max_base_matches=None,
+            candidate_adaptive_geometry_rescue_max_homography_p90_px=None,
+            candidate_adaptive_geometry_rescue_max_homography_median_px=None,
+            candidate_adaptive_geometry_rescue_require_score_mean_not_lower=None,
+            low_match_geometry_guard_variants="",
+            baseline_low_match_geometry_guard_variants="",
+            candidate_low_match_geometry_guard_variants="",
+            low_match_geometry_guard_min_matches=0,
+            low_match_geometry_guard_max_matches=-1,
+            low_match_geometry_guard_max_homography_p90_px=-1.0,
+            low_match_geometry_guard_max_homography_median_px=-1.0,
+            low_match_geometry_guard_min_score_mean=float("-inf"),
+            baseline_low_match_geometry_guard_min_matches=None,
+            baseline_low_match_geometry_guard_max_matches=None,
+            baseline_low_match_geometry_guard_max_homography_p90_px=None,
+            baseline_low_match_geometry_guard_max_homography_median_px=None,
+            baseline_low_match_geometry_guard_min_score_mean=None,
+            candidate_low_match_geometry_guard_min_matches=None,
+            candidate_low_match_geometry_guard_max_matches=None,
+            candidate_low_match_geometry_guard_max_homography_p90_px=None,
+            candidate_low_match_geometry_guard_max_homography_median_px=None,
+            candidate_low_match_geometry_guard_min_score_mean=None,
+            write_match_details=False,
+            max_formal_precision_drop=0.0,
+            max_formal_correct_drop=0,
+            max_formal_wrong_increase=0,
+            formal_target_variants="extreme_02,extreme_03",
+            formal_protected_variants="mid_01,mid_02,extreme_01,nadir",
+            min_formal_target_correct_gain=1,
+            min_formal_target_total_correct_gain=1,
+            max_formal_target_precision_drop=0.0,
+            max_formal_target_wrong_increase=0,
+            max_protected_variant_precision_drop=0.0,
+            max_protected_variant_correct_drop=0,
+            max_protected_variant_wrong_increase=0,
+            max_guard_precision_drop=0.0,
+            max_guard_correct_drop=0,
+            max_guard_wrong_increase=0,
+            min_extreme_correct_gain=0,
+            max_extreme_precision_drop=0.02,
+            max_extreme_wrong_increase=999,
+            dual_checkpoint_rescue_selector=False,
+            extra_regression_guard_set=[],
+        )
+
+        commands = fov76_gate_mod.planned_commands(args)
+        baseline_formal = commands[0]
+        candidate_formal = commands[1]
+        baseline_guard = commands[2]
+        candidate_guard = next(
+            command
+            for command in commands
+            if "/out/eval/guard/phase7b_graph8_h384_" in command[command.index("--output-dir") + 1]
+        )
+
+        self.assertEqual(baseline_formal[baseline_formal.index("--graph-max-attention-layers") + 1], "4")
+        self.assertEqual(candidate_formal[candidate_formal.index("--graph-max-attention-layers") + 1], "8")
+        self.assertEqual(baseline_guard[baseline_guard.index("--graph-max-attention-layers") + 1], "4")
+        self.assertEqual(candidate_guard[candidate_guard.index("--graph-max-attention-layers") + 1], "8")
+
     def test_fov76_promotion_pipeline_validates_required_inputs_before_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

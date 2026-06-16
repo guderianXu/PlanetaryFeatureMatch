@@ -127,6 +127,19 @@ def _side_low_match_geometry_guard_value(args: argparse.Namespace, *, model: Eva
     return value
 
 
+def _graph_layers(args: argparse.Namespace, *, model: EvalModel) -> int:
+    value = int(getattr(args, "graph_layers", 4))
+    if _matches_baseline_model(args, model=model):
+        baseline_value = getattr(args, "baseline_graph_layers", None)
+        if baseline_value is not None:
+            value = int(baseline_value)
+    if _matches_candidate_model(args, model=model):
+        candidate_value = getattr(args, "candidate_graph_layers", None)
+        if candidate_value is not None:
+            value = int(candidate_value)
+    return value
+
+
 def _set_profile_default(args: argparse.Namespace, name: str, value: object, default: object) -> None:
     if getattr(args, name) == default:
         setattr(args, name, value)
@@ -346,7 +359,7 @@ def _add_common_sweep_options(
             "--graph-min-accept-probability-values",
             "-1",
             "--graph-max-attention-layers",
-            str(args.graph_layers),
+            str(_graph_layers(args, model=model)),
             "--graph-max-attention-work-fraction",
             "1.0",
             "--graph-width-prune-keep-ratio",
@@ -1576,6 +1589,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-keypoints", type=int, default=512)
     parser.add_argument("--matcher-candidate-topk", type=int, default=256)
     parser.add_argument("--graph-layers", type=int, default=4)
+    parser.add_argument("--baseline-graph-layers", type=int, default=None)
+    parser.add_argument("--candidate-graph-layers", type=int, default=None)
     parser.add_argument("--formal-candidate-pairs", type=int, default=60)
     parser.add_argument("--guard-candidate-pairs", type=int, default=100)
     parser.add_argument(
