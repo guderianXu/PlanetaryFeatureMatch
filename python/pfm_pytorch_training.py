@@ -42,7 +42,7 @@ REJECTION_TRAINING_DEFAULTS = {
     "graph_matcher_accept_weight": 0.30,
     "graph_matcher_prune_ranking_weight": 0.10,
     "graph_matcher_stop_confidence_weight": 0.05,
-    "graph_matcher_hard_negative_dustbin_weight": 0.25,
+    "graph_matcher_hard_negative_dustbin_weight": 0.075,
     "graph_matcher_hard_negative_dustbin_topk": 16,
     "graph_matcher_hard_negative_dustbin_margin": 0.35,
     "graph_matcher_semi_dense_no_match_points": 128,
@@ -75,19 +75,68 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_stop_confidence_loss",
     "graph_matcher_raw_preservation_loss",
     "graph_matcher_hard_negative_dustbin_loss",
+    "graph_matcher_positive_dustbin_margin_loss",
+    "graph_matcher_true_match_margin_loss",
+    "graph_matcher_true_match_margin_violations",
+    "graph_matcher_true_match_margin_mean",
+    "graph_matcher_final_false_match_loss",
+    "graph_matcher_final_false_match_edges",
+    "graph_matcher_final_false_match_score_mean",
+    "graph_matcher_final_false_match_accept_mean",
+    "graph_matcher_mined_false_match_loss",
+    "graph_matcher_mined_false_match_edges",
+    "graph_matcher_mined_false_match_reference_filtered_edges",
+    "graph_matcher_mined_false_match_score_mean",
+    "graph_matcher_mined_false_match_logit_mean",
+    "graph_matcher_mined_false_match_accept_mean",
+    "graph_matcher_raw_false_match_loss",
+    "graph_matcher_raw_false_match_edges",
+    "graph_matcher_raw_false_match_similarity_mean",
+    "graph_matcher_raw_false_match_margin_mean",
+    "graph_matcher_ransac_consistency_loss",
+    "graph_matcher_ransac_consistency_edges",
+    "graph_matcher_ransac_consistency_score_mean",
+    "graph_matcher_ransac_consistency_residual_mean_px",
+    "graph_matcher_ransac_consistency_accept_mean",
+    "graph_matcher_deep_supervision_loss",
+    "graph_matcher_depth_distillation_loss",
+    "graph_matcher_depth_distillation_teacher_layers",
+    "graph_matcher_teacher_distillation_loss",
+    "graph_matcher_teacher_guard_loss",
+    "graph_matcher_teacher_guard_positive_margin_loss",
+    "graph_matcher_teacher_guard_false_edge_loss",
+    "graph_matcher_teacher_guard_positive_violations",
+    "graph_matcher_teacher_guard_false_edges",
+    "graph_matcher_teacher_score_floor_loss",
+    "graph_matcher_teacher_score_floor_violations",
+    "graph_matcher_teacher_score_floor_delta_mean",
+    "graph_matcher_teacher_score_floor_teacher_score_mean",
     "graph_matcher_executed_attention_layers",
     "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
     "graph_matcher_extra_no_match_points",
+    "graph_matcher_extra_false_match_pairs",
+    "graph_matcher_train_candidate_topk",
+    "graph_matcher_effective_no_match_weight",
+    "graph_matcher_effective_hard_negative_dustbin_weight",
+    "graph_matcher_dustbin_guard_active",
+    "graph_matcher_guarded_no_match_weight",
+    "graph_matcher_guarded_hard_negative_dustbin_weight",
     "true_match_rejected_by_dustbin_ratio",
     "positive_pair_logit_mean",
     "positive_dustbin_logit_mean",
+    "dustbin_logit_mean",
+    "dustbin_logit_for_true_match_mean",
     "positive_vs_dustbin_margin_mean",
     "positive_vs_dustbin_margin_median",
     "positive_vs_dustbin_margin_p10",
     "positive_vs_dustbin_margin_below0_ratio",
+    "false_match_accepted_ratio",
+    "accept_logit_mean",
     "true_pair_prob_mean",
     "dustbin_prob_for_true_match_mean",
+    "true_match_in_topk@64",
+    "true_match_in_topk@256",
 )
 RELIABILITY_LOSS_METRIC_KEYS = (
     "matchability_loss",
@@ -98,6 +147,11 @@ RELIABILITY_LOSS_METRIC_KEYS = (
     "orientation_consistency_loss",
     "scale_consistency_loss",
     "affine_consistency_loss",
+    "affine_regularization_loss",
+    "affine_det_mean",
+    "affine_det_std",
+    "affine_condition_mean",
+    "affine_condition_max",
     "rotation_consistency_points",
     "rotation_consistency_pairs",
 )
@@ -119,6 +173,7 @@ class TrainingSparseMaps:
     scale: torch.Tensor
     orientation: torch.Tensor
     affine: torch.Tensor
+    quality: torch.Tensor | None = None
 
 
 class PairArchiveCache:
@@ -1139,6 +1194,12 @@ def apply_graph_metadata_mode(metadata: torch.Tensor, mode: str) -> torch.Tensor
     adjusted = metadata.clone()
     if mode == "full":
         return adjusted
+    if mode == "calibrated":
+        if adjusted.size(1) > 12:
+            adjusted[:, 12:13] = 0.0
+        if adjusted.size(1) > 14:
+            adjusted[:, 14 : min(adjusted.size(1), 16)] = 0.0
+        return adjusted
     if mode == "descriptor_only":
         return adjusted.zero_()
     if mode == "no_xy":
@@ -1434,7 +1495,7 @@ def graph_matcher_correspondence_loss(
     points_a_xy: torch.Tensor,
     points_b_xy: torch.Tensor,
     *,
-    metadata_mode: str = "full",
+    metadata_mode: str = "calibrated",
     no_match_points: int = 0,
     no_match_weight: float = 0.0,
     no_match_min_distance: float = 4.0,
@@ -1452,14 +1513,56 @@ def graph_matcher_correspondence_loss(
     hard_negative_dustbin_topk: int = 8,
     hard_negative_dustbin_margin: float = 0.25,
     hard_negative_dustbin_spatial_min_distance: float = 0.0,
+    positive_dustbin_margin_weight: float = 0.0,
+    positive_dustbin_margin: float = 0.0,
+    true_match_margin_weight: float = 0.0,
+    true_match_margin: float = 0.0,
+    final_false_match_weight: float = 0.0,
+    mined_false_match_weight: float = 0.0,
+    mined_false_match_loss_cap: float = 0.0,
+    mined_false_match_reference_margin: float = -1.0,
+    final_false_match_topk: int = 8,
+    final_false_match_min_score: float = 0.0,
+    final_false_match_margin: float = 0.25,
+    final_false_match_spatial_min_distance: float = 0.0,
+    raw_false_match_weight: float = 0.0,
+    raw_false_match_topk: int = 8,
+    raw_false_match_min_similarity: float = 0.75,
+    raw_false_match_margin: float = 0.25,
+    raw_false_match_spatial_min_distance: float = 0.0,
+    ransac_consistency_weight: float = 0.0,
+    ransac_consistency_topk: int = 8,
+    ransac_consistency_residual_threshold_px: float = 3.0,
+    ransac_consistency_min_score: float = 0.0,
+    ransac_consistency_margin: float = 0.25,
+    train_candidate_topk: int = 0,
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
     extra_no_match_points_a_xy: torch.Tensor | None = None,
     extra_no_match_points_b_xy: torch.Tensor | None = None,
+    extra_false_match_points_a_xy: torch.Tensor | None = None,
+    extra_false_match_points_b_xy: torch.Tensor | None = None,
     max_attention_layers: int = 0,
     random_attention_layers: bool = False,
     max_attention_work_fraction: float = 1.0,
     width_keep_ratio: float = 1.0,
+    deep_supervision_depths: list[int] | tuple[int, ...] | None = None,
+    deep_supervision_weight: float = 0.0,
+    depth_distillation_weight: float = 0.0,
+    depth_distillation_teacher_layers: int = 0,
+    depth_distillation_temperature: float = 1.0,
+    teacher_guard_output: pfm_model.GraphMatcherOutput | None = None,
+    teacher_guard_model: pfm_model.PlanetaryFeatureMatcher | None = None,
+    teacher_guard_weight: float = 0.0,
+    teacher_guard_positive_margin_tolerance: float = 0.0,
+    teacher_guard_false_margin_tolerance: float = 0.0,
+    teacher_score_floor_weight: float = 0.0,
+    teacher_score_floor_tolerance: float = 0.0,
+    teacher_score_floor_min_score: float = 0.0,
+    teacher_distillation_weight: float = 0.0,
+    teacher_distillation_temperature: float = 1.0,
+    positive_dustbin_guard_reject_threshold: float = 1.1,
+    positive_dustbin_guard_margin_threshold: float = -float("inf"),
     matchability_a: torch.Tensor | None = None,
     matchability_b: torch.Tensor | None = None,
     descriptor_uncertainty_a: torch.Tensor | None = None,
@@ -1479,11 +1582,44 @@ def graph_matcher_correspondence_loss(
         stop_confidence_loss: torch.Tensor,
         raw_preservation_loss: torch.Tensor,
         hard_negative_dustbin_loss: torch.Tensor,
+        positive_dustbin_margin_loss: torch.Tensor,
+        true_match_margin_loss: torch.Tensor,
+        true_match_margin_violations: torch.Tensor | None,
+        true_match_margin_mean: torch.Tensor | None,
+        final_false_loss: torch.Tensor | None,
+        final_false_edges: torch.Tensor | None,
+        final_false_score_mean: torch.Tensor | None,
+        final_false_accept_mean: torch.Tensor | None,
+        mined_false_loss: torch.Tensor | None,
+        mined_false_edges: torch.Tensor | None,
+        mined_false_reference_filtered_edges: torch.Tensor | None,
+        mined_false_score_mean: torch.Tensor | None,
+        mined_false_logit_mean: torch.Tensor | None,
+        mined_false_accept_mean: torch.Tensor | None,
+        raw_false_loss: torch.Tensor | None,
+        raw_false_edges: torch.Tensor | None,
+        raw_false_similarity_mean: torch.Tensor | None,
+        raw_false_margin_mean: torch.Tensor | None,
+        deep_supervision_loss: torch.Tensor,
         executed_attention_layers: torch.Tensor,
         attention_work_fraction: torch.Tensor,
         positive_pairs: torch.Tensor,
         extra_no_match_points: torch.Tensor,
+        extra_false_match_pairs: torch.Tensor,
         dustbin_diagnostics: dict[str, float] | None = None,
+        depth_distillation_loss: torch.Tensor | None = None,
+        depth_distillation_teacher_layers_tensor: torch.Tensor | None = None,
+        teacher_distillation_loss: torch.Tensor | None = None,
+        dustbin_guard_active: torch.Tensor | None = None,
+        guarded_no_match_weight: torch.Tensor | None = None,
+        guarded_hard_negative_dustbin_weight: torch.Tensor | None = None,
+        candidate_topk_diagnostics: dict[str, float] | None = None,
+        teacher_guard_loss: torch.Tensor | None = None,
+        teacher_guard_metrics: dict[str, torch.Tensor] | None = None,
+        teacher_score_floor_loss: torch.Tensor | None = None,
+        teacher_score_floor_metrics: dict[str, torch.Tensor] | None = None,
+        ransac_consistency_loss: torch.Tensor | None = None,
+        ransac_consistency_metrics: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         result = {
             "graph_matcher_total_loss": total_loss,
@@ -1495,23 +1631,174 @@ def graph_matcher_correspondence_loss(
             "graph_matcher_stop_confidence_loss": stop_confidence_loss,
             "graph_matcher_raw_preservation_loss": raw_preservation_loss,
             "graph_matcher_hard_negative_dustbin_loss": hard_negative_dustbin_loss,
+            "graph_matcher_positive_dustbin_margin_loss": positive_dustbin_margin_loss,
+            "graph_matcher_true_match_margin_loss": true_match_margin_loss,
+            "graph_matcher_true_match_margin_violations": (
+                total_loss.new_zeros(()) if true_match_margin_violations is None else true_match_margin_violations
+            ),
+            "graph_matcher_true_match_margin_mean": (
+                total_loss.new_zeros(()) if true_match_margin_mean is None else true_match_margin_mean
+            ),
+            "graph_matcher_final_false_match_loss": (
+                total_loss.new_zeros(()) if final_false_loss is None else final_false_loss
+            ),
+            "graph_matcher_final_false_match_edges": (
+                total_loss.new_zeros(()) if final_false_edges is None else final_false_edges
+            ),
+            "graph_matcher_final_false_match_score_mean": (
+                total_loss.new_zeros(()) if final_false_score_mean is None else final_false_score_mean
+            ),
+            "graph_matcher_final_false_match_accept_mean": (
+                total_loss.new_zeros(()) if final_false_accept_mean is None else final_false_accept_mean
+            ),
+            "graph_matcher_mined_false_match_loss": (
+                total_loss.new_zeros(()) if mined_false_loss is None else mined_false_loss
+            ),
+            "graph_matcher_mined_false_match_edges": (
+                total_loss.new_zeros(()) if mined_false_edges is None else mined_false_edges
+            ),
+            "graph_matcher_mined_false_match_reference_filtered_edges": (
+                total_loss.new_zeros(())
+                if mined_false_reference_filtered_edges is None
+                else mined_false_reference_filtered_edges
+            ),
+            "graph_matcher_mined_false_match_score_mean": (
+                total_loss.new_zeros(()) if mined_false_score_mean is None else mined_false_score_mean
+            ),
+            "graph_matcher_mined_false_match_logit_mean": (
+                total_loss.new_zeros(()) if mined_false_logit_mean is None else mined_false_logit_mean
+            ),
+            "graph_matcher_mined_false_match_accept_mean": (
+                total_loss.new_zeros(()) if mined_false_accept_mean is None else mined_false_accept_mean
+            ),
+            "graph_matcher_raw_false_match_loss": (
+                total_loss.new_zeros(()) if raw_false_loss is None else raw_false_loss
+            ),
+            "graph_matcher_raw_false_match_edges": (
+                total_loss.new_zeros(()) if raw_false_edges is None else raw_false_edges
+            ),
+            "graph_matcher_raw_false_match_similarity_mean": (
+                total_loss.new_zeros(()) if raw_false_similarity_mean is None else raw_false_similarity_mean
+            ),
+            "graph_matcher_raw_false_match_margin_mean": (
+                total_loss.new_zeros(()) if raw_false_margin_mean is None else raw_false_margin_mean
+            ),
+            "graph_matcher_ransac_consistency_loss": (
+                total_loss.new_zeros(()) if ransac_consistency_loss is None else ransac_consistency_loss
+            ),
+            "graph_matcher_ransac_consistency_edges": (
+                total_loss.new_zeros(())
+                if ransac_consistency_metrics is None
+                else ransac_consistency_metrics["edges"]
+            ),
+            "graph_matcher_ransac_consistency_score_mean": (
+                total_loss.new_zeros(())
+                if ransac_consistency_metrics is None
+                else ransac_consistency_metrics["score_mean"]
+            ),
+            "graph_matcher_ransac_consistency_residual_mean_px": (
+                total_loss.new_zeros(())
+                if ransac_consistency_metrics is None
+                else ransac_consistency_metrics["residual_mean_px"]
+            ),
+            "graph_matcher_ransac_consistency_accept_mean": (
+                total_loss.new_zeros(())
+                if ransac_consistency_metrics is None
+                else ransac_consistency_metrics["accept_mean"]
+            ),
+            "graph_matcher_deep_supervision_loss": deep_supervision_loss,
+            "graph_matcher_depth_distillation_loss": (
+                total_loss.new_zeros(()) if depth_distillation_loss is None else depth_distillation_loss
+            ),
+            "graph_matcher_depth_distillation_teacher_layers": (
+                total_loss.new_zeros(())
+                if depth_distillation_teacher_layers_tensor is None
+                else depth_distillation_teacher_layers_tensor
+            ),
+            "graph_matcher_teacher_distillation_loss": (
+                total_loss.new_zeros(()) if teacher_distillation_loss is None else teacher_distillation_loss
+            ),
+            "graph_matcher_teacher_guard_loss": (
+                total_loss.new_zeros(()) if teacher_guard_loss is None else teacher_guard_loss
+            ),
+            "graph_matcher_teacher_guard_positive_margin_loss": (
+                total_loss.new_zeros(())
+                if teacher_guard_metrics is None
+                else teacher_guard_metrics["positive_margin_loss"]
+            ),
+            "graph_matcher_teacher_guard_false_edge_loss": (
+                total_loss.new_zeros(())
+                if teacher_guard_metrics is None
+                else teacher_guard_metrics["false_edge_loss"]
+            ),
+            "graph_matcher_teacher_guard_positive_violations": (
+                total_loss.new_zeros(())
+                if teacher_guard_metrics is None
+                else teacher_guard_metrics["positive_violations"]
+            ),
+            "graph_matcher_teacher_guard_false_edges": (
+                total_loss.new_zeros(())
+                if teacher_guard_metrics is None
+                else teacher_guard_metrics["false_edges"]
+            ),
+            "graph_matcher_teacher_score_floor_loss": (
+                total_loss.new_zeros(())
+                if teacher_score_floor_loss is None
+                else teacher_score_floor_loss
+            ),
+            "graph_matcher_teacher_score_floor_violations": (
+                total_loss.new_zeros(())
+                if teacher_score_floor_metrics is None
+                else teacher_score_floor_metrics["violations"]
+            ),
+            "graph_matcher_teacher_score_floor_delta_mean": (
+                total_loss.new_zeros(())
+                if teacher_score_floor_metrics is None
+                else teacher_score_floor_metrics["score_delta_mean"]
+            ),
+            "graph_matcher_teacher_score_floor_teacher_score_mean": (
+                total_loss.new_zeros(())
+                if teacher_score_floor_metrics is None
+                else teacher_score_floor_metrics["teacher_score_mean"]
+            ),
             "graph_matcher_executed_attention_layers": executed_attention_layers,
             "graph_matcher_attention_work_fraction": attention_work_fraction,
             "graph_matcher_positive_pairs": positive_pairs,
             "graph_matcher_extra_no_match_points": extra_no_match_points,
+            "graph_matcher_extra_false_match_pairs": extra_false_match_pairs,
+            "graph_matcher_train_candidate_topk": total_loss.new_tensor(float(train_candidate_topk)),
+            "graph_matcher_dustbin_guard_active": (
+                total_loss.new_zeros(()) if dustbin_guard_active is None else dustbin_guard_active
+            ),
+            "graph_matcher_guarded_no_match_weight": (
+                total_loss.new_tensor(float(no_match_weight))
+                if guarded_no_match_weight is None
+                else guarded_no_match_weight
+            ),
+            "graph_matcher_guarded_hard_negative_dustbin_weight": (
+                total_loss.new_tensor(float(hard_negative_dustbin_weight))
+                if guarded_hard_negative_dustbin_weight is None
+                else guarded_hard_negative_dustbin_weight
+            ),
         }
         for key in (
             "true_match_rejected_by_dustbin_ratio",
             "positive_pair_logit_mean",
             "positive_dustbin_logit_mean",
+            "dustbin_logit_mean",
+            "dustbin_logit_for_true_match_mean",
             "positive_vs_dustbin_margin_mean",
             "positive_vs_dustbin_margin_median",
             "positive_vs_dustbin_margin_p10",
             "positive_vs_dustbin_margin_below0_ratio",
+            "false_match_accepted_ratio",
+            "accept_logit_mean",
             "true_pair_prob_mean",
             "dustbin_prob_for_true_match_mean",
         ):
             result[key] = total_loss.new_tensor(float((dustbin_diagnostics or {}).get(key, 0.0)))
+        for key in ("true_match_in_topk@64", "true_match_in_topk@256"):
+            result[key] = total_loss.new_tensor(float((candidate_topk_diagnostics or {}).get(key, 0.0)))
         return result
 
     if (
@@ -1522,10 +1809,125 @@ def graph_matcher_correspondence_loss(
         raise ValueError("max_attention_work_fraction must be in [0, 1]")
     if not math.isfinite(float(width_keep_ratio)) or width_keep_ratio <= 0.0 or width_keep_ratio > 1.0:
         raise ValueError("width_keep_ratio must be in (0, 1]")
+    if deep_supervision_weight < 0.0:
+        raise ValueError("deep_supervision_weight must be nonnegative")
+    if depth_distillation_weight < 0.0:
+        raise ValueError("depth_distillation_weight must be nonnegative")
+    if depth_distillation_teacher_layers < 0:
+        raise ValueError("depth_distillation_teacher_layers must be nonnegative")
+    if not math.isfinite(float(depth_distillation_temperature)) or depth_distillation_temperature <= 0.0:
+        raise ValueError("depth_distillation_temperature must be positive and finite")
+    if teacher_guard_weight < 0.0:
+        raise ValueError("teacher_guard_weight must be nonnegative")
+    if teacher_score_floor_weight < 0.0:
+        raise ValueError("teacher_score_floor_weight must be nonnegative")
+    if teacher_distillation_weight < 0.0:
+        raise ValueError("teacher_distillation_weight must be nonnegative")
+    if not math.isfinite(float(teacher_distillation_temperature)) or teacher_distillation_temperature <= 0.0:
+        raise ValueError("teacher_distillation_temperature must be positive and finite")
+    if teacher_guard_positive_margin_tolerance < 0.0:
+        raise ValueError("teacher_guard_positive_margin_tolerance must be nonnegative")
+    if teacher_guard_false_margin_tolerance < 0.0:
+        raise ValueError("teacher_guard_false_margin_tolerance must be nonnegative")
+    if teacher_score_floor_tolerance < 0.0:
+        raise ValueError("teacher_score_floor_tolerance must be nonnegative")
+    if not math.isfinite(float(teacher_score_floor_min_score)):
+        raise ValueError("teacher_score_floor_min_score must be finite")
+    if (
+        teacher_guard_model is not None
+        and teacher_guard_model.config.graph_keypoint_meta_dim != model.config.graph_keypoint_meta_dim
+    ):
+        raise ValueError("teacher_guard_model graph_keypoint_meta_dim must match the student model")
+    if not math.isfinite(float(positive_dustbin_guard_reject_threshold)):
+        raise ValueError("positive_dustbin_guard_reject_threshold must be finite")
+    if positive_dustbin_margin_weight < 0.0:
+        raise ValueError("positive_dustbin_margin_weight must be nonnegative")
+    if true_match_margin_weight < 0.0:
+        raise ValueError("true_match_margin_weight must be nonnegative")
+    if true_match_margin < 0.0:
+        raise ValueError("true_match_margin must be nonnegative")
+    if final_false_match_weight < 0.0:
+        raise ValueError("final_false_match_weight must be nonnegative")
+    if mined_false_match_weight < 0.0:
+        raise ValueError("mined_false_match_weight must be nonnegative")
+    if mined_false_match_loss_cap < 0.0:
+        raise ValueError("mined_false_match_loss_cap must be nonnegative")
+    if (
+        not math.isfinite(float(mined_false_match_reference_margin))
+        or mined_false_match_reference_margin < -1.0
+    ):
+        raise ValueError("mined_false_match_reference_margin must be finite and >= -1")
+    if final_false_match_topk < 0:
+        raise ValueError("final_false_match_topk must be nonnegative")
+    if final_false_match_min_score < 0.0:
+        raise ValueError("final_false_match_min_score must be nonnegative")
+    if final_false_match_margin < 0.0:
+        raise ValueError("final_false_match_margin must be nonnegative")
+    if final_false_match_spatial_min_distance < 0.0:
+        raise ValueError("final_false_match_spatial_min_distance must be nonnegative")
+    if raw_false_match_weight < 0.0:
+        raise ValueError("raw_false_match_weight must be nonnegative")
+    if raw_false_match_topk < 0:
+        raise ValueError("raw_false_match_topk must be nonnegative")
+    if raw_false_match_min_similarity < -1.0 or raw_false_match_min_similarity > 1.0:
+        raise ValueError("raw_false_match_min_similarity must be in [-1, 1]")
+    if raw_false_match_margin < 0.0:
+        raise ValueError("raw_false_match_margin must be nonnegative")
+    if raw_false_match_spatial_min_distance < 0.0:
+        raise ValueError("raw_false_match_spatial_min_distance must be nonnegative")
+    if ransac_consistency_weight < 0.0:
+        raise ValueError("ransac_consistency_weight must be nonnegative")
+    if ransac_consistency_topk < 0:
+        raise ValueError("ransac_consistency_topk must be nonnegative")
+    if ransac_consistency_residual_threshold_px < 0.0:
+        raise ValueError("ransac_consistency_residual_threshold_px must be nonnegative")
+    if ransac_consistency_min_score < 0.0:
+        raise ValueError("ransac_consistency_min_score must be nonnegative")
+    if ransac_consistency_margin < 0.0:
+        raise ValueError("ransac_consistency_margin must be nonnegative")
+    if train_candidate_topk < 0:
+        raise ValueError("train_candidate_topk must be nonnegative")
+    supervision_depths = [int(depth) for depth in (deep_supervision_depths or [])]
+    if any(depth <= 0 for depth in supervision_depths):
+        raise ValueError("deep supervision depths must be positive")
     if points_a_xy.size(0) == 0 or points_b_xy.size(0) == 0:
         zero = descriptors_a.new_tensor(0.0)
         if return_components:
-            return zero, components(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero)
+            return zero, components(
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+            )
         return zero
     count = min(points_a_xy.size(0), points_b_xy.size(0))
     points_a_xy = points_a_xy[:count]
@@ -1543,7 +1945,7 @@ def graph_matcher_correspondence_loss(
     positive_points_b_xy = points_b_xy
     desc_a = normalize_descriptor_batch(sample_descriptors(descriptors_a, points_a_xy))
     desc_b = normalize_descriptor_batch(sample_descriptors(descriptors_b, points_b_xy))
-    if no_match_points > 0 and no_match_weight > 0.0:
+    if no_match_points > 0:
         neg_a_points = sample_unmatched_feature_points(
             feature_height=descriptors_a.size(2),
             feature_width=descriptors_a.size(3),
@@ -1568,7 +1970,7 @@ def graph_matcher_correspondence_loss(
         if neg_b_points.numel() > 0:
             desc_b = torch.cat([desc_b, normalize_descriptor_batch(sample_descriptors(descriptors_b, neg_b_points))], dim=0)
             points_b_xy = torch.cat([points_b_xy, neg_b_points.to(points_b_xy.device)], dim=0)
-    if semi_dense_no_match_points > 0 and no_match_weight > 0.0 and hasattr(model, "semi_dense_branch"):
+    if semi_dense_no_match_points > 0 and hasattr(model, "semi_dense_branch"):
         semi_dense = model.semi_dense_branch(
             descriptors_a,
             descriptors_b,
@@ -1623,6 +2025,32 @@ def graph_matcher_correspondence_loss(
             )
             points_b_xy = torch.cat([points_b_xy, extra_b.to(points_b_xy.device)], dim=0)
             extra_no_match_count += int(extra_b.size(0))
+    extra_false_a_start = int(points_a_xy.size(0))
+    extra_false_b_start = int(points_b_xy.size(0))
+    extra_false_match_pair_count = 0
+    if extra_false_match_points_a_xy is not None or extra_false_match_points_b_xy is not None:
+        if extra_false_match_points_a_xy is None or extra_false_match_points_b_xy is None:
+            raise ValueError("extra_false_match_points_a_xy and extra_false_match_points_b_xy must be provided together")
+        if extra_false_match_points_a_xy.dim() != 2 or extra_false_match_points_a_xy.size(1) != 2:
+            raise ValueError("extra_false_match_points_a_xy must have shape Nx2")
+        if extra_false_match_points_b_xy.dim() != 2 or extra_false_match_points_b_xy.size(1) != 2:
+            raise ValueError("extra_false_match_points_b_xy must have shape Nx2")
+        if extra_false_match_points_a_xy.shape != extra_false_match_points_b_xy.shape:
+            raise ValueError("extra_false_match_points tensors must have the same shape")
+        false_a = extra_false_match_points_a_xy.to(device=descriptors_a.device, dtype=points_a_xy.dtype)
+        false_b = extra_false_match_points_b_xy.to(device=descriptors_b.device, dtype=points_b_xy.dtype)
+        if false_a.numel() > 0:
+            desc_a = torch.cat(
+                [desc_a, normalize_descriptor_batch(sample_descriptors(descriptors_a, false_a))],
+                dim=0,
+            )
+            desc_b = torch.cat(
+                [desc_b, normalize_descriptor_batch(sample_descriptors(descriptors_b, false_b))],
+                dim=0,
+            )
+            points_a_xy = torch.cat([points_a_xy, false_a.to(points_a_xy.device)], dim=0)
+            points_b_xy = torch.cat([points_b_xy, false_b.to(points_b_xy.device)], dim=0)
+            extra_false_match_pair_count = int(false_a.size(0))
     meta_a = pfm_model.prepare_graph_keypoint_metadata(
         points_a_xy,
         meta_dim=model.config.graph_keypoint_meta_dim,
@@ -1639,6 +2067,15 @@ def graph_matcher_correspondence_loss(
     ).to(desc_b.device)
     meta_a = apply_graph_metadata_mode(meta_a, metadata_mode)
     meta_b = apply_graph_metadata_mode(meta_b, metadata_mode)
+    candidate_topk_diagnostics = graph_matcher_candidate_topk_diagnostics(
+        model,
+        desc_a,
+        desc_b,
+        meta_a,
+        meta_b,
+        positive_count=count,
+        topk_values=(64, 256),
+    )
     attention_layer_budget = int(max_attention_layers)
     if random_attention_layers:
         layer_limit = attention_layer_budget if attention_layer_budget > 0 else len(model.graph_matcher.attention_layers)
@@ -1652,19 +2089,109 @@ def graph_matcher_correspondence_loss(
                 generator=generator,
             ).item()
         )
-    output = model.graph_matcher(
-        desc_a,
-        meta_a,
-        desc_b,
-        meta_b,
-        apply_candidate_mask=False,
-        max_attention_layers=attention_layer_budget,
-        max_attention_work_fraction=max_attention_work_fraction,
+    def run_matcher(layer_budget: int) -> pfm_model.GraphMatcherOutput:
+        return model.graph_matcher(
+            desc_a,
+            meta_a,
+            desc_b,
+            meta_b,
+            apply_candidate_mask=train_candidate_topk > 0,
+            max_attention_layers=int(layer_budget),
+            max_attention_work_fraction=max_attention_work_fraction,
+            candidate_topk=train_candidate_topk if train_candidate_topk > 0 else None,
+            positive_pair_count_for_mask=count if train_candidate_topk > 0 else 0,
+        )
+
+    def run_teacher_guard_matcher(layer_budget: int) -> pfm_model.GraphMatcherOutput | None:
+        if teacher_guard_model is None:
+            return None
+        was_training = bool(teacher_guard_model.training)
+        teacher_guard_model.eval()
+        try:
+            with torch.no_grad():
+                return teacher_guard_model.graph_matcher(
+                    desc_a.detach(),
+                    meta_a.detach(),
+                    desc_b.detach(),
+                    meta_b.detach(),
+                    apply_candidate_mask=train_candidate_topk > 0,
+                    max_attention_layers=int(layer_budget),
+                    max_attention_work_fraction=max_attention_work_fraction,
+                    candidate_topk=train_candidate_topk if train_candidate_topk > 0 else None,
+                    positive_pair_count_for_mask=count if train_candidate_topk > 0 else 0,
+                )
+        finally:
+            if was_training:
+                teacher_guard_model.train()
+
+    def positive_ce(output: pfm_model.GraphMatcherOutput) -> torch.Tensor:
+        targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
+        row_loss = F.cross_entropy(output.logits[:count, :], targets)
+        col_loss = F.cross_entropy(output.logits[:, :count].T, targets)
+        return 0.5 * (row_loss + col_loss)
+
+    deep_supervision_loss = desc_a.new_zeros(())
+    if deep_supervision_weight > 0.0 and supervision_depths:
+        deep_terms: list[torch.Tensor] = []
+        for depth in supervision_depths:
+            if attention_layer_budget > 0 and depth >= attention_layer_budget:
+                continue
+            if depth > len(model.graph_matcher.attention_layers):
+                continue
+            deep_output = run_matcher(depth)
+            deep_terms.append(positive_ce(deep_output))
+        if deep_terms:
+            deep_supervision_loss = torch.stack(deep_terms).mean()
+    depth_distillation_loss = desc_a.new_zeros(())
+    depth_distillation_teacher_depth = 0
+    effective_student_depth = (
+        int(attention_layer_budget)
+        if int(attention_layer_budget) > 0
+        else len(model.graph_matcher.attention_layers)
     )
-    targets = torch.arange(count, dtype=torch.long, device=output.logits.device)
-    row_loss = F.cross_entropy(output.logits[:count, :], targets)
-    col_loss = F.cross_entropy(output.logits[:, :count].T, targets)
-    match_ce_loss = 0.5 * (row_loss + col_loss)
+    teacher_output: pfm_model.GraphMatcherOutput | None = None
+    if (
+        depth_distillation_weight > 0.0
+        and depth_distillation_teacher_layers > 0
+        and depth_distillation_teacher_layers < effective_student_depth
+        and depth_distillation_teacher_layers <= len(model.graph_matcher.attention_layers)
+    ):
+        depth_distillation_teacher_depth = int(depth_distillation_teacher_layers)
+        with torch.no_grad():
+            teacher_output = run_matcher(depth_distillation_teacher_depth)
+    output = run_matcher(attention_layer_budget)
+    resolved_teacher_guard_output = teacher_guard_output
+    if (
+        teacher_guard_weight > 0.0
+        or teacher_score_floor_weight > 0.0
+        or teacher_distillation_weight > 0.0
+    ) and resolved_teacher_guard_output is None:
+        resolved_teacher_guard_output = run_teacher_guard_matcher(attention_layer_budget)
+    teacher_guard_loss = output.logits.new_zeros(())
+    teacher_score_floor_loss = output.logits.new_zeros(())
+    teacher_distillation_loss = output.logits.new_zeros(())
+    teacher_guard_metrics = {
+        "positive_margin_loss": output.logits.new_zeros(()),
+        "false_edge_loss": output.logits.new_zeros(()),
+        "positive_violations": output.logits.new_zeros(()),
+        "false_edges": output.logits.new_zeros(()),
+    }
+    teacher_score_floor_metrics = {
+        "violations": output.logits.new_zeros(()),
+        "score_delta_mean": output.logits.new_zeros(()),
+        "teacher_score_mean": output.logits.new_zeros(()),
+    }
+    dustbin_diagnostics = graph_matcher_dustbin_diagnostics(output, positive_count=count)
+    dustbin_guard_enabled = should_apply_positive_dustbin_guard(
+        dustbin_diagnostics,
+        reject_threshold=positive_dustbin_guard_reject_threshold,
+        margin_threshold=positive_dustbin_guard_margin_threshold,
+    )
+    guarded_no_match_weight = 0.0 if dustbin_guard_enabled else float(no_match_weight)
+    guarded_hard_negative_dustbin_weight = (
+        0.0 if dustbin_guard_enabled else float(hard_negative_dustbin_weight)
+    )
+    match_ce_loss = positive_ce(output)
     assignment_loss = output.logits.new_zeros(())
     no_match_loss = output.logits.new_zeros(())
     accept_loss = output.logits.new_zeros(())
@@ -1672,22 +2199,108 @@ def graph_matcher_correspondence_loss(
     stop_confidence_loss = output.logits.new_zeros(())
     raw_preservation_loss = output.logits.new_zeros(())
     hard_negative_dustbin_loss = output.logits.new_zeros(())
+    positive_dustbin_margin_loss = output.logits.new_zeros(())
+    true_match_margin_loss = output.logits.new_zeros(())
+    true_match_margin_metrics = {
+        "violations": output.logits.new_zeros(()),
+        "margin_mean": output.logits.new_zeros(()),
+    }
+    final_false_loss = output.logits.new_zeros(())
+    final_false_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "score_mean": output.logits.new_zeros(()),
+        "accept_mean": output.logits.new_zeros(()),
+    }
+    mined_false_loss = output.logits.new_zeros(())
+    mined_false_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "reference_filtered_edges": output.logits.new_zeros(()),
+        "score_mean": output.logits.new_zeros(()),
+        "logit_mean": output.logits.new_zeros(()),
+        "accept_mean": output.logits.new_zeros(()),
+    }
+    raw_false_loss = output.logits.new_zeros(())
+    raw_false_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "raw_similarity_mean": output.logits.new_zeros(()),
+        "margin_mean": output.logits.new_zeros(()),
+    }
+    ransac_consistency_loss = output.logits.new_zeros(())
+    ransac_consistency_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "score_mean": output.logits.new_zeros(()),
+        "residual_mean_px": output.logits.new_zeros(()),
+        "accept_mean": output.logits.new_zeros(()),
+    }
     loss = match_ce_loss
+    if deep_supervision_weight > 0.0:
+        loss = loss + float(deep_supervision_weight) * deep_supervision_loss
+    if depth_distillation_weight > 0.0 and teacher_output is not None:
+        depth_distillation_loss = graph_matcher_depth_distillation_loss(
+            output,
+            teacher_output,
+            positive_count=count,
+            temperature=depth_distillation_temperature,
+        )
+        loss = loss + float(depth_distillation_weight) * depth_distillation_loss
+    if teacher_guard_weight > 0.0 and resolved_teacher_guard_output is not None:
+        teacher_guard_loss, teacher_guard_metrics = graph_matcher_teacher_guard_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            positive_margin_tolerance=teacher_guard_positive_margin_tolerance,
+            false_margin_tolerance=teacher_guard_false_margin_tolerance,
+        )
+        loss = loss + float(teacher_guard_weight) * teacher_guard_loss
+    if teacher_score_floor_weight > 0.0 and resolved_teacher_guard_output is not None:
+        teacher_score_floor_loss, teacher_score_floor_metrics = graph_matcher_teacher_score_floor_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            tolerance=teacher_score_floor_tolerance,
+            min_teacher_score=teacher_score_floor_min_score,
+        )
+        loss = loss + float(teacher_score_floor_weight) * teacher_score_floor_loss
+    if teacher_distillation_weight > 0.0 and resolved_teacher_guard_output is not None:
+        teacher_distillation_loss = graph_matcher_depth_distillation_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            temperature=teacher_distillation_temperature,
+        )
+        loss = loss + float(teacher_distillation_weight) * teacher_distillation_loss
     total_a = desc_a.size(0)
     total_b = desc_b.size(0)
-    if no_match_weight > 0.0 and (total_a > count or total_b > count):
+    unmatched_total_a = extra_false_a_start if extra_false_match_pair_count > 0 else total_a
+    unmatched_total_b = extra_false_b_start if extra_false_match_pair_count > 0 else total_b
+    if guarded_no_match_weight > 0.0 and (unmatched_total_a > count or unmatched_total_b > count):
         no_match_terms: list[torch.Tensor] = []
-        if total_a > count:
-            dustbin_col = torch.full((total_a - count,), total_b, dtype=torch.long, device=output.logits.device)
-            no_match_terms.append(F.cross_entropy(output.logits[count:total_a, :], dustbin_col))
-        if total_b > count:
-            dustbin_row = torch.full((total_b - count,), total_a, dtype=torch.long, device=output.logits.device)
-            no_match_terms.append(F.cross_entropy(output.logits[:, count:total_b].T, dustbin_row))
+        if unmatched_total_a > count:
+            dustbin_col = torch.full(
+                (unmatched_total_a - count,),
+                total_b,
+                dtype=torch.long,
+                device=output.logits.device,
+            )
+            no_match_terms.append(F.cross_entropy(output.logits[count:unmatched_total_a, :], dustbin_col))
+        if unmatched_total_b > count:
+            dustbin_row = torch.full(
+                (unmatched_total_b - count,),
+                total_a,
+                dtype=torch.long,
+                device=output.logits.device,
+            )
+            no_match_terms.append(F.cross_entropy(output.logits[:, count:unmatched_total_b].T, dustbin_row))
         if no_match_terms:
             no_match_loss = torch.stack(no_match_terms).mean()
-            loss = loss + float(no_match_weight) * no_match_loss
+            loss = loss + float(guarded_no_match_weight) * no_match_loss
     if assignment_weight > 0.0:
-        assignment_loss = graph_matcher_assignment_loss(output, positive_count=count)
+        assignment_loss = graph_matcher_assignment_loss(
+            output,
+            positive_count=count,
+            unmatched_total_a=unmatched_total_a,
+            unmatched_total_b=unmatched_total_b,
+        )
         loss = loss + float(assignment_weight) * assignment_loss
     if accept_weight > 0.0:
         accept_loss = graph_matcher_acceptance_loss(
@@ -1721,7 +2334,7 @@ def graph_matcher_correspondence_loss(
             raw_margin_threshold=raw_preservation_raw_margin,
         )
         loss = loss + float(raw_preservation_weight) * raw_preservation_loss
-    if hard_negative_dustbin_weight > 0.0:
+    if guarded_hard_negative_dustbin_weight > 0.0:
         hard_negative_dustbin_loss = graph_matcher_hard_negative_dustbin_loss(
             output.logits,
             desc_a[:count],
@@ -1732,13 +2345,84 @@ def graph_matcher_correspondence_loss(
             points_b_xy=points_b_xy[:count],
             spatial_min_distance=hard_negative_dustbin_spatial_min_distance,
         )
-        loss = loss + float(hard_negative_dustbin_weight) * hard_negative_dustbin_loss
+        loss = loss + float(guarded_hard_negative_dustbin_weight) * hard_negative_dustbin_loss
+    if positive_dustbin_margin_weight > 0.0:
+        positive_dustbin_margin_loss = graph_matcher_positive_dustbin_margin_loss(
+            output,
+            positive_count=count,
+            margin=positive_dustbin_margin,
+        )
+        loss = loss + float(positive_dustbin_margin_weight) * positive_dustbin_margin_loss
+    if true_match_margin_weight > 0.0:
+        true_match_margin_loss, true_match_margin_metrics = graph_matcher_true_match_margin_loss(
+            output,
+            positive_count=count,
+            margin=true_match_margin,
+        )
+        loss = loss + float(true_match_margin_weight) * true_match_margin_loss
+    if final_false_match_weight > 0.0 and not dustbin_guard_enabled:
+        final_false_loss, final_false_metrics = graph_matcher_final_false_match_loss(
+            output,
+            positive_count=count,
+            points_b_xy=points_b_xy[:count],
+            topk=final_false_match_topk,
+            min_score=final_false_match_min_score,
+            margin=final_false_match_margin,
+            spatial_min_distance=final_false_match_spatial_min_distance,
+        )
+        loss = loss + float(final_false_match_weight) * final_false_loss
+    effective_mined_false_match_weight = float(mined_false_match_weight)
+    if effective_mined_false_match_weight <= 0.0 and final_false_match_weight > 0.0:
+        effective_mined_false_match_weight = float(final_false_match_weight)
+    if (
+        effective_mined_false_match_weight > 0.0
+        and extra_false_match_pair_count > 0
+        and not dustbin_guard_enabled
+    ):
+        mined_false_loss, mined_false_metrics = graph_matcher_mined_false_match_loss(
+            output,
+            positive_count=count,
+            false_a_start=extra_false_a_start,
+            false_b_start=extra_false_b_start,
+            false_pair_count=extra_false_match_pair_count,
+            topk=final_false_match_topk,
+            min_score=final_false_match_min_score,
+            margin=final_false_match_margin,
+            loss_cap=mined_false_match_loss_cap,
+            reference_margin=mined_false_match_reference_margin,
+        )
+        loss = loss + effective_mined_false_match_weight * mined_false_loss
+    if raw_false_match_weight > 0.0:
+        raw_false_loss, raw_false_metrics = graph_matcher_raw_false_match_loss(
+            output.logits,
+            desc_a[:count],
+            desc_b[:count],
+            positive_count=count,
+            negative_topk=raw_false_match_topk,
+            min_raw_similarity=raw_false_match_min_similarity,
+            margin=raw_false_match_margin,
+            points_b_xy=points_b_xy[:count],
+            spatial_min_distance=raw_false_match_spatial_min_distance,
+        )
+        loss = loss + float(raw_false_match_weight) * raw_false_loss
+    if ransac_consistency_weight > 0.0:
+        ransac_consistency_loss, ransac_consistency_metrics = graph_matcher_ransac_consistency_loss(
+            output,
+            positive_count=count,
+            points_a_xy=positive_points_a_xy,
+            points_b_xy=positive_points_b_xy,
+            topk=ransac_consistency_topk,
+            residual_threshold_px=ransac_consistency_residual_threshold_px,
+            min_score=ransac_consistency_min_score,
+            margin=ransac_consistency_margin,
+        )
+        loss = loss + float(ransac_consistency_weight) * ransac_consistency_loss
     if return_components:
         executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
         attention_work_fraction = output.logits.new_tensor(float(getattr(output, "attention_work_fraction", 0.0)))
         positive_pairs = output.logits.new_tensor(float(count))
         extra_no_match_points = output.logits.new_tensor(float(extra_no_match_count))
-        dustbin_diagnostics = graph_matcher_dustbin_diagnostics(output, positive_count=count)
+        extra_false_match_pairs = output.logits.new_tensor(float(extra_false_match_pair_count))
         return loss, components(
             loss,
             match_ce_loss,
@@ -1749,11 +2433,44 @@ def graph_matcher_correspondence_loss(
             stop_confidence_loss,
             raw_preservation_loss,
             hard_negative_dustbin_loss,
+            positive_dustbin_margin_loss,
+            true_match_margin_loss,
+            true_match_margin_metrics["violations"],
+            true_match_margin_metrics["margin_mean"],
+            final_false_loss,
+            final_false_metrics["edges"],
+            final_false_metrics["score_mean"],
+            final_false_metrics["accept_mean"],
+            mined_false_loss,
+            mined_false_metrics["edges"],
+            mined_false_metrics["reference_filtered_edges"],
+            mined_false_metrics["score_mean"],
+            mined_false_metrics["logit_mean"],
+            mined_false_metrics["accept_mean"],
+            raw_false_loss,
+            raw_false_metrics["edges"],
+            raw_false_metrics["raw_similarity_mean"],
+            raw_false_metrics["margin_mean"],
+            deep_supervision_loss,
             executed_attention_layers,
             attention_work_fraction,
             positive_pairs,
             extra_no_match_points,
+            extra_false_match_pairs,
             dustbin_diagnostics,
+            depth_distillation_loss,
+            output.logits.new_tensor(float(depth_distillation_teacher_depth)),
+            teacher_distillation_loss,
+            output.logits.new_tensor(1.0 if dustbin_guard_enabled else 0.0),
+            output.logits.new_tensor(float(guarded_no_match_weight)),
+            output.logits.new_tensor(float(guarded_hard_negative_dustbin_weight)),
+            candidate_topk_diagnostics,
+            teacher_guard_loss=teacher_guard_loss,
+            teacher_guard_metrics=teacher_guard_metrics,
+            teacher_score_floor_loss=teacher_score_floor_loss,
+            teacher_score_floor_metrics=teacher_score_floor_metrics,
+            ransac_consistency_loss=ransac_consistency_loss,
+            ransac_consistency_metrics=ransac_consistency_metrics,
         )
     return loss
 
@@ -1762,6 +2479,8 @@ def graph_matcher_assignment_loss(
     output: pfm_model.GraphMatcherOutput,
     *,
     positive_count: int,
+    unmatched_total_a: int | None = None,
+    unmatched_total_b: int | None = None,
 ) -> torch.Tensor:
     """按推理时的双向 soft assignment 训练匹配和 dustbin 拒配。"""
 
@@ -1771,6 +2490,8 @@ def graph_matcher_assignment_loss(
     count = min(int(positive_count), total_a, total_b)
     if count <= 0:
         return logits.new_zeros(())
+    unmatched_total_a = total_a if unmatched_total_a is None else min(max(int(unmatched_total_a), count), total_a)
+    unmatched_total_b = total_b if unmatched_total_b is None else min(max(int(unmatched_total_b), count), total_b)
 
     eps = torch.finfo(logits.dtype).eps
     row_prob_full = torch.softmax(logits[:total_a, :], dim=1)
@@ -1779,11 +2500,582 @@ def graph_matcher_assignment_loss(
     terms: list[torch.Tensor] = [
         -dual_prob[:count, :count].diagonal().log().mean(),
     ]
-    if total_a > count:
-        terms.append(-row_prob_full[count:total_a, total_b].clamp_min(eps).log().mean())
-    if total_b > count:
-        terms.append(-col_prob_full[total_a, count:total_b].clamp_min(eps).log().mean())
+    if unmatched_total_a > count:
+        terms.append(-row_prob_full[count:unmatched_total_a, total_b].clamp_min(eps).log().mean())
+    if unmatched_total_b > count:
+        terms.append(-col_prob_full[total_a, count:unmatched_total_b].clamp_min(eps).log().mean())
     return torch.stack(terms).mean()
+
+
+def scheduled_graph_matcher_weight(
+    base_weight: float,
+    *,
+    step: int,
+    warmup_steps: int = 0,
+    ramp_steps: int = 0,
+) -> float:
+    if base_weight < 0.0:
+        raise ValueError("base_weight must be nonnegative")
+    if warmup_steps < 0 or ramp_steps < 0:
+        raise ValueError("warmup_steps and ramp_steps must be nonnegative")
+    if base_weight == 0.0:
+        return 0.0
+    step = max(0, int(step))
+    if step <= int(warmup_steps):
+        return 0.0
+    if ramp_steps <= 0:
+        return float(base_weight)
+    progress = min(1.0, max(0.0, (step - int(warmup_steps)) / float(ramp_steps)))
+    return float(base_weight) * progress
+
+
+def graph_matcher_positive_dustbin_margin_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    count = min(int(positive_count), output.logits.size(0) - 1, output.logits.size(1) - 1)
+    if count <= 0:
+        return output.logits.new_zeros(())
+    device = output.logits.device
+    indices = torch.arange(count, device=device)
+    true_logits = output.logits[:count, :count][indices, indices]
+    row_dustbin = output.logits[:count, output.logits.size(1) - 1]
+    col_dustbin = output.logits[output.logits.size(0) - 1, :count]
+    strongest_dustbin = torch.maximum(row_dustbin, col_dustbin)
+    positive_margin = true_logits - strongest_dustbin
+    return (float(margin) - positive_margin).clamp_min(0.0).pow(2).mean()
+
+
+def graph_matcher_true_match_margin_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    margin: float = 0.25,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize true pairs that lose under the final logit-minus-dustbin score."""
+
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    logits = output.logits
+    count = min(int(positive_count), logits.size(0) - 1, logits.size(1) - 1)
+    zero = logits.new_zeros(())
+    metrics = {
+        "violations": zero,
+        "margin_mean": zero,
+    }
+    if count <= 1:
+        return zero, metrics
+
+    pair_logits = logits[:count, :count]
+    row_dustbin = logits[:count, logits.size(1) - 1].unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    diagonal_mask = torch.eye(count, dtype=torch.bool, device=logits.device)
+    true_scores = final_scores.diagonal()
+    negative_scores = final_scores.masked_fill(diagonal_mask, -float("inf"))
+    row_hard = negative_scores.max(dim=1).values
+    col_hard = negative_scores.max(dim=0).values
+    hardest_competitor = torch.maximum(row_hard, col_hard)
+    true_margin = true_scores - hardest_competitor
+    terms = (float(margin) - true_margin).clamp_min(0.0)
+    active = terms.gt(0.0)
+    if not bool(active.any()):
+        return zero, metrics
+    metrics = {
+        "violations": logits.new_tensor(float(active.sum().detach().cpu().item())),
+        "margin_mean": true_margin.detach().mean(),
+    }
+    return terms[active].pow(2).mean(), metrics
+
+
+def graph_matcher_final_false_match_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    points_b_xy: torch.Tensor | None = None,
+    topk: int = 8,
+    min_score: float = 0.0,
+    margin: float = 0.25,
+    spatial_min_distance: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize final high-confidence off-diagonal matches in the positive block."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    if spatial_min_distance < 0.0:
+        raise ValueError("spatial_min_distance must be nonnegative")
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "score_mean": zero,
+        "accept_mean": zero,
+    }
+    count = min(int(positive_count), logits.size(0) - 1, logits.size(1) - 1)
+    if count <= 1 or topk <= 0:
+        return zero, metrics
+    pair_logits = logits[:count, :count]
+    row_dustbin = logits[:count, logits.size(1) - 1].detach().unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].detach().unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    candidate_mask = ~torch.eye(count, dtype=torch.bool, device=logits.device)
+    if spatial_min_distance > 0.0 and points_b_xy is not None and points_b_xy.size(0) >= count:
+        points_b = points_b_xy[:count].to(device=logits.device, dtype=logits.dtype)
+        candidate_mask &= torch.cdist(points_b, points_b) >= float(spatial_min_distance)
+    candidate_mask &= final_scores.detach() >= float(min_score)
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = final_scores[candidate_mask]
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.detach().topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    selected_scores = candidate_scores.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    wrong_scores = final_scores[rows, cols]
+    row_true_scores = final_scores[rows, rows]
+    col_true_scores = final_scores[cols, cols]
+    true_reference_scores = torch.minimum(row_true_scores, col_true_scores)
+    ranking_loss = (float(margin) - (true_reference_scores - wrong_scores)).clamp_min(0.0).pow(2).mean()
+    terms = [ranking_loss]
+    accept_mean = zero
+    if output.accept_logits is not None:
+        accept_logits = output.accept_logits
+        if accept_logits.size(0) >= count and accept_logits.size(1) >= count:
+            selected_accept_logits = accept_logits[rows, cols]
+            terms.append(
+                F.binary_cross_entropy_with_logits(
+                    selected_accept_logits,
+                    torch.zeros_like(selected_accept_logits),
+                )
+            )
+            accept_mean = torch.sigmoid(selected_accept_logits.detach()).mean()
+    loss = torch.stack(terms).mean()
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "score_mean": selected_scores.detach().mean(),
+        "accept_mean": accept_mean,
+    }
+    return loss, metrics
+
+
+def graph_matcher_ransac_consistency_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    points_a_xy: torch.Tensor,
+    points_b_xy: torch.Tensor,
+    topk: int = 8,
+    residual_threshold_px: float = 3.0,
+    min_score: float = 0.0,
+    margin: float = 0.25,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize high-scoring edges that are inconsistent with the positive-pair geometry."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if residual_threshold_px < 0.0:
+        raise ValueError("residual_threshold_px must be nonnegative")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "score_mean": zero,
+        "residual_mean_px": zero,
+        "accept_mean": zero,
+    }
+    count = min(
+        int(positive_count),
+        logits.size(0) - 1,
+        logits.size(1) - 1,
+        points_a_xy.size(0),
+        points_b_xy.size(0),
+    )
+    if count < 3 or topk <= 0:
+        return zero, metrics
+
+    points_a = points_a_xy[:count].to(device=logits.device, dtype=logits.dtype)
+    points_b = points_b_xy[:count].to(device=logits.device, dtype=logits.dtype)
+    design = torch.cat([points_a.detach(), torch.ones((count, 1), device=logits.device, dtype=logits.dtype)], dim=1)
+    try:
+        affine = torch.linalg.lstsq(design, points_b.detach()).solution
+    except RuntimeError:
+        affine = torch.linalg.pinv(design).matmul(points_b.detach())
+    predicted_b = design.matmul(affine)
+    residuals = torch.cdist(predicted_b, points_b.detach())
+
+    pair_logits = logits[:count, :count]
+    row_dustbin = logits[:count, logits.size(1) - 1].detach().unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].detach().unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    candidate_mask = ~torch.eye(count, dtype=torch.bool, device=logits.device)
+    candidate_mask &= residuals > float(residual_threshold_px)
+    candidate_mask &= final_scores.detach() >= float(min_score)
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = final_scores[candidate_mask]
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.detach().topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    selected_scores = candidate_scores.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    wrong_scores = final_scores[rows, cols]
+    row_true_scores = final_scores[rows, rows]
+    col_true_scores = final_scores[cols, cols]
+    true_reference_scores = torch.minimum(row_true_scores, col_true_scores)
+    ranking_loss = (float(margin) - (true_reference_scores - wrong_scores)).clamp_min(0.0).pow(2).mean()
+    terms = [ranking_loss]
+    accept_mean = zero
+    if output.accept_logits is not None:
+        accept_logits = output.accept_logits
+        if accept_logits.size(0) >= count and accept_logits.size(1) >= count:
+            selected_accept_logits = accept_logits[rows, cols]
+            terms.append(
+                F.binary_cross_entropy_with_logits(
+                    selected_accept_logits,
+                    torch.zeros_like(selected_accept_logits),
+                )
+            )
+            accept_mean = torch.sigmoid(selected_accept_logits.detach()).mean()
+    loss = torch.stack(terms).mean()
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "score_mean": selected_scores.detach().mean(),
+        "residual_mean_px": residuals[rows, cols].detach().mean(),
+        "accept_mean": accept_mean,
+    }
+    return loss, metrics
+
+
+def graph_matcher_mined_false_match_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    false_a_start: int,
+    false_b_start: int,
+    false_pair_count: int,
+    topk: int = 8,
+    min_score: float = 0.0,
+    margin: float = 0.25,
+    loss_cap: float = 0.0,
+    reference_margin: float = -1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize mined false matcher edges without training dustbin logits."""
+
+    if false_a_start < 0 or false_b_start < 0:
+        raise ValueError("false starts must be nonnegative")
+    if false_pair_count < 0:
+        raise ValueError("false_pair_count must be nonnegative")
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    if loss_cap < 0.0:
+        raise ValueError("loss_cap must be nonnegative")
+    if not math.isfinite(float(reference_margin)) or reference_margin < -1.0:
+        raise ValueError("reference_margin must be finite and >= -1")
+
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "reference_filtered_edges": zero,
+        "score_mean": zero,
+        "logit_mean": zero,
+        "accept_mean": zero,
+    }
+    total_a = logits.size(0) - 1
+    total_b = logits.size(1) - 1
+    count = min(
+        int(false_pair_count),
+        max(0, total_a - int(false_a_start)),
+        max(0, total_b - int(false_b_start)),
+    )
+    if count <= 0 or topk <= 0:
+        return zero, metrics
+
+    rows = torch.arange(int(false_a_start), int(false_a_start) + count, device=logits.device)
+    cols = torch.arange(int(false_b_start), int(false_b_start) + count, device=logits.device)
+    pair_logits = logits[rows, cols]
+    row_dustbin = logits[rows, total_b].detach()
+    col_dustbin = logits[total_a, cols].detach()
+    final_scores = pair_logits - row_dustbin - col_dustbin
+
+    positive_limit = min(int(positive_count), total_a, total_b)
+    if positive_limit > 0:
+        positive_rows = torch.arange(positive_limit, device=logits.device)
+        positive_pair_logits = logits[:positive_limit, :positive_limit].diagonal()
+        positive_row_dustbin = logits[positive_rows, total_b].detach()
+        positive_col_dustbin = logits[total_a, positive_rows].detach()
+        positive_reference = (
+            positive_pair_logits - positive_row_dustbin - positive_col_dustbin
+        ).detach().mean()
+    else:
+        positive_reference = pair_logits.detach().new_zeros(())
+
+    candidate_mask = final_scores.detach() >= float(min_score)
+    reference_filtered_edges = zero
+    if positive_limit > 0 and reference_margin >= 0.0:
+        candidate_before_reference = candidate_mask
+        candidate_mask = candidate_mask & (
+            final_scores.detach() >= positive_reference - float(reference_margin)
+        )
+        reference_filtered_edges = (candidate_before_reference & ~candidate_mask).to(dtype=logits.dtype).sum()
+    if not bool(candidate_mask.any()):
+        metrics["reference_filtered_edges"] = reference_filtered_edges
+        return zero, metrics
+
+    candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).reshape(-1)
+    candidate_scores = final_scores.index_select(0, candidate_indices)
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.detach().topk(keep_count).indices
+    selected_indices = candidate_indices.index_select(0, selected_order)
+    selected_scores = candidate_scores.index_select(0, selected_order)
+    selected_pair_logits = pair_logits.index_select(0, selected_indices)
+
+    ranking_loss = (selected_scores - positive_reference + float(margin)).clamp_min(0.0).pow(2).mean()
+    terms = [ranking_loss]
+
+    accept_mean = zero
+    if output.accept_logits is not None:
+        accept_logits = output.accept_logits
+        if accept_logits.size(0) > int(false_a_start) and accept_logits.size(1) > int(false_b_start):
+            selected_rows = rows.index_select(0, selected_indices)
+            selected_cols = cols.index_select(0, selected_indices)
+            valid = (selected_rows < accept_logits.size(0)) & (selected_cols < accept_logits.size(1))
+            if bool(valid.any()):
+                selected_accept_logits = accept_logits[selected_rows[valid], selected_cols[valid]]
+                terms.append(
+                    F.binary_cross_entropy_with_logits(
+                        selected_accept_logits,
+                        torch.zeros_like(selected_accept_logits),
+                    )
+                )
+                accept_mean = torch.sigmoid(selected_accept_logits.detach()).mean()
+
+    loss = torch.stack(terms).mean()
+    if loss_cap > 0.0:
+        loss = loss.clamp_max(float(loss_cap))
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "reference_filtered_edges": reference_filtered_edges.detach(),
+        "score_mean": selected_scores.detach().mean(),
+        "logit_mean": selected_pair_logits.detach().mean(),
+        "accept_mean": accept_mean,
+    }
+    return loss, metrics
+
+
+def graph_matcher_depth_distillation_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """Keep a deeper matcher assignment distribution close to a detached shallow teacher."""
+
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    if count <= 1:
+        return student.logits.new_zeros(())
+    if not math.isfinite(float(temperature)) or temperature <= 0.0:
+        raise ValueError("temperature must be positive and finite")
+    scale = float(temperature)
+    student_logits = student.logits[:count, :count]
+    teacher_logits = teacher.logits[:count, :count].detach().to(device=student_logits.device, dtype=student_logits.dtype)
+    student_row_log_prob = F.log_softmax(student_logits / scale, dim=1)
+    teacher_row_prob = F.softmax(teacher_logits / scale, dim=1)
+    student_col_log_prob = F.log_softmax(student_logits.T / scale, dim=1)
+    teacher_col_prob = F.softmax(teacher_logits.T / scale, dim=1)
+    row_loss = F.kl_div(student_row_log_prob, teacher_row_prob, reduction="batchmean")
+    col_loss = F.kl_div(student_col_log_prob, teacher_col_prob, reduction="batchmean")
+    return 0.5 * (row_loss + col_loss) * scale * scale
+
+
+def graph_matcher_teacher_guard_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    positive_margin_tolerance: float = 0.0,
+    false_margin_tolerance: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Preserve a frozen teacher's positive margins while discouraging stronger false edges."""
+
+    if positive_margin_tolerance < 0.0:
+        raise ValueError("positive_margin_tolerance must be nonnegative")
+    if false_margin_tolerance < 0.0:
+        raise ValueError("false_margin_tolerance must be nonnegative")
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    zero = student.logits.new_zeros(())
+    if count <= 0:
+        return zero, {
+            "positive_margin_loss": zero,
+            "false_edge_loss": zero,
+            "positive_violations": zero,
+            "false_edges": zero,
+        }
+    device = student.logits.device
+    indices = torch.arange(count, device=device)
+    student_logits = student.logits
+    teacher_logits = teacher.logits.detach().to(device=device, dtype=student_logits.dtype)
+
+    def positive_margin(logits: torch.Tensor) -> torch.Tensor:
+        true_logits = logits[:count, :count][indices, indices]
+        row_block = logits[:count, :count].clone()
+        col_block = logits[:count, :count].clone()
+        row_block[indices, indices] = -torch.inf
+        col_block[indices, indices] = -torch.inf
+        row_competitor = row_block.max(dim=1).values
+        col_competitor = col_block.max(dim=0).values
+        row_dustbin = logits[:count, logits.size(1) - 1]
+        col_dustbin = logits[logits.size(0) - 1, :count]
+        strongest_competitor = torch.stack(
+            [row_competitor, col_competitor, row_dustbin, col_dustbin],
+            dim=0,
+        ).max(dim=0).values
+        return true_logits - strongest_competitor
+
+    teacher_positive_margin = positive_margin(teacher_logits)
+    student_positive_margin = positive_margin(student_logits)
+    positive_deficit = (
+        teacher_positive_margin - student_positive_margin - float(positive_margin_tolerance)
+    ).clamp_min(0.0)
+    positive_margin_loss = positive_deficit.pow(2).mean()
+    positive_violations = positive_deficit.gt(0.0).to(student_logits.dtype).sum()
+
+    if count <= 1:
+        false_edge_loss = zero
+        false_edges = zero
+    else:
+        mask = torch.ones((count, count), dtype=torch.bool, device=device)
+        mask[indices, indices] = False
+        student_true = student_logits[:count, :count][indices, indices]
+        teacher_true = teacher_logits[:count, :count][indices, indices]
+        student_false_row_margin = student_logits[:count, :count] - student_true[:, None]
+        teacher_false_row_margin = teacher_logits[:count, :count] - teacher_true[:, None]
+        student_false_col_margin = student_logits[:count, :count] - student_true[None, :]
+        teacher_false_col_margin = teacher_logits[:count, :count] - teacher_true[None, :]
+        false_excess = torch.maximum(
+            student_false_row_margin - teacher_false_row_margin,
+            student_false_col_margin - teacher_false_col_margin,
+        )
+        selected_excess = (false_excess[mask] - float(false_margin_tolerance)).clamp_min(0.0)
+        false_edge_loss = selected_excess.pow(2).mean() if selected_excess.numel() else zero
+        false_edges = selected_excess.gt(0.0).to(student_logits.dtype).sum()
+
+    loss = 0.5 * (positive_margin_loss + false_edge_loss)
+    return loss, {
+        "positive_margin_loss": positive_margin_loss.detach(),
+        "false_edge_loss": false_edge_loss.detach(),
+        "positive_violations": positive_violations.detach(),
+        "false_edges": false_edges.detach(),
+    }
+
+
+def graph_matcher_teacher_score_floor_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    tolerance: float = 0.0,
+    min_teacher_score: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Preserve teacher true-pair final scores to avoid conservative recall collapse."""
+
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be nonnegative")
+    if not math.isfinite(float(min_teacher_score)):
+        raise ValueError("min_teacher_score must be finite")
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    zero = student.logits.new_zeros(())
+    metrics = {
+        "violations": zero,
+        "score_delta_mean": zero,
+        "teacher_score_mean": zero,
+    }
+    if count <= 0:
+        return zero, metrics
+
+    device = student.logits.device
+    indices = torch.arange(count, device=device)
+    student_logits = student.logits
+    teacher_logits = teacher.logits.detach().to(device=device, dtype=student_logits.dtype)
+
+    def true_final_scores(logits: torch.Tensor) -> torch.Tensor:
+        true_logits = logits[:count, :count][indices, indices]
+        row_dustbin = logits[:count, logits.size(1) - 1]
+        col_dustbin = logits[logits.size(0) - 1, :count]
+        return true_logits - row_dustbin - col_dustbin
+
+    teacher_scores = true_final_scores(teacher_logits)
+    protected = teacher_scores >= float(min_teacher_score)
+    if not bool(protected.any()):
+        return zero, metrics
+
+    student_scores = true_final_scores(student_logits)
+    selected_teacher = teacher_scores[protected]
+    selected_student = student_scores[protected]
+    score_delta = selected_student - selected_teacher
+    deficit = (selected_teacher - selected_student - float(tolerance)).clamp_min(0.0)
+    loss = deficit.pow(2).mean()
+    metrics = {
+        "violations": deficit.gt(0.0).to(student_logits.dtype).sum().detach(),
+        "score_delta_mean": score_delta.detach().mean(),
+        "teacher_score_mean": selected_teacher.detach().mean(),
+    }
+    return loss, metrics
+
+
+def should_apply_positive_dustbin_guard(
+    diagnostics: dict[str, float],
+    *,
+    reject_threshold: float = 1.1,
+    margin_threshold: float = -float("inf"),
+) -> bool:
+    """Return true when positive matches are already being overpowered by dustbin."""
+
+    rejected = float(diagnostics.get("true_match_rejected_by_dustbin_ratio", 0.0))
+    margin = float(diagnostics.get("positive_vs_dustbin_margin_mean", 0.0))
+    reject_trigger = math.isfinite(float(reject_threshold)) and 0.0 <= float(reject_threshold) <= 1.0
+    margin_trigger = math.isfinite(float(margin_threshold))
+    return (reject_trigger and rejected > float(reject_threshold)) or (
+        margin_trigger and margin < float(margin_threshold)
+    )
 
 
 def graph_matcher_acceptance_loss(
@@ -1894,10 +3186,14 @@ def graph_matcher_dustbin_diagnostics(
             "true_match_rejected_by_dustbin_ratio": 0.0,
             "positive_pair_logit_mean": 0.0,
             "positive_dustbin_logit_mean": 0.0,
+            "dustbin_logit_mean": 0.0,
+            "dustbin_logit_for_true_match_mean": 0.0,
             "positive_vs_dustbin_margin_mean": 0.0,
             "positive_vs_dustbin_margin_median": 0.0,
             "positive_vs_dustbin_margin_p10": 0.0,
             "positive_vs_dustbin_margin_below0_ratio": 0.0,
+            "false_match_accepted_ratio": 0.0,
+            "accept_logit_mean": 0.0,
             "true_pair_prob_mean": 0.0,
             "dustbin_prob_for_true_match_mean": 0.0,
         }
@@ -1907,8 +3203,8 @@ def graph_matcher_dustbin_diagnostics(
     true_logits = pair_logits.diagonal().to(torch.float32)
     row_dustbin = output.logits[:count, output.logits.size(1) - 1].to(torch.float32)
     col_dustbin = output.logits[output.logits.size(0) - 1, :count].to(torch.float32)
-    strongest_dustbin = torch.maximum(row_dustbin, col_dustbin)
-    margin = true_logits - strongest_dustbin
+    two_sided_dustbin = row_dustbin + col_dustbin
+    margin = true_logits - two_sided_dustbin
     row_prob = torch.softmax(output.logits[:count, :], dim=1)
     col_prob = torch.softmax(output.logits[:, :count], dim=0)
     true_pair_prob = row_prob[indices, indices].to(torch.float32)
@@ -1916,17 +3212,67 @@ def graph_matcher_dustbin_diagnostics(
     sorted_margin = margin.sort().values
     p10_index = min(sorted_margin.numel() - 1, max(0, int(math.floor((sorted_margin.numel() - 1) * 0.10))))
     rejected = margin.lt(0.0).to(torch.float32)
+    if count > 1:
+        false_mask = ~torch.eye(count, dtype=torch.bool, device=device)
+        false_scores = (pair_logits - row_dustbin[:, None] - col_dustbin[None, :])[false_mask].to(torch.float32)
+        false_match_accepted_ratio = float(false_scores.gt(0.0).to(torch.float32).mean().detach().cpu())
+    else:
+        false_match_accepted_ratio = 0.0
+    accept_logit_mean = 0.0
+    if output.accept_logits is not None:
+        accept_count = min(count, output.accept_logits.size(0), output.accept_logits.size(1))
+        if accept_count > 0:
+            accept_logit_mean = float(
+                output.accept_logits[:accept_count, :accept_count].diagonal().to(torch.float32).mean().detach().cpu()
+            )
     return {
         "true_match_rejected_by_dustbin_ratio": float(rejected.mean().detach().cpu()),
         "positive_pair_logit_mean": float(true_logits.mean().detach().cpu()),
-        "positive_dustbin_logit_mean": float(strongest_dustbin.mean().detach().cpu()),
+        "positive_dustbin_logit_mean": float(two_sided_dustbin.mean().detach().cpu()),
+        "dustbin_logit_mean": float(two_sided_dustbin.mean().detach().cpu()),
+        "dustbin_logit_for_true_match_mean": float(two_sided_dustbin.mean().detach().cpu()),
         "positive_vs_dustbin_margin_mean": float(margin.mean().detach().cpu()),
         "positive_vs_dustbin_margin_median": float(margin.median().detach().cpu()),
         "positive_vs_dustbin_margin_p10": float(sorted_margin[p10_index].detach().cpu()),
         "positive_vs_dustbin_margin_below0_ratio": float(rejected.mean().detach().cpu()),
+        "false_match_accepted_ratio": false_match_accepted_ratio,
+        "accept_logit_mean": accept_logit_mean,
         "true_pair_prob_mean": float(true_pair_prob.mean().detach().cpu()),
         "dustbin_prob_for_true_match_mean": float(dustbin_prob.mean().detach().cpu()),
     }
+
+
+def graph_matcher_candidate_topk_diagnostics(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    meta_a: torch.Tensor,
+    meta_b: torch.Tensor,
+    *,
+    positive_count: int,
+    topk_values: tuple[int, ...] = (64, 256),
+) -> dict[str, float]:
+    count = min(int(positive_count), desc_a.size(0), desc_b.size(0))
+    result = {f"true_match_in_topk@{int(topk)}": 0.0 for topk in topk_values}
+    if count <= 0:
+        return result
+    indices = torch.arange(count, device=desc_a.device)
+    with torch.no_grad():
+        for topk in topk_values:
+            mask = model.graph_matcher._candidate_mask(
+                desc_a.detach(),
+                desc_b.detach(),
+                meta_a.detach(),
+                meta_b.detach(),
+                candidate_topk=int(topk),
+                positive_pair_count=0,
+            )
+            if mask.numel() == 0:
+                hit_rate = 0.0
+            else:
+                hit_rate = float(mask[indices, indices].to(torch.float32).mean().detach().cpu())
+            result[f"true_match_in_topk@{int(topk)}"] = hit_rate
+    return result
 
 
 def graph_matcher_raw_preservation_loss(
@@ -1957,6 +3303,73 @@ def graph_matcher_raw_preservation_loss(
     row_loss = (float(target_margin) - (logit_diag - row_hard)).clamp_min(0.0).pow(2)
     col_loss = (float(target_margin) - (logit_diag - col_hard)).clamp_min(0.0).pow(2)
     return 0.5 * (row_loss[confident].mean() + col_loss[confident].mean())
+
+
+def graph_matcher_raw_false_match_loss(
+    logits: torch.Tensor,
+    desc_a: torch.Tensor,
+    desc_b: torch.Tensor,
+    *,
+    positive_count: int,
+    negative_topk: int = 8,
+    min_raw_similarity: float = 0.75,
+    margin: float = 0.25,
+    points_b_xy: torch.Tensor | None = None,
+    spatial_min_distance: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize raw-descriptor-confusable off-diagonal graph logits without boosting dustbin."""
+
+    if negative_topk < 0:
+        raise ValueError("negative_topk must be nonnegative")
+    if min_raw_similarity < -1.0 or min_raw_similarity > 1.0:
+        raise ValueError("min_raw_similarity must be in [-1, 1]")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    if spatial_min_distance < 0.0:
+        raise ValueError("spatial_min_distance must be nonnegative")
+    count = min(int(positive_count), desc_a.size(0), desc_b.size(0), logits.size(0) - 1, logits.size(1) - 1)
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "raw_similarity_mean": zero,
+        "margin_mean": zero,
+    }
+    if count <= 1 or negative_topk <= 0:
+        return zero, metrics
+    raw_similarity = normalize_descriptor_batch(desc_a[:count]) @ normalize_descriptor_batch(desc_b[:count]).T
+    diagonal = torch.eye(count, dtype=torch.bool, device=raw_similarity.device)
+    candidate_mask = ~diagonal
+    if points_b_xy is not None and spatial_min_distance > 0.0:
+        if points_b_xy.dim() != 2 or points_b_xy.size(1) != 2:
+            raise ValueError("points_b_xy must have shape Nx2")
+        if points_b_xy.size(0) < count:
+            raise ValueError("points_b_xy must contain at least positive_count rows")
+        target_points = points_b_xy[:count].to(device=raw_similarity.device, dtype=raw_similarity.dtype)
+        candidate_mask &= torch.cdist(target_points, target_points, p=2.0).ge(float(spatial_min_distance))
+    candidate_mask &= raw_similarity.ge(float(min_raw_similarity))
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = raw_similarity[candidate_mask]
+    keep_count = min(int(negative_topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    selected_scores = candidate_scores.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    pair_logits = logits[:count, :count]
+    wrong_logits = pair_logits[rows, cols]
+    row_true_logits = pair_logits[rows, rows]
+    col_true_logits = pair_logits[cols, cols]
+    true_reference_logits = torch.minimum(row_true_logits, col_true_logits)
+    selected_margin = true_reference_logits - wrong_logits
+    loss = (float(margin) - selected_margin).clamp_min(0.0).pow(2).mean()
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "raw_similarity_mean": selected_scores.detach().mean(),
+        "margin_mean": selected_margin.detach().mean(),
+    }
+    return loss, metrics
 
 
 def graph_matcher_hard_negative_dustbin_loss(
@@ -2261,6 +3674,40 @@ def affine_consistency_loss(
     return F.smooth_l1_loss(rotated, target)
 
 
+def affine_regularization_loss(
+    affine: torch.Tensor,
+    *,
+    identity_weight: float = 1.0,
+    determinant_weight: float = 1.0,
+    condition_weight: float = 0.25,
+    return_metrics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if affine.dim() != 4 or affine.size(1) != 4:
+        raise ValueError("affine must have shape Bx4xHxW")
+    matrix = affine.to(dtype=torch.float32).permute(0, 2, 3, 1).reshape(-1, 2, 2)
+    identity = torch.eye(2, dtype=matrix.dtype, device=matrix.device).expand_as(matrix)
+    det = torch.linalg.det(matrix)
+    singular_values = torch.linalg.svdvals(matrix)
+    condition = singular_values[:, 0] / singular_values[:, 1].clamp_min(1.0e-4)
+    identity_loss = (matrix - identity).pow(2).mean()
+    determinant_loss = (det - 1.0).pow(2).mean()
+    condition_loss = condition.clamp_min(1.0).log().pow(2).mean()
+    loss = (
+        float(identity_weight) * identity_loss
+        + float(determinant_weight) * determinant_loss
+        + float(condition_weight) * condition_loss
+    )
+    if not return_metrics:
+        return loss
+    metrics = {
+        "affine_det_mean": det.mean(),
+        "affine_det_std": det.std(unbiased=False),
+        "affine_condition_mean": condition.mean(),
+        "affine_condition_max": condition.max(),
+    }
+    return loss, metrics
+
+
 def compute_descriptor_maps(model, pair: SyntheticPair) -> tuple[torch.Tensor, torch.Tensor]:
     return (
         model.descriptor_map_single(pair.view_a.unsqueeze(0)),
@@ -2303,15 +3750,33 @@ def learned_training_sparse_maps_single(
     descriptors = sparse.descriptors
     if train_blended_descriptors:
         descriptors = model.fuse_descriptor_maps(descriptors, image, texture_blend_weight=texture_blend_weight)
+    heatmap = sparse.heatmap
+    quality = None
+    quality_score_mode = getattr(model.config, "quality_score_mode", "soft")
+    if quality_score_mode != "raw" and hasattr(model, "quality_head") and hasattr(model, "dense_head"):
+        texture_saliency = pfm_model.make_rotation_invariant_texture_saliency(
+            image,
+            sparse.heatmap.size(2),
+            sparse.heatmap.size(3),
+        )
+        dense = model.dense_head(features[0], features[0])
+        dense_confidence = F.interpolate(dense.confidence, size=sparse.heatmap.shape[-2:], mode="nearest")
+        quality = model.quality_head(descriptors, sparse.heatmap, texture_saliency, dense_confidence)
+        heatmap = pfm_model.apply_quality_score_mode(
+            sparse.heatmap,
+            quality,
+            mode=quality_score_mode,
+        )
     return TrainingSparseMaps(
         descriptors=descriptors,
-        heatmap=sparse.heatmap,
+        heatmap=heatmap,
         matchability=sparse.matchability,
         descriptor_uncertainty=sparse.descriptor_uncertainty,
         no_match_prior=sparse.no_match_prior,
         scale=sparse.scale,
         orientation=sparse.orientation,
         affine=sparse.affine,
+        quality=quality,
     )
 
 
@@ -2450,8 +3915,28 @@ def descriptor_parameters(
     train_quality_head: bool = False,
     train_reliability_head: bool = False,
     train_graph_matcher: bool = False,
+    train_graph_calibration_only: bool = False,
 ) -> list[torch.nn.Parameter]:
     selected: list[torch.nn.Parameter] = []
+
+    def graph_matcher_trainable(name: str) -> bool:
+        if not name.startswith("graph_matcher."):
+            return False
+        if not train_graph_calibration_only:
+            return True
+        return (
+            name.startswith("graph_matcher.geometry_bias.")
+            or name.startswith("graph_matcher.accept_head.")
+            or name
+            in {
+                "graph_matcher.logit_scale",
+                "graph_matcher.raw_score_temperature",
+                "graph_matcher.graph_delta_scale",
+                "graph_matcher.accept_logit_scale",
+                "graph_matcher.dustbin_bias",
+            }
+        )
+
     for name, parameter in model.named_parameters():
         trainable = train_backbone and name.startswith("backbone.")
         trainable = trainable or (train_dual_fpn and name.startswith("dual_fpn."))
@@ -2494,13 +3979,29 @@ def descriptor_parameters(
                 or name.startswith("sparse_head.no_match_prior")
             )
         )
-        trainable = trainable or (train_graph_matcher and name.startswith("graph_matcher."))
+        trainable = trainable or (train_graph_matcher and graph_matcher_trainable(name))
         if trainable:
             parameter.requires_grad_(True)
             selected.append(parameter)
         else:
             parameter.requires_grad_(False)
     return selected
+
+
+def apply_extractor_freeze_warmup(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    original_requires_grad: dict[str, bool],
+    *,
+    freeze_extractor: bool,
+) -> None:
+    """Temporarily freeze non-GraphMatcher parameters while preserving the selected trainable mask."""
+
+    for name, parameter in model.named_parameters():
+        original = bool(original_requires_grad.get(name, parameter.requires_grad))
+        if freeze_extractor and not name.startswith("graph_matcher."):
+            parameter.requires_grad_(False)
+        else:
+            parameter.requires_grad_(original)
 
 
 def gradient_l2_norm(parameters: list[torch.nn.Parameter]) -> float:
@@ -2698,7 +4199,7 @@ def train_step(
     pose_balanced_sampling: bool = False,
     pose_difficulty_loss_weight: float = 0.0,
     graph_matcher_loss_weight: float = 0.0,
-    graph_matcher_metadata_mode: str = "full",
+    graph_matcher_metadata_mode: str = "calibrated",
     graph_matcher_no_match_points: int = 0,
     graph_matcher_no_match_weight: float = 0.0,
     graph_matcher_no_match_min_distance: float = 4.0,
@@ -2716,6 +4217,31 @@ def train_step(
     graph_matcher_hard_negative_dustbin_topk: int = 8,
     graph_matcher_hard_negative_dustbin_margin: float = 0.25,
     graph_matcher_hard_negative_dustbin_spatial_min_distance: float = 0.0,
+    graph_matcher_dustbin_warmup_steps: int = 0,
+    graph_matcher_dustbin_ramp_steps: int = 0,
+    graph_matcher_positive_dustbin_margin_weight: float = 0.0,
+    graph_matcher_positive_dustbin_margin: float = 0.0,
+    graph_matcher_true_match_margin_weight: float = 0.0,
+    graph_matcher_true_match_margin: float = 0.25,
+    graph_matcher_final_false_match_weight: float = 0.0,
+    graph_matcher_mined_false_match_weight: float = 0.0,
+    graph_matcher_mined_false_match_loss_cap: float = 0.0,
+    graph_matcher_mined_false_match_reference_margin: float = -1.0,
+    graph_matcher_final_false_match_topk: int = 8,
+    graph_matcher_final_false_match_min_score: float = 0.0,
+    graph_matcher_final_false_match_margin: float = 0.25,
+    graph_matcher_final_false_match_spatial_min_distance: float = 0.0,
+    graph_matcher_raw_false_match_weight: float = 0.0,
+    graph_matcher_raw_false_match_topk: int = 8,
+    graph_matcher_raw_false_match_min_similarity: float = 0.75,
+    graph_matcher_raw_false_match_margin: float = 0.25,
+    graph_matcher_raw_false_match_spatial_min_distance: float = 0.0,
+    graph_matcher_ransac_consistency_weight: float = 0.0,
+    graph_matcher_ransac_consistency_topk: int = 8,
+    graph_matcher_ransac_consistency_residual_threshold_px: float = 3.0,
+    graph_matcher_ransac_consistency_min_score: float = 0.0,
+    graph_matcher_ransac_consistency_margin: float = 0.25,
+    graph_matcher_train_candidate_topk: int = 0,
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
     graph_matcher_online_false_no_match: bool = False,
@@ -2723,6 +4249,22 @@ def train_step(
     graph_matcher_train_random_attention_layers: bool = False,
     graph_matcher_train_max_attention_work_fraction: float = 1.0,
     graph_matcher_train_width_keep_ratio: float = 1.0,
+    graph_matcher_deep_supervision_depths: list[int] | None = None,
+    graph_matcher_deep_supervision_weight: float = 0.0,
+    graph_matcher_depth_distillation_weight: float = 0.0,
+    graph_matcher_depth_distillation_teacher_layers: int = 0,
+    graph_matcher_depth_distillation_temperature: float = 1.0,
+    graph_matcher_teacher_guard_model: pfm_model.PlanetaryFeatureMatcher | None = None,
+    graph_matcher_teacher_guard_weight: float = 0.0,
+    graph_matcher_teacher_guard_positive_margin_tolerance: float = 0.0,
+    graph_matcher_teacher_guard_false_margin_tolerance: float = 0.0,
+    graph_matcher_teacher_score_floor_weight: float = 0.0,
+    graph_matcher_teacher_score_floor_tolerance: float = 0.0,
+    graph_matcher_teacher_score_floor_min_score: float = 0.0,
+    graph_matcher_teacher_distillation_weight: float = 0.0,
+    graph_matcher_teacher_distillation_temperature: float = 1.0,
+    graph_matcher_positive_dustbin_guard_reject_threshold: float = 1.1,
+    graph_matcher_positive_dustbin_guard_margin_threshold: float = -float("inf"),
     matchability_weight: float = 0.0,
     descriptor_uncertainty_weight: float = 0.0,
     no_match_prior_weight: float = 0.0,
@@ -2732,6 +4274,7 @@ def train_step(
     orientation_consistency_weight: float = 0.0,
     scale_consistency_weight: float = 0.0,
     affine_consistency_weight: float = 0.0,
+    affine_regularization_weight: float = 0.0,
     rotation_consistency_degrees: list[int] | None = None,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype = torch.float16,
@@ -2743,6 +4286,8 @@ def train_step(
     forced_pair_paths: list[Path] | None = None,
     prefetched_pairs: dict[Path, SyntheticPair] | None = None,
     pair_cache: PairArchiveCache | None = None,
+    training_step: int = 0,
+    freeze_extractor_warmup_active: bool = False,
 ) -> dict[str, float]:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
@@ -2756,9 +4301,97 @@ def train_step(
         ("orientation_consistency_weight", orientation_consistency_weight),
         ("scale_consistency_weight", scale_consistency_weight),
         ("affine_consistency_weight", affine_consistency_weight),
+        ("affine_regularization_weight", affine_regularization_weight),
+        ("graph_matcher_deep_supervision_weight", graph_matcher_deep_supervision_weight),
+        ("graph_matcher_depth_distillation_weight", graph_matcher_depth_distillation_weight),
+        ("graph_matcher_positive_dustbin_margin_weight", graph_matcher_positive_dustbin_margin_weight),
+        ("graph_matcher_true_match_margin_weight", graph_matcher_true_match_margin_weight),
+        ("graph_matcher_final_false_match_weight", graph_matcher_final_false_match_weight),
+        ("graph_matcher_mined_false_match_weight", graph_matcher_mined_false_match_weight),
+        ("graph_matcher_mined_false_match_loss_cap", graph_matcher_mined_false_match_loss_cap),
+        ("graph_matcher_raw_false_match_weight", graph_matcher_raw_false_match_weight),
+        ("graph_matcher_ransac_consistency_weight", graph_matcher_ransac_consistency_weight),
+        ("graph_matcher_teacher_guard_weight", graph_matcher_teacher_guard_weight),
+        ("graph_matcher_teacher_score_floor_weight", graph_matcher_teacher_score_floor_weight),
+        ("graph_matcher_teacher_distillation_weight", graph_matcher_teacher_distillation_weight),
+        (
+            "graph_matcher_teacher_guard_positive_margin_tolerance",
+            graph_matcher_teacher_guard_positive_margin_tolerance,
+        ),
+        (
+            "graph_matcher_teacher_guard_false_margin_tolerance",
+            graph_matcher_teacher_guard_false_margin_tolerance,
+        ),
+        (
+            "graph_matcher_teacher_score_floor_tolerance",
+            graph_matcher_teacher_score_floor_tolerance,
+        ),
     ):
         if value < 0.0:
             raise ValueError(f"{name} must be nonnegative")
+    if not math.isfinite(float(graph_matcher_teacher_score_floor_min_score)):
+        raise ValueError("graph_matcher_teacher_score_floor_min_score must be finite")
+    if (
+        not math.isfinite(float(graph_matcher_mined_false_match_reference_margin))
+        or graph_matcher_mined_false_match_reference_margin < -1.0
+    ):
+        raise ValueError("graph_matcher_mined_false_match_reference_margin must be finite and >= -1")
+    if graph_matcher_true_match_margin < 0.0:
+        raise ValueError("graph_matcher_true_match_margin must be nonnegative")
+    if graph_matcher_final_false_match_topk < 0:
+        raise ValueError("graph_matcher_final_false_match_topk must be nonnegative")
+    if graph_matcher_final_false_match_min_score < 0.0:
+        raise ValueError("graph_matcher_final_false_match_min_score must be nonnegative")
+    if graph_matcher_final_false_match_margin < 0.0:
+        raise ValueError("graph_matcher_final_false_match_margin must be nonnegative")
+    if graph_matcher_final_false_match_spatial_min_distance < 0.0:
+        raise ValueError("graph_matcher_final_false_match_spatial_min_distance must be nonnegative")
+    if graph_matcher_raw_false_match_topk < 0:
+        raise ValueError("graph_matcher_raw_false_match_topk must be nonnegative")
+    if graph_matcher_raw_false_match_min_similarity < -1.0 or graph_matcher_raw_false_match_min_similarity > 1.0:
+        raise ValueError("graph_matcher_raw_false_match_min_similarity must be in [-1, 1]")
+    if graph_matcher_raw_false_match_margin < 0.0:
+        raise ValueError("graph_matcher_raw_false_match_margin must be nonnegative")
+    if graph_matcher_raw_false_match_spatial_min_distance < 0.0:
+        raise ValueError("graph_matcher_raw_false_match_spatial_min_distance must be nonnegative")
+    if graph_matcher_ransac_consistency_topk < 0:
+        raise ValueError("graph_matcher_ransac_consistency_topk must be nonnegative")
+    if graph_matcher_ransac_consistency_residual_threshold_px < 0.0:
+        raise ValueError("graph_matcher_ransac_consistency_residual_threshold_px must be nonnegative")
+    if graph_matcher_ransac_consistency_min_score < 0.0:
+        raise ValueError("graph_matcher_ransac_consistency_min_score must be nonnegative")
+    if graph_matcher_ransac_consistency_margin < 0.0:
+        raise ValueError("graph_matcher_ransac_consistency_margin must be nonnegative")
+    if graph_matcher_depth_distillation_teacher_layers < 0:
+        raise ValueError("graph_matcher_depth_distillation_teacher_layers must be nonnegative")
+    if (
+        not math.isfinite(float(graph_matcher_depth_distillation_temperature))
+        or graph_matcher_depth_distillation_temperature <= 0.0
+    ):
+        raise ValueError("graph_matcher_depth_distillation_temperature must be positive and finite")
+    if (
+        not math.isfinite(float(graph_matcher_teacher_distillation_temperature))
+        or graph_matcher_teacher_distillation_temperature <= 0.0
+    ):
+        raise ValueError("graph_matcher_teacher_distillation_temperature must be positive and finite")
+    if not math.isfinite(float(graph_matcher_positive_dustbin_guard_reject_threshold)):
+        raise ValueError("graph_matcher_positive_dustbin_guard_reject_threshold must be finite")
+    if graph_matcher_dustbin_warmup_steps < 0 or graph_matcher_dustbin_ramp_steps < 0:
+        raise ValueError("graph matcher dustbin schedule steps must be nonnegative")
+    if graph_matcher_train_candidate_topk < 0:
+        raise ValueError("graph_matcher_train_candidate_topk must be nonnegative")
+    effective_graph_matcher_no_match_weight = scheduled_graph_matcher_weight(
+        graph_matcher_no_match_weight,
+        step=training_step,
+        warmup_steps=graph_matcher_dustbin_warmup_steps,
+        ramp_steps=graph_matcher_dustbin_ramp_steps,
+    )
+    effective_graph_matcher_hard_negative_dustbin_weight = scheduled_graph_matcher_weight(
+        graph_matcher_hard_negative_dustbin_weight,
+        step=training_step,
+        warmup_steps=graph_matcher_dustbin_warmup_steps,
+        ramp_steps=graph_matcher_dustbin_ramp_steps,
+    )
     if reliability_negative_points < 0:
         raise ValueError("reliability_negative_points must be nonnegative")
     if reliability_negative_min_distance < 0.0:
@@ -2793,6 +4426,12 @@ def train_step(
     orientation_loss_sum = 0.0
     scale_loss_sum = 0.0
     affine_loss_sum = 0.0
+    affine_regularization_loss_sum = 0.0
+    affine_det_mean_sum = 0.0
+    affine_det_std_sum = 0.0
+    affine_condition_mean_sum = 0.0
+    affine_condition_max_sum = 0.0
+    affine_regularization_count = 0
     rotation_loss_count = 0
     rotation_consistency_points = 0
     rotation_consistency_pairs_used = 0
@@ -2816,7 +4455,8 @@ def train_step(
         or scale_consistency_weight > 0.0
         or affine_consistency_weight > 0.0
     )
-    sparse_maps_required = reliability_loss_enabled or rotation_loss_enabled
+    affine_regularization_enabled = affine_regularization_weight > 0.0
+    sparse_maps_required = reliability_loss_enabled or rotation_loss_enabled or affine_regularization_enabled
     keypoint_loss_enabled = keypoint_weight > 0.0
     use_amp = bool(amp_enabled)
     use_grad_scaler = use_amp and grad_scaler is not None
@@ -2835,6 +4475,11 @@ def train_step(
             "orientation_consistency_loss": orientation_loss_sum / rotation_denominator,
             "scale_consistency_loss": scale_loss_sum / rotation_denominator,
             "affine_consistency_loss": affine_loss_sum / rotation_denominator,
+            "affine_regularization_loss": affine_regularization_loss_sum / float(max(1, affine_regularization_count)),
+            "affine_det_mean": affine_det_mean_sum / float(max(1, affine_regularization_count)),
+            "affine_det_std": affine_det_std_sum / float(max(1, affine_regularization_count)),
+            "affine_condition_mean": affine_condition_mean_sum / float(max(1, affine_regularization_count)),
+            "affine_condition_max": affine_condition_max_sum / float(max(1, affine_regularization_count)),
             "rotation_consistency_points": float(rotation_consistency_points),
             "rotation_consistency_pairs": float(rotation_consistency_pairs_used),
             "keypoint_loss": keypoint_loss_sum / float(max(1, keypoint_loss_count)),
@@ -2842,6 +4487,7 @@ def train_step(
             "amp_enabled": 1.0 if use_amp else 0.0,
             "amp_scale": grad_scaler_scale(grad_scaler) if use_grad_scaler else 0.0,
             "activation_checkpointing": 1.0 if use_activation_checkpointing else 0.0,
+            "freeze_extractor_warmup_active": 1.0 if freeze_extractor_warmup_active else 0.0,
         }
 
     try:
@@ -2927,11 +4573,13 @@ def train_step(
                 )
                 online_false_a = descriptors_a.new_empty((0, 2))
                 online_false_b = descriptors_b.new_empty((0, 2))
+                static_false_a = descriptors_a.new_empty((0, 2))
+                static_false_b = descriptors_b.new_empty((0, 2))
                 graph_online_false_can_train = (
                     graph_matcher_online_false_no_match
                     and graph_matcher_loss_weight > 0.0
                     and (
-                        graph_matcher_no_match_weight > 0.0
+                        effective_graph_matcher_no_match_weight > 0.0
                         or graph_matcher_assignment_weight > 0.0
                         or graph_matcher_accept_weight > 0.0
                         or graph_matcher_prune_ranking_weight > 0.0
@@ -2959,6 +4607,26 @@ def train_step(
                         online_false_match_pairs += 1
                         false_match_points += online_false_a.size(0)
                         false_match_pairs += 1
+                needs_static_false_matches = bool(false_matches) and (
+                    false_match_weight > 0.0
+                    or (
+                        graph_matcher_loss_weight > 0.0
+                        and (
+                            graph_matcher_final_false_match_weight > 0.0
+                            or graph_matcher_mined_false_match_weight > 0.0
+                        )
+                    )
+                )
+                if needs_static_false_matches:
+                    static_false_a, static_false_b = false_match_feature_correspondences(
+                        pair_path,
+                        pair,
+                        false_matches,
+                        feature_height=descriptors_a.size(2),
+                        feature_width=descriptors_a.size(3),
+                        max_points=false_match_max_points,
+                        generator=generator,
+                    )
                 pair_losses: list[torch.Tensor] = []
                 if points_a.size(0) > 0 and (
                     synthetic_loss_weight > 0.0
@@ -3038,6 +4706,29 @@ def train_step(
                         reliability_points += int(
                             points_a.size(0) + points_b.size(0) + neg_a_points.size(0) + neg_b_points.size(0)
                         )
+                    if affine_regularization_enabled and sparse_maps_a is not None and sparse_maps_b is not None:
+                        affine_reg_a, affine_metrics_a = affine_regularization_loss(
+                            sparse_maps_a.affine,
+                            return_metrics=True,
+                        )
+                        affine_reg_b, affine_metrics_b = affine_regularization_loss(
+                            sparse_maps_b.affine,
+                            return_metrics=True,
+                        )
+                        affine_reg_loss = 0.5 * (affine_reg_a + affine_reg_b)
+                        pair_losses.append(float(affine_regularization_weight) * affine_reg_loss)
+                        affine_regularization_loss_sum += float(affine_reg_loss.detach().cpu())
+                        for metric_name, metric_value_a in affine_metrics_a.items():
+                            metric_value = 0.5 * (metric_value_a + affine_metrics_b[metric_name])
+                            if metric_name == "affine_det_mean":
+                                affine_det_mean_sum += float(metric_value.detach().cpu())
+                            elif metric_name == "affine_det_std":
+                                affine_det_std_sum += float(metric_value.detach().cpu())
+                            elif metric_name == "affine_condition_mean":
+                                affine_condition_mean_sum += float(metric_value.detach().cpu())
+                            elif metric_name == "affine_condition_max":
+                                affine_condition_max_sum += float(metric_value.detach().cpu())
+                        affine_regularization_count += 1
                     if synthetic_loss_weight > 0.0:
                         loss, metrics = descriptor_map_pair_loss(
                             descriptors_a,
@@ -3090,7 +4781,7 @@ def train_step(
                                 points_b,
                                 metadata_mode=graph_matcher_metadata_mode,
                                 no_match_points=graph_matcher_no_match_points,
-                                no_match_weight=graph_matcher_no_match_weight,
+                                no_match_weight=effective_graph_matcher_no_match_weight,
                                 no_match_min_distance=graph_matcher_no_match_min_distance,
                                 assignment_weight=graph_matcher_assignment_weight,
                                 accept_weight=graph_matcher_accept_weight,
@@ -3102,20 +4793,81 @@ def train_step(
                                 raw_preservation_weight=graph_matcher_raw_preservation_weight,
                                 raw_preservation_margin=graph_matcher_raw_preservation_margin,
                                 raw_preservation_raw_margin=graph_matcher_raw_preservation_raw_margin,
-                                hard_negative_dustbin_weight=graph_matcher_hard_negative_dustbin_weight,
+                                hard_negative_dustbin_weight=effective_graph_matcher_hard_negative_dustbin_weight,
                                 hard_negative_dustbin_topk=graph_matcher_hard_negative_dustbin_topk,
                                 hard_negative_dustbin_margin=graph_matcher_hard_negative_dustbin_margin,
                                 hard_negative_dustbin_spatial_min_distance=(
                                     graph_matcher_hard_negative_dustbin_spatial_min_distance
                                 ),
+                                positive_dustbin_margin_weight=graph_matcher_positive_dustbin_margin_weight,
+                                positive_dustbin_margin=graph_matcher_positive_dustbin_margin,
+                                true_match_margin_weight=graph_matcher_true_match_margin_weight,
+                                true_match_margin=graph_matcher_true_match_margin,
+                                final_false_match_weight=graph_matcher_final_false_match_weight,
+                                mined_false_match_weight=graph_matcher_mined_false_match_weight,
+                                mined_false_match_loss_cap=graph_matcher_mined_false_match_loss_cap,
+                                mined_false_match_reference_margin=(
+                                    graph_matcher_mined_false_match_reference_margin
+                                ),
+                                final_false_match_topk=graph_matcher_final_false_match_topk,
+                                final_false_match_min_score=graph_matcher_final_false_match_min_score,
+                                final_false_match_margin=graph_matcher_final_false_match_margin,
+                                final_false_match_spatial_min_distance=(
+                                    graph_matcher_final_false_match_spatial_min_distance
+                                ),
+                                raw_false_match_weight=graph_matcher_raw_false_match_weight,
+                                raw_false_match_topk=graph_matcher_raw_false_match_topk,
+                                raw_false_match_min_similarity=graph_matcher_raw_false_match_min_similarity,
+                                raw_false_match_margin=graph_matcher_raw_false_match_margin,
+                                raw_false_match_spatial_min_distance=graph_matcher_raw_false_match_spatial_min_distance,
+                                ransac_consistency_weight=graph_matcher_ransac_consistency_weight,
+                                ransac_consistency_topk=graph_matcher_ransac_consistency_topk,
+                                ransac_consistency_residual_threshold_px=(
+                                    graph_matcher_ransac_consistency_residual_threshold_px
+                                ),
+                                ransac_consistency_min_score=graph_matcher_ransac_consistency_min_score,
+                                ransac_consistency_margin=graph_matcher_ransac_consistency_margin,
+                                train_candidate_topk=graph_matcher_train_candidate_topk,
                                 semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                                 semi_dense_min_score=graph_matcher_semi_dense_min_score,
                                 extra_no_match_points_a_xy=online_false_a if graph_online_false_enabled else None,
                                 extra_no_match_points_b_xy=online_false_b if graph_online_false_enabled else None,
+                                extra_false_match_points_a_xy=(
+                                    static_false_a if static_false_a.size(0) > 0 else None
+                                ),
+                                extra_false_match_points_b_xy=(
+                                    static_false_b if static_false_b.size(0) > 0 else None
+                                ),
                                 max_attention_layers=graph_matcher_train_max_attention_layers,
                                 random_attention_layers=graph_matcher_train_random_attention_layers,
                                 max_attention_work_fraction=graph_matcher_train_max_attention_work_fraction,
                                 width_keep_ratio=graph_matcher_train_width_keep_ratio,
+                                deep_supervision_depths=graph_matcher_deep_supervision_depths,
+                                deep_supervision_weight=graph_matcher_deep_supervision_weight,
+                                depth_distillation_weight=graph_matcher_depth_distillation_weight,
+                                depth_distillation_teacher_layers=graph_matcher_depth_distillation_teacher_layers,
+                                depth_distillation_temperature=graph_matcher_depth_distillation_temperature,
+                                teacher_guard_model=graph_matcher_teacher_guard_model,
+                                teacher_guard_weight=graph_matcher_teacher_guard_weight,
+                                teacher_guard_positive_margin_tolerance=(
+                                    graph_matcher_teacher_guard_positive_margin_tolerance
+                                ),
+                                teacher_guard_false_margin_tolerance=(
+                                    graph_matcher_teacher_guard_false_margin_tolerance
+                                ),
+                                teacher_score_floor_weight=graph_matcher_teacher_score_floor_weight,
+                                teacher_score_floor_tolerance=graph_matcher_teacher_score_floor_tolerance,
+                                teacher_score_floor_min_score=graph_matcher_teacher_score_floor_min_score,
+                                teacher_distillation_weight=graph_matcher_teacher_distillation_weight,
+                                teacher_distillation_temperature=(
+                                    graph_matcher_teacher_distillation_temperature
+                                ),
+                                positive_dustbin_guard_reject_threshold=(
+                                    graph_matcher_positive_dustbin_guard_reject_threshold
+                                ),
+                                positive_dustbin_guard_margin_threshold=(
+                                    graph_matcher_positive_dustbin_guard_margin_threshold
+                                ),
                                 matchability_a=sparse_maps_a.matchability if sparse_maps_a is not None else None,
                                 matchability_b=sparse_maps_b.matchability if sparse_maps_b is not None else None,
                                 descriptor_uncertainty_a=(
@@ -3136,7 +4888,15 @@ def train_step(
                                 else float("nan")
                                 for key, value in graph_components.items()
                             }
-                            | {"points": float(points_a.size(0))}
+                            | {
+                                "points": float(points_a.size(0)),
+                                "graph_matcher_effective_no_match_weight": float(
+                                    effective_graph_matcher_no_match_weight
+                                ),
+                                "graph_matcher_effective_hard_negative_dustbin_weight": float(
+                                    effective_graph_matcher_hard_negative_dustbin_weight
+                                ),
+                            }
                         )
                         pair_losses.append(float(graph_matcher_loss_weight) * float(pose_multiplier) * graph_loss)
                     if rotation_loss_enabled and sparse_maps_a is not None and sparse_maps_b is not None:
@@ -3305,25 +5065,16 @@ def train_step(
                             pair_losses.append(float(pseudo_keypoint_weight) * keypoint_loss)
                             pseudo_keypoint_points += pseudo_a.size(0) + pseudo_b.size(0)
                 if false_matches and false_match_weight > 0.0:
-                    false_a, false_b = false_match_feature_correspondences(
-                        pair_path,
-                        pair,
-                        false_matches,
-                        feature_height=descriptors_a.size(2),
-                        feature_width=descriptors_a.size(3),
-                        max_points=false_match_max_points,
-                        generator=generator,
-                    )
-                    if false_a.size(0) > 0:
+                    if static_false_a.size(0) > 0:
                         negative_loss = false_match_negative_loss(
                             descriptors_a,
                             descriptors_b,
-                            false_a,
-                            false_b,
+                            static_false_a,
+                            static_false_b,
                             max_false_score=false_match_max_score,
                         )
                         pair_losses.append(float(false_match_weight) * negative_loss)
-                        false_match_points += false_a.size(0)
+                        false_match_points += static_false_a.size(0)
                         false_match_pairs += 1
                 if online_false_match_weight > 0.0 and online_false_a.size(0) > 0:
                     online_negative_loss = false_match_negative_loss(
@@ -4102,6 +5853,22 @@ def parse_rotation_consistency_degrees(value: str) -> list[int]:
     return degrees
 
 
+def parse_graph_supervision_depths(value: str) -> list[int]:
+    depths: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            depth = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("graph supervision depths must be comma-separated integers") from exc
+        if depth <= 0:
+            raise argparse.ArgumentTypeError("graph supervision depths must be positive")
+        depths.append(depth)
+    return sorted(set(depths))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune the current PFM model in PyTorch from warp correspondences")
     parser.add_argument("--checkpoint", type=Path, default=None)
@@ -4144,7 +5911,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--abstention-topk", type=int, default=8)
     parser.add_argument("--abstention-candidates", type=int, default=4096)
     parser.add_argument("--max-grad-norm", type=float, default=0.0)
-    parser.add_argument("--skip-nonfinite-steps", action="store_true")
+    parser.add_argument("--skip-nonfinite-steps", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-intensity", type=float, default=0.01)
     parser.add_argument("--hard-summary", action="append", type=Path, default=[])
     parser.add_argument("--hard-pair-glob", action="append", default=[])
@@ -4197,11 +5964,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-quality-head", action="store_true")
     parser.add_argument("--train-reliability-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
+    parser.add_argument("--train-graph-calibration-only", action="store_true")
+    parser.add_argument("--descriptor-geometry-mode", choices=pfm_model.DESCRIPTOR_GEOMETRY_MODES, default="full")
+    parser.add_argument("--descriptor-geometry-blend-weight", type=float, default=1.0)
+    parser.add_argument("--descriptor-scale-log-clamp-min", type=float, default=-2.0)
+    parser.add_argument("--descriptor-scale-log-clamp-max", type=float, default=2.0)
+    parser.add_argument(
+        "--descriptor-geometry-safety-schedule",
+        choices=pfm_model.DESCRIPTOR_GEOMETRY_SAFETY_SCHEDULES,
+        default="off",
+    )
+    parser.add_argument("--quality-score-mode", choices=pfm_model.QUALITY_SCORE_MODES, default="soft")
     parser.add_argument("--graph-matcher-loss-weight", type=float, default=1.0)
     parser.add_argument(
         "--graph-matcher-metadata-mode",
-        choices=["full", "descriptor_only", "no_xy", "no_geometry", "no_quality"],
-        default="full",
+        choices=["full", "calibrated", "descriptor_only", "no_xy", "no_geometry", "no_quality"],
+        default="calibrated",
     )
     parser.add_argument("--graph-matcher-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-no-match-weight", type=float, default=0.0)
@@ -4211,6 +5989,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-train-random-attention-layers", action="store_true")
     parser.add_argument("--graph-matcher-train-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--graph-matcher-train-width-keep-ratio", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-deep-supervision-depths", type=parse_graph_supervision_depths, default=[])
+    parser.add_argument("--graph-matcher-deep-supervision-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--matcher-reliability-pair-bias",
+        choices=pfm_model.MATCHER_RELIABILITY_PAIR_BIAS_MODES,
+        default="off",
+    )
+    parser.add_argument(
+        "--matcher-reliability-dustbin-bias",
+        choices=pfm_model.MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES,
+        default="off",
+    )
+    parser.add_argument(
+        "--matcher-final-accept-score-mode",
+        choices=pfm_model.MATCHER_FINAL_ACCEPT_SCORE_MODES,
+        default="none",
+    )
+    parser.add_argument(
+        "--matcher-accept-assignment-mode",
+        choices=pfm_model.MATCHER_ACCEPT_ASSIGNMENT_MODES,
+        default="add",
+    )
+    parser.add_argument("--matcher-final-accept-score-alpha", type=float, default=0.05)
+    parser.add_argument("--matcher-geometry-bias-scale", type=float, default=1.0)
+    parser.add_argument("--matcher-geometry-bias-clamp", type=float, default=2.0)
+    parser.add_argument("--matcher-attention-residual-gate-init", type=float, default=None)
+    parser.add_argument("--matcher-attention-residual-gate-start-layer", type=int, default=1)
+    parser.add_argument("--matcher-candidate-topk", type=int, default=256)
     parser.add_argument("--graph-matcher-accept-weight", type=float, default=0.2)
     parser.add_argument("--graph-matcher-accept-negative-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-prune-ranking-weight", type=float, default=0.1)
@@ -4224,6 +6030,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-hard-negative-dustbin-topk", type=int, default=8)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-margin", type=float, default=0.25)
     parser.add_argument("--graph-matcher-hard-negative-dustbin-spatial-min-distance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-dustbin-warmup-steps", type=int, default=0)
+    parser.add_argument("--graph-matcher-dustbin-ramp-steps", type=int, default=0)
+    parser.add_argument("--graph-matcher-positive-dustbin-margin-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-positive-dustbin-margin", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-match-margin-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-match-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-final-false-match-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-mined-false-match-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-mined-false-match-loss-cap", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-mined-false-match-reference-margin", type=float, default=-1.0)
+    parser.add_argument("--graph-matcher-final-false-match-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-final-false-match-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-final-false-match-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-final-false-match-spatial-min-distance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-raw-false-match-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-raw-false-match-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-raw-false-match-min-similarity", type=float, default=0.75)
+    parser.add_argument("--graph-matcher-raw-false-match-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-raw-false-match-spatial-min-distance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-ransac-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-ransac-consistency-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-ransac-consistency-residual-threshold-px", type=float, default=3.0)
+    parser.add_argument("--graph-matcher-ransac-consistency-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-ransac-consistency-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-depth-distillation-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-depth-distillation-teacher-layers", type=int, default=0)
+    parser.add_argument("--graph-matcher-depth-distillation-temperature", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-teacher-guard-state", type=Path, default=None)
+    parser.add_argument("--graph-matcher-teacher-guard-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-guard-positive-margin-tolerance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-guard-false-margin-tolerance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-score-floor-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-score-floor-tolerance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-score-floor-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-distillation-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-distillation-temperature", type=float, default=1.0)
+    parser.add_argument("--graph-matcher-positive-dustbin-guard-reject-threshold", type=float, default=1.1)
+    parser.add_argument(
+        "--graph-matcher-positive-dustbin-guard-margin-threshold",
+        type=float,
+        default=-float("inf"),
+    )
+    parser.add_argument("--graph-matcher-train-candidate-topk", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-no-match-points", type=int, default=0)
     parser.add_argument("--graph-matcher-semi-dense-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-online-false-no-match", action=argparse.BooleanOptionalAction, default=False)
@@ -4242,8 +6091,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--orientation-consistency-weight", type=float, default=0.0)
     parser.add_argument("--scale-consistency-weight", type=float, default=0.0)
     parser.add_argument("--affine-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--affine-regularization-weight", type=float, default=0.0)
     parser.add_argument("--rotation-consistency-degrees", type=parse_rotation_consistency_degrees, default=[90, 180, 270])
     parser.add_argument("--freeze-descriptor-head", action="store_true")
+    parser.add_argument("--freeze-extractor-warmup-steps", type=int, default=0)
     parser.add_argument("--training-texture-blend-weight", type=float, default=pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT)
     parser.add_argument("--generate-training-report", action="store_true")
     parser.add_argument("--report-output-dir", type=Path, default=None)
@@ -4350,6 +6201,24 @@ def parse_args() -> argparse.Namespace:
         or args.graph_matcher_train_width_keep_ratio > 1.0
     ):
         parser.error("--graph-matcher-train-width-keep-ratio must be in (0, 1]")
+    if args.graph_matcher_deep_supervision_weight < 0.0:
+        parser.error("--graph-matcher-deep-supervision-weight must be nonnegative")
+    if args.matcher_candidate_topk < 0:
+        parser.error("--matcher-candidate-topk must be nonnegative")
+    if args.matcher_final_accept_score_alpha < 0.0:
+        parser.error("--matcher-final-accept-score-alpha must be nonnegative")
+    if not math.isfinite(float(args.matcher_geometry_bias_scale)):
+        parser.error("--matcher-geometry-bias-scale must be finite")
+    if not math.isfinite(float(args.matcher_final_accept_score_alpha)):
+        parser.error("--matcher-final-accept-score-alpha must be finite")
+    if not math.isfinite(float(args.matcher_geometry_bias_clamp)) or args.matcher_geometry_bias_clamp < 0.0:
+        parser.error("--matcher-geometry-bias-clamp must be finite and nonnegative")
+    if args.matcher_attention_residual_gate_init is not None and not math.isfinite(
+        float(args.matcher_attention_residual_gate_init)
+    ):
+        parser.error("--matcher-attention-residual-gate-init must be finite")
+    if args.matcher_attention_residual_gate_start_layer < 1:
+        parser.error("--matcher-attention-residual-gate-start-layer must be at least 1")
     if args.graph_matcher_accept_weight < 0.0:
         parser.error("--graph-matcher-accept-weight must be nonnegative")
     if args.graph_matcher_accept_negative_topk < 0:
@@ -4376,10 +6245,113 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-hard-negative-dustbin-margin must be nonnegative")
     if args.graph_matcher_hard_negative_dustbin_spatial_min_distance < 0.0:
         parser.error("--graph-matcher-hard-negative-dustbin-spatial-min-distance must be nonnegative")
+    if args.graph_matcher_dustbin_warmup_steps < 0:
+        parser.error("--graph-matcher-dustbin-warmup-steps must be nonnegative")
+    if args.graph_matcher_dustbin_ramp_steps < 0:
+        parser.error("--graph-matcher-dustbin-ramp-steps must be nonnegative")
+    if args.graph_matcher_positive_dustbin_margin_weight < 0.0:
+        parser.error("--graph-matcher-positive-dustbin-margin-weight must be nonnegative")
+    if args.graph_matcher_positive_dustbin_margin < 0.0:
+        parser.error("--graph-matcher-positive-dustbin-margin must be nonnegative")
+    if args.graph_matcher_true_match_margin_weight < 0.0:
+        parser.error("--graph-matcher-true-match-margin-weight must be nonnegative")
+    if args.graph_matcher_true_match_margin < 0.0:
+        parser.error("--graph-matcher-true-match-margin must be nonnegative")
+    if args.graph_matcher_final_false_match_weight < 0.0:
+        parser.error("--graph-matcher-final-false-match-weight must be nonnegative")
+    if args.graph_matcher_mined_false_match_weight < 0.0:
+        parser.error("--graph-matcher-mined-false-match-weight must be nonnegative")
+    if args.graph_matcher_mined_false_match_loss_cap < 0.0:
+        parser.error("--graph-matcher-mined-false-match-loss-cap must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_mined_false_match_reference_margin))
+        or args.graph_matcher_mined_false_match_reference_margin < -1.0
+    ):
+        parser.error("--graph-matcher-mined-false-match-reference-margin must be finite and >= -1")
+    if args.graph_matcher_final_false_match_topk < 0:
+        parser.error("--graph-matcher-final-false-match-topk must be nonnegative")
+    if args.graph_matcher_final_false_match_min_score < 0.0:
+        parser.error("--graph-matcher-final-false-match-min-score must be nonnegative")
+    if args.graph_matcher_final_false_match_margin < 0.0:
+        parser.error("--graph-matcher-final-false-match-margin must be nonnegative")
+    if args.graph_matcher_final_false_match_spatial_min_distance < 0.0:
+        parser.error("--graph-matcher-final-false-match-spatial-min-distance must be nonnegative")
+    if args.graph_matcher_raw_false_match_weight < 0.0:
+        parser.error("--graph-matcher-raw-false-match-weight must be nonnegative")
+    if args.graph_matcher_raw_false_match_topk < 0:
+        parser.error("--graph-matcher-raw-false-match-topk must be nonnegative")
+    if args.graph_matcher_raw_false_match_min_similarity < -1.0 or args.graph_matcher_raw_false_match_min_similarity > 1.0:
+        parser.error("--graph-matcher-raw-false-match-min-similarity must be in [-1, 1]")
+    if args.graph_matcher_raw_false_match_margin < 0.0:
+        parser.error("--graph-matcher-raw-false-match-margin must be nonnegative")
+    if args.graph_matcher_raw_false_match_spatial_min_distance < 0.0:
+        parser.error("--graph-matcher-raw-false-match-spatial-min-distance must be nonnegative")
+    if args.graph_matcher_ransac_consistency_weight < 0.0:
+        parser.error("--graph-matcher-ransac-consistency-weight must be nonnegative")
+    if args.graph_matcher_ransac_consistency_topk < 0:
+        parser.error("--graph-matcher-ransac-consistency-topk must be nonnegative")
+    if args.graph_matcher_ransac_consistency_residual_threshold_px < 0.0:
+        parser.error("--graph-matcher-ransac-consistency-residual-threshold-px must be nonnegative")
+    if args.graph_matcher_ransac_consistency_min_score < 0.0:
+        parser.error("--graph-matcher-ransac-consistency-min-score must be nonnegative")
+    if args.graph_matcher_ransac_consistency_margin < 0.0:
+        parser.error("--graph-matcher-ransac-consistency-margin must be nonnegative")
+    if args.graph_matcher_depth_distillation_weight < 0.0:
+        parser.error("--graph-matcher-depth-distillation-weight must be nonnegative")
+    if args.graph_matcher_depth_distillation_teacher_layers < 0:
+        parser.error("--graph-matcher-depth-distillation-teacher-layers must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_depth_distillation_temperature))
+        or args.graph_matcher_depth_distillation_temperature <= 0.0
+    ):
+        parser.error("--graph-matcher-depth-distillation-temperature must be positive and finite")
+    if args.graph_matcher_teacher_guard_weight < 0.0:
+        parser.error("--graph-matcher-teacher-guard-weight must be nonnegative")
+    if args.graph_matcher_teacher_guard_positive_margin_tolerance < 0.0:
+        parser.error("--graph-matcher-teacher-guard-positive-margin-tolerance must be nonnegative")
+    if args.graph_matcher_teacher_guard_false_margin_tolerance < 0.0:
+        parser.error("--graph-matcher-teacher-guard-false-margin-tolerance must be nonnegative")
+    if args.graph_matcher_teacher_score_floor_weight < 0.0:
+        parser.error("--graph-matcher-teacher-score-floor-weight must be nonnegative")
+    if args.graph_matcher_teacher_score_floor_tolerance < 0.0:
+        parser.error("--graph-matcher-teacher-score-floor-tolerance must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
+        parser.error("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_distillation_weight < 0.0:
+        parser.error("--graph-matcher-teacher-distillation-weight must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_teacher_distillation_temperature))
+        or args.graph_matcher_teacher_distillation_temperature <= 0.0
+    ):
+        parser.error("--graph-matcher-teacher-distillation-temperature must be positive and finite")
+    if (
+        args.graph_matcher_teacher_guard_weight > 0.0
+        or args.graph_matcher_teacher_score_floor_weight > 0.0
+        or args.graph_matcher_teacher_distillation_weight > 0.0
+    ) and args.graph_matcher_teacher_guard_state is None:
+        parser.error(
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, or distillation weight is positive"
+        )
+    if not math.isfinite(float(args.graph_matcher_positive_dustbin_guard_reject_threshold)):
+        parser.error("--graph-matcher-positive-dustbin-guard-reject-threshold must be finite")
+    if args.graph_matcher_train_candidate_topk < 0:
+        parser.error("--graph-matcher-train-candidate-topk must be nonnegative")
     if args.graph_matcher_semi_dense_no_match_points < 0:
         parser.error("--graph-matcher-semi-dense-no-match-points must be nonnegative")
     if args.graph_matcher_semi_dense_min_score < 0.0:
         parser.error("--graph-matcher-semi-dense-min-score must be nonnegative")
+    if (
+        not math.isfinite(float(args.descriptor_geometry_blend_weight))
+        or args.descriptor_geometry_blend_weight < 0.0
+        or args.descriptor_geometry_blend_weight > 1.0
+    ):
+        parser.error("--descriptor-geometry-blend-weight must be in [0, 1]")
+    if (
+        not math.isfinite(float(args.descriptor_scale_log_clamp_min))
+        or not math.isfinite(float(args.descriptor_scale_log_clamp_max))
+        or args.descriptor_scale_log_clamp_min > args.descriptor_scale_log_clamp_max
+    ):
+        parser.error("--descriptor-scale-log-clamp-min/max must be finite and ordered")
     if args.matchability_weight < 0.0:
         parser.error("--matchability-weight must be nonnegative")
     if args.descriptor_uncertainty_weight < 0.0:
@@ -4398,6 +6370,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scale-consistency-weight must be nonnegative")
     if args.affine_consistency_weight < 0.0:
         parser.error("--affine-consistency-weight must be nonnegative")
+    if args.affine_regularization_weight < 0.0:
+        parser.error("--affine-regularization-weight must be nonnegative")
     if args.abstention_weight < 0.0:
         parser.error("--abstention-weight must be nonnegative")
     if args.abstention_negative_radius < 0.0:
@@ -4440,6 +6414,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--report-keypoint-cell-cap must be nonnegative")
     if args.report_coverage_bins <= 0:
         parser.error("--report-coverage-bins must be positive")
+    if args.freeze_extractor_warmup_steps < 0:
+        parser.error("--freeze-extractor-warmup-steps must be nonnegative")
     return args
 
 
@@ -4447,12 +6423,51 @@ def load_training_model(args: argparse.Namespace) -> tuple[pfm_model.PlanetaryFe
     if getattr(args, "init_random", False):
         model = pfm_model.PlanetaryFeatureMatcher().to(args.device)
         model.train()
-        return model, model.config
-    if getattr(args, "init_pytorch_state", None) is not None:
-        return pfm_model.load_pytorch_state(args.init_pytorch_state, device=args.device)
-    if args.checkpoint is None:
+    elif getattr(args, "init_pytorch_state", None) is not None:
+        model, _ = pfm_model.load_pytorch_state(args.init_pytorch_state, device=args.device)
+    elif args.checkpoint is None:
         raise ValueError("checkpoint is required unless init_pytorch_state or init_random is set")
-    return pfm_model.load_libtorch_checkpoint(args.checkpoint, device=args.device)
+    else:
+        model, _ = pfm_model.load_libtorch_checkpoint(args.checkpoint, device=args.device)
+    model.set_matcher_calibration(
+        reliability_pair_bias_mode=getattr(args, "matcher_reliability_pair_bias", "off"),
+        reliability_dustbin_bias_mode=getattr(args, "matcher_reliability_dustbin_bias", "off"),
+        final_accept_score_mode=getattr(args, "matcher_final_accept_score_mode", "none"),
+        geometry_bias_scale=getattr(args, "matcher_geometry_bias_scale", 1.0),
+        accept_assignment_mode=getattr(args, "matcher_accept_assignment_mode", "add"),
+        final_accept_score_alpha=getattr(args, "matcher_final_accept_score_alpha", 0.05),
+        geometry_bias_clamp=getattr(args, "matcher_geometry_bias_clamp", 2.0),
+        attention_residual_gate_init=getattr(args, "matcher_attention_residual_gate_init", None),
+        attention_residual_gate_start_layer=getattr(args, "matcher_attention_residual_gate_start_layer", 1),
+        candidate_topk=getattr(args, "matcher_candidate_topk", 256),
+    )
+    model.train()
+    return model, model.config
+
+
+def load_graph_matcher_teacher_guard_model(
+    args: argparse.Namespace,
+) -> pfm_model.PlanetaryFeatureMatcher | None:
+    state_path = getattr(args, "graph_matcher_teacher_guard_state", None)
+    if state_path is None:
+        return None
+    teacher, _ = pfm_model.load_pytorch_state(state_path, device=getattr(args, "device", "cpu"))
+    teacher.set_matcher_calibration(
+        reliability_pair_bias_mode=getattr(args, "matcher_reliability_pair_bias", "off"),
+        reliability_dustbin_bias_mode=getattr(args, "matcher_reliability_dustbin_bias", "off"),
+        final_accept_score_mode=getattr(args, "matcher_final_accept_score_mode", "none"),
+        geometry_bias_scale=getattr(args, "matcher_geometry_bias_scale", 1.0),
+        accept_assignment_mode=getattr(args, "matcher_accept_assignment_mode", "add"),
+        final_accept_score_alpha=getattr(args, "matcher_final_accept_score_alpha", 0.05),
+        geometry_bias_clamp=getattr(args, "matcher_geometry_bias_clamp", 2.0),
+        attention_residual_gate_init=getattr(args, "matcher_attention_residual_gate_init", None),
+        attention_residual_gate_start_layer=getattr(args, "matcher_attention_residual_gate_start_layer", 1),
+        candidate_topk=getattr(args, "matcher_candidate_topk", 256),
+    )
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    return teacher
 
 
 def run_training_report(args: argparse.Namespace, *, pytorch_state: Path) -> None:
@@ -4554,6 +6569,30 @@ def save_pytorch_training_state(
             "amp": bool(args.amp),
             "amp_dtype": str(args.amp_dtype),
             "activation_checkpointing": bool(args.activation_checkpointing),
+            "descriptor_geometry_safety_schedule": str(args.descriptor_geometry_safety_schedule),
+            "graph_matcher_teacher_guard_state": (
+                str(args.graph_matcher_teacher_guard_state)
+                if getattr(args, "graph_matcher_teacher_guard_state", None) is not None
+                else None
+            ),
+            "graph_matcher_teacher_guard_weight": float(
+                getattr(args, "graph_matcher_teacher_guard_weight", 0.0)
+            ),
+            "graph_matcher_teacher_score_floor_weight": float(
+                getattr(args, "graph_matcher_teacher_score_floor_weight", 0.0)
+            ),
+            "graph_matcher_teacher_score_floor_tolerance": float(
+                getattr(args, "graph_matcher_teacher_score_floor_tolerance", 0.0)
+            ),
+            "graph_matcher_teacher_score_floor_min_score": float(
+                getattr(args, "graph_matcher_teacher_score_floor_min_score", 0.0)
+            ),
+            "graph_matcher_teacher_distillation_weight": float(
+                getattr(args, "graph_matcher_teacher_distillation_weight", 0.0)
+            ),
+            "graph_matcher_teacher_distillation_temperature": float(
+                getattr(args, "graph_matcher_teacher_distillation_temperature", 1.0)
+            ),
         },
         path,
     )
@@ -4569,6 +6608,34 @@ def main() -> int:
     amp_dtype = amp_dtype_from_name(args.amp_dtype)
     grad_scaler = make_grad_scaler(device, enabled=args.amp, dtype=amp_dtype)
     model, config = load_training_model(args)
+    graph_matcher_teacher_guard_model = load_graph_matcher_teacher_guard_model(args)
+    model.set_descriptor_geometry_mode(args.descriptor_geometry_mode)
+    model.set_descriptor_geometry_safety(
+        blend_weight=args.descriptor_geometry_blend_weight,
+        scale_log_clamp_min=args.descriptor_scale_log_clamp_min,
+        scale_log_clamp_max=args.descriptor_scale_log_clamp_max,
+    )
+    model.set_quality_score_mode(args.quality_score_mode)
+    model.set_matcher_calibration(
+        reliability_pair_bias_mode=args.matcher_reliability_pair_bias,
+        reliability_dustbin_bias_mode=args.matcher_reliability_dustbin_bias,
+        final_accept_score_mode=args.matcher_final_accept_score_mode,
+        geometry_bias_scale=args.matcher_geometry_bias_scale,
+    )
+    config = model.config
+    if graph_matcher_teacher_guard_model is not None:
+        if graph_matcher_teacher_guard_model.config.graph_keypoint_meta_dim != model.config.graph_keypoint_meta_dim:
+            raise RuntimeError("teacher guard model graph_keypoint_meta_dim does not match the student model")
+        print(
+            f"graph_matcher_teacher_guard_state={args.graph_matcher_teacher_guard_state} "
+            f"weight={args.graph_matcher_teacher_guard_weight:.3f} "
+            f"positive_margin_tolerance={args.graph_matcher_teacher_guard_positive_margin_tolerance:.3f} "
+            f"false_margin_tolerance={args.graph_matcher_teacher_guard_false_margin_tolerance:.3f} "
+            f"score_floor_weight={args.graph_matcher_teacher_score_floor_weight:.3f} "
+            f"score_floor_tolerance={args.graph_matcher_teacher_score_floor_tolerance:.3f} "
+            f"score_floor_min_score={args.graph_matcher_teacher_score_floor_min_score:.3f}",
+            flush=True,
+        )
     trainable = descriptor_parameters(
         model,
         train_backbone=args.train_backbone,
@@ -4581,6 +6648,7 @@ def main() -> int:
             or args.orientation_consistency_weight > 0.0
             or args.scale_consistency_weight > 0.0
             or args.affine_consistency_weight > 0.0
+            or args.affine_regularization_weight > 0.0
         ),
         train_texture_adapter=args.train_texture_adapter,
         train_descriptor_fusion=args.train_descriptor_fusion,
@@ -4592,11 +6660,13 @@ def main() -> int:
             or args.no_match_prior_weight > 0.0
         ),
         train_graph_matcher=args.train_graph_matcher,
+        train_graph_calibration_only=args.train_graph_calibration_only,
     )
     if not trainable:
         raise RuntimeError("no trainable parameters selected")
     if not trainable:
         raise RuntimeError("no descriptor parameters selected")
+    original_requires_grad = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=1.0e-4)
     pair_paths, eval_paths = resolve_training_and_eval_pair_paths(
         args.cache_dir,
@@ -4756,6 +6826,11 @@ def main() -> int:
                 "amp_enabled",
                 "amp_scale",
                 "activation_checkpointing",
+                "freeze_extractor_warmup_active",
+                "descriptor_geometry_safety_schedule",
+                "descriptor_geometry_blend_weight",
+                "descriptor_scale_log_clamp_min",
+                "descriptor_scale_log_clamp_max",
                 "teacher_weight",
                 "synthetic_loss_weight",
                 "keypoint_weight",
@@ -4773,7 +6848,50 @@ def main() -> int:
                 "graph_matcher_train_random_attention_layers",
                 "graph_matcher_train_max_attention_work_fraction",
                 "graph_matcher_train_width_keep_ratio",
+                "graph_matcher_deep_supervision_depths",
+                "graph_matcher_deep_supervision_weight",
+                "graph_matcher_depth_distillation_weight",
+                "graph_matcher_depth_distillation_target_layers",
+                "graph_matcher_depth_distillation_temperature",
+                "graph_matcher_teacher_guard_state",
+                "graph_matcher_teacher_guard_weight",
+                "graph_matcher_teacher_guard_positive_margin_tolerance",
+                "graph_matcher_teacher_guard_false_margin_tolerance",
+                "graph_matcher_teacher_score_floor_weight",
+                "graph_matcher_teacher_score_floor_tolerance",
+                "graph_matcher_teacher_score_floor_min_score",
+                "graph_matcher_teacher_distillation_weight",
+                "graph_matcher_teacher_distillation_temperature",
+                "graph_matcher_positive_dustbin_guard_reject_threshold",
+                "graph_matcher_positive_dustbin_guard_margin_threshold",
+                "matcher_reliability_pair_bias",
+                "matcher_reliability_dustbin_bias",
+                "matcher_final_accept_score_mode",
+                "matcher_geometry_bias_scale",
+                "matcher_accept_assignment_mode",
+                "matcher_final_accept_score_alpha",
+                "matcher_geometry_bias_clamp",
+                "matcher_attention_residual_gate_init",
+                "matcher_attention_residual_gate_start_layer",
+                "matcher_candidate_topk",
                 "graph_matcher_online_false_no_match",
+                "graph_matcher_train_candidate_topk",
+                "graph_matcher_dustbin_warmup_steps",
+                "graph_matcher_dustbin_ramp_steps",
+                "graph_matcher_positive_dustbin_margin_weight",
+                "graph_matcher_positive_dustbin_margin",
+                "graph_matcher_true_match_margin_weight",
+                "graph_matcher_true_match_margin",
+                "graph_matcher_final_false_match_weight",
+                "graph_matcher_mined_false_match_weight",
+                "graph_matcher_mined_false_match_loss_cap",
+                "graph_matcher_mined_false_match_reference_margin",
+                "graph_matcher_raw_false_match_weight",
+                "graph_matcher_ransac_consistency_weight",
+                "graph_matcher_ransac_consistency_topk",
+                "graph_matcher_ransac_consistency_residual_threshold_px",
+                "graph_matcher_ransac_consistency_min_score",
+                "graph_matcher_ransac_consistency_margin",
                 "matchability_weight",
                 "descriptor_uncertainty_weight",
                 "no_match_prior_weight",
@@ -4781,6 +6899,7 @@ def main() -> int:
                 "orientation_consistency_weight",
                 "scale_consistency_weight",
                 "affine_consistency_weight",
+                "affine_regularization_weight",
                 "top1_accuracy",
                 "top5_accuracy",
                 "top10_accuracy",
@@ -4796,10 +6915,67 @@ def main() -> int:
                 "graph_matcher_stop_confidence_loss",
                 "graph_matcher_raw_preservation_loss",
                 "graph_matcher_hard_negative_dustbin_loss",
+                "graph_matcher_positive_dustbin_margin_loss",
+                "graph_matcher_true_match_margin_loss",
+                "graph_matcher_true_match_margin_violations",
+                "graph_matcher_true_match_margin_mean",
+                "graph_matcher_final_false_match_loss",
+                "graph_matcher_final_false_match_edges",
+                "graph_matcher_final_false_match_score_mean",
+                "graph_matcher_final_false_match_accept_mean",
+                "graph_matcher_mined_false_match_loss",
+                "graph_matcher_mined_false_match_edges",
+                "graph_matcher_mined_false_match_reference_filtered_edges",
+                "graph_matcher_mined_false_match_score_mean",
+                "graph_matcher_mined_false_match_logit_mean",
+                "graph_matcher_mined_false_match_accept_mean",
+                "graph_matcher_raw_false_match_loss",
+                "graph_matcher_raw_false_match_edges",
+                "graph_matcher_raw_false_match_similarity_mean",
+                "graph_matcher_raw_false_match_margin_mean",
+                "graph_matcher_ransac_consistency_loss",
+                "graph_matcher_ransac_consistency_edges",
+                "graph_matcher_ransac_consistency_score_mean",
+                "graph_matcher_ransac_consistency_residual_mean_px",
+                "graph_matcher_ransac_consistency_accept_mean",
+                "graph_matcher_deep_supervision_loss",
+                "graph_matcher_depth_distillation_loss",
+                "graph_matcher_depth_distillation_teacher_layers",
+                "graph_matcher_teacher_distillation_loss",
+                "graph_matcher_teacher_guard_loss",
+                "graph_matcher_teacher_guard_positive_margin_loss",
+                "graph_matcher_teacher_guard_false_edge_loss",
+                "graph_matcher_teacher_guard_positive_violations",
+                "graph_matcher_teacher_guard_false_edges",
+                "graph_matcher_teacher_score_floor_loss",
+                "graph_matcher_teacher_score_floor_violations",
+                "graph_matcher_teacher_score_floor_delta_mean",
+                "graph_matcher_teacher_score_floor_teacher_score_mean",
                 "graph_matcher_executed_attention_layers",
                 "graph_matcher_attention_work_fraction",
                 "graph_matcher_positive_pairs",
                 "graph_matcher_extra_no_match_points",
+                "graph_matcher_extra_false_match_pairs",
+                "graph_matcher_effective_no_match_weight",
+                "graph_matcher_effective_hard_negative_dustbin_weight",
+                "graph_matcher_dustbin_guard_active",
+                "graph_matcher_guarded_no_match_weight",
+                "graph_matcher_guarded_hard_negative_dustbin_weight",
+                "true_match_rejected_by_dustbin_ratio",
+                "positive_pair_logit_mean",
+                "positive_dustbin_logit_mean",
+                "dustbin_logit_mean",
+                "dustbin_logit_for_true_match_mean",
+                "positive_vs_dustbin_margin_mean",
+                "positive_vs_dustbin_margin_median",
+                "positive_vs_dustbin_margin_p10",
+                "positive_vs_dustbin_margin_below0_ratio",
+                "false_match_accepted_ratio",
+                "accept_logit_mean",
+                "true_pair_prob_mean",
+                "dustbin_prob_for_true_match_mean",
+                "true_match_in_topk@64",
+                "true_match_in_topk@256",
                 *RELIABILITY_LOSS_METRIC_KEYS,
                 "points",
                 "pseudo_label_points",
@@ -4823,6 +6999,20 @@ def main() -> int:
         writer.writeheader()
         for step in range(1, args.steps + 1):
             epoch_float = step / float(steps_per_epoch)
+            descriptor_geometry_schedule_progress = (
+                0.0 if args.steps <= 1 else float(step - 1) / float(args.steps - 1)
+            )
+            descriptor_geometry_safety = pfm_model.descriptor_geometry_safety_for_progress(
+                args.descriptor_geometry_safety_schedule,
+                descriptor_geometry_schedule_progress,
+            )
+            if descriptor_geometry_safety is not None:
+                blend_weight, clamp_min, clamp_max = descriptor_geometry_safety
+                model.set_descriptor_geometry_safety(
+                    blend_weight=blend_weight,
+                    scale_log_clamp_min=clamp_min,
+                    scale_log_clamp_max=clamp_max,
+                )
             epoch_index = min(int((step - 1) // steps_per_epoch) + 1, max(1, math.ceil(total_epochs)))
             batch_index = ((step - 1) % steps_per_epoch) + 1
             teacher_weight = scheduled_value(
@@ -4856,6 +7046,14 @@ def main() -> int:
                     if pair_cache is not None:
                         pair_cache.put_batch(prefetched_pairs)
                 schedule_prefetch(step + args.prefetch_batches)
+            freeze_extractor_warmup_active = (
+                args.freeze_extractor_warmup_steps > 0 and step <= args.freeze_extractor_warmup_steps
+            )
+            apply_extractor_freeze_warmup(
+                model,
+                original_requires_grad,
+                freeze_extractor=freeze_extractor_warmup_active,
+            )
             metrics = train_step(
                 model,
                 optimizer,
@@ -4939,6 +7137,39 @@ def main() -> int:
                 graph_matcher_hard_negative_dustbin_topk=args.graph_matcher_hard_negative_dustbin_topk,
                 graph_matcher_hard_negative_dustbin_margin=args.graph_matcher_hard_negative_dustbin_margin,
                 graph_matcher_hard_negative_dustbin_spatial_min_distance=args.graph_matcher_hard_negative_dustbin_spatial_min_distance,
+                graph_matcher_dustbin_warmup_steps=args.graph_matcher_dustbin_warmup_steps,
+                graph_matcher_dustbin_ramp_steps=args.graph_matcher_dustbin_ramp_steps,
+                graph_matcher_positive_dustbin_margin_weight=args.graph_matcher_positive_dustbin_margin_weight,
+                graph_matcher_positive_dustbin_margin=args.graph_matcher_positive_dustbin_margin,
+                graph_matcher_true_match_margin_weight=args.graph_matcher_true_match_margin_weight,
+                graph_matcher_true_match_margin=args.graph_matcher_true_match_margin,
+                graph_matcher_final_false_match_weight=args.graph_matcher_final_false_match_weight,
+                graph_matcher_mined_false_match_weight=args.graph_matcher_mined_false_match_weight,
+                graph_matcher_mined_false_match_loss_cap=args.graph_matcher_mined_false_match_loss_cap,
+                graph_matcher_mined_false_match_reference_margin=(
+                    args.graph_matcher_mined_false_match_reference_margin
+                ),
+                graph_matcher_final_false_match_topk=args.graph_matcher_final_false_match_topk,
+                graph_matcher_final_false_match_min_score=args.graph_matcher_final_false_match_min_score,
+                graph_matcher_final_false_match_margin=args.graph_matcher_final_false_match_margin,
+                graph_matcher_final_false_match_spatial_min_distance=(
+                    args.graph_matcher_final_false_match_spatial_min_distance
+                ),
+                graph_matcher_raw_false_match_weight=args.graph_matcher_raw_false_match_weight,
+                graph_matcher_raw_false_match_topk=args.graph_matcher_raw_false_match_topk,
+                graph_matcher_raw_false_match_min_similarity=args.graph_matcher_raw_false_match_min_similarity,
+                graph_matcher_raw_false_match_margin=args.graph_matcher_raw_false_match_margin,
+                graph_matcher_raw_false_match_spatial_min_distance=(
+                    args.graph_matcher_raw_false_match_spatial_min_distance
+                ),
+                graph_matcher_ransac_consistency_weight=args.graph_matcher_ransac_consistency_weight,
+                graph_matcher_ransac_consistency_topk=args.graph_matcher_ransac_consistency_topk,
+                graph_matcher_ransac_consistency_residual_threshold_px=(
+                    args.graph_matcher_ransac_consistency_residual_threshold_px
+                ),
+                graph_matcher_ransac_consistency_min_score=args.graph_matcher_ransac_consistency_min_score,
+                graph_matcher_ransac_consistency_margin=args.graph_matcher_ransac_consistency_margin,
+                graph_matcher_train_candidate_topk=args.graph_matcher_train_candidate_topk,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
                 graph_matcher_online_false_no_match=args.graph_matcher_online_false_no_match,
@@ -4946,6 +7177,32 @@ def main() -> int:
                 graph_matcher_train_random_attention_layers=args.graph_matcher_train_random_attention_layers,
                 graph_matcher_train_max_attention_work_fraction=args.graph_matcher_train_max_attention_work_fraction,
                 graph_matcher_train_width_keep_ratio=args.graph_matcher_train_width_keep_ratio,
+                graph_matcher_deep_supervision_depths=args.graph_matcher_deep_supervision_depths,
+                graph_matcher_deep_supervision_weight=args.graph_matcher_deep_supervision_weight,
+                graph_matcher_depth_distillation_weight=args.graph_matcher_depth_distillation_weight,
+                graph_matcher_depth_distillation_teacher_layers=args.graph_matcher_depth_distillation_teacher_layers,
+                graph_matcher_depth_distillation_temperature=args.graph_matcher_depth_distillation_temperature,
+                graph_matcher_teacher_guard_model=graph_matcher_teacher_guard_model,
+                graph_matcher_teacher_guard_weight=args.graph_matcher_teacher_guard_weight,
+                graph_matcher_teacher_guard_positive_margin_tolerance=(
+                    args.graph_matcher_teacher_guard_positive_margin_tolerance
+                ),
+                graph_matcher_teacher_guard_false_margin_tolerance=(
+                    args.graph_matcher_teacher_guard_false_margin_tolerance
+                ),
+                graph_matcher_teacher_score_floor_weight=args.graph_matcher_teacher_score_floor_weight,
+                graph_matcher_teacher_score_floor_tolerance=args.graph_matcher_teacher_score_floor_tolerance,
+                graph_matcher_teacher_score_floor_min_score=args.graph_matcher_teacher_score_floor_min_score,
+                graph_matcher_teacher_distillation_weight=args.graph_matcher_teacher_distillation_weight,
+                graph_matcher_teacher_distillation_temperature=(
+                    args.graph_matcher_teacher_distillation_temperature
+                ),
+                graph_matcher_positive_dustbin_guard_reject_threshold=(
+                    args.graph_matcher_positive_dustbin_guard_reject_threshold
+                ),
+                graph_matcher_positive_dustbin_guard_margin_threshold=(
+                    args.graph_matcher_positive_dustbin_guard_margin_threshold
+                ),
                 matchability_weight=args.matchability_weight,
                 descriptor_uncertainty_weight=args.descriptor_uncertainty_weight,
                 no_match_prior_weight=args.no_match_prior_weight,
@@ -4955,6 +7212,7 @@ def main() -> int:
                 orientation_consistency_weight=args.orientation_consistency_weight,
                 scale_consistency_weight=args.scale_consistency_weight,
                 affine_consistency_weight=args.affine_consistency_weight,
+                affine_regularization_weight=args.affine_regularization_weight,
                 rotation_consistency_degrees=args.rotation_consistency_degrees,
                 training_spatial_bins=args.training_spatial_bins,
                 training_crop_size=args.training_crop_size,
@@ -4966,6 +7224,7 @@ def main() -> int:
                 amp_dtype=amp_dtype,
                 grad_scaler=grad_scaler,
                 activation_checkpointing=args.activation_checkpointing,
+                freeze_extractor_warmup_active=freeze_extractor_warmup_active,
             )
             writer.writerow(
                 {
@@ -4976,6 +7235,11 @@ def main() -> int:
                     "epoch": epoch_index,
                     "epoch_progress": epoch_float,
                     "total_epochs": total_epochs,
+                    "freeze_extractor_warmup_active": int(freeze_extractor_warmup_active),
+                    "descriptor_geometry_safety_schedule": args.descriptor_geometry_safety_schedule,
+                    "descriptor_geometry_blend_weight": model.config.descriptor_geometry_blend_weight,
+                    "descriptor_scale_log_clamp_min": model.config.descriptor_scale_log_clamp_min,
+                    "descriptor_scale_log_clamp_max": model.config.descriptor_scale_log_clamp_max,
                     "teacher_weight": teacher_weight,
                     "synthetic_loss_weight": args.synthetic_loss_weight,
                     "keypoint_weight": args.keypoint_weight,
@@ -5005,8 +7269,131 @@ def main() -> int:
                     "graph_matcher_train_width_keep_ratio": args.graph_matcher_train_width_keep_ratio
                     if args.train_graph_matcher
                     else 1.0,
+                    "graph_matcher_deep_supervision_depths": ",".join(
+                        str(depth) for depth in args.graph_matcher_deep_supervision_depths
+                    )
+                    if args.train_graph_matcher
+                    else "",
+                    "graph_matcher_deep_supervision_weight": args.graph_matcher_deep_supervision_weight
+                    if args.train_graph_matcher
+                    else 0.0,
+                    "graph_matcher_depth_distillation_weight": args.graph_matcher_depth_distillation_weight
+                    if args.train_graph_matcher
+                    else 0.0,
+                    "graph_matcher_depth_distillation_target_layers": args.graph_matcher_depth_distillation_teacher_layers
+                    if args.train_graph_matcher
+                    else 0,
+                    "graph_matcher_depth_distillation_temperature": args.graph_matcher_depth_distillation_temperature
+                    if args.train_graph_matcher
+                    else 1.0,
+                    "graph_matcher_teacher_guard_state": (
+                        "" if args.graph_matcher_teacher_guard_state is None else str(args.graph_matcher_teacher_guard_state)
+                    ),
+                    "graph_matcher_teacher_guard_weight": args.graph_matcher_teacher_guard_weight
+                    if args.train_graph_matcher
+                    else 0.0,
+                    "graph_matcher_teacher_guard_positive_margin_tolerance": (
+                        args.graph_matcher_teacher_guard_positive_margin_tolerance
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_teacher_guard_false_margin_tolerance": (
+                        args.graph_matcher_teacher_guard_false_margin_tolerance
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_teacher_score_floor_weight": (
+                        args.graph_matcher_teacher_score_floor_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_score_floor_tolerance": (
+                        args.graph_matcher_teacher_score_floor_tolerance if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_score_floor_min_score": (
+                        args.graph_matcher_teacher_score_floor_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_distillation_weight": (
+                        args.graph_matcher_teacher_distillation_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_distillation_temperature": (
+                        args.graph_matcher_teacher_distillation_temperature if args.train_graph_matcher else 1.0
+                    ),
+                    "graph_matcher_positive_dustbin_guard_reject_threshold": (
+                        args.graph_matcher_positive_dustbin_guard_reject_threshold if args.train_graph_matcher else 1.1
+                    ),
+                    "graph_matcher_positive_dustbin_guard_margin_threshold": (
+                        args.graph_matcher_positive_dustbin_guard_margin_threshold
+                        if args.train_graph_matcher
+                        else -float("inf")
+                    ),
+                    "matcher_reliability_pair_bias": args.matcher_reliability_pair_bias,
+                    "matcher_reliability_dustbin_bias": args.matcher_reliability_dustbin_bias,
+                    "matcher_final_accept_score_mode": args.matcher_final_accept_score_mode,
+                    "matcher_geometry_bias_scale": args.matcher_geometry_bias_scale,
+                    "matcher_accept_assignment_mode": args.matcher_accept_assignment_mode,
+                    "matcher_final_accept_score_alpha": args.matcher_final_accept_score_alpha,
+                    "matcher_geometry_bias_clamp": args.matcher_geometry_bias_clamp,
+                    "matcher_attention_residual_gate_init": (
+                        "" if args.matcher_attention_residual_gate_init is None else args.matcher_attention_residual_gate_init
+                    ),
+                    "matcher_attention_residual_gate_start_layer": args.matcher_attention_residual_gate_start_layer,
+                    "matcher_candidate_topk": args.matcher_candidate_topk,
                     "graph_matcher_online_false_no_match": int(
                         bool(args.graph_matcher_online_false_no_match and args.train_graph_matcher)
+                    ),
+                    "graph_matcher_train_candidate_topk": args.graph_matcher_train_candidate_topk
+                    if args.train_graph_matcher
+                    else 0,
+                    "graph_matcher_dustbin_warmup_steps": args.graph_matcher_dustbin_warmup_steps
+                    if args.train_graph_matcher
+                    else 0,
+                    "graph_matcher_dustbin_ramp_steps": args.graph_matcher_dustbin_ramp_steps
+                    if args.train_graph_matcher
+                    else 0,
+                    "graph_matcher_positive_dustbin_margin_weight": (
+                        args.graph_matcher_positive_dustbin_margin_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_positive_dustbin_margin": (
+                        args.graph_matcher_positive_dustbin_margin if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_true_match_margin_weight": (
+                        args.graph_matcher_true_match_margin_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_true_match_margin": (
+                        args.graph_matcher_true_match_margin if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_final_false_match_weight": (
+                        args.graph_matcher_final_false_match_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_mined_false_match_weight": (
+                        args.graph_matcher_mined_false_match_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_mined_false_match_loss_cap": (
+                        args.graph_matcher_mined_false_match_loss_cap if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_mined_false_match_reference_margin": (
+                        args.graph_matcher_mined_false_match_reference_margin
+                        if args.train_graph_matcher
+                        else -1.0
+                    ),
+                    "graph_matcher_raw_false_match_weight": (
+                        args.graph_matcher_raw_false_match_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_ransac_consistency_weight": (
+                        args.graph_matcher_ransac_consistency_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_ransac_consistency_topk": (
+                        args.graph_matcher_ransac_consistency_topk if args.train_graph_matcher else 0
+                    ),
+                    "graph_matcher_ransac_consistency_residual_threshold_px": (
+                        args.graph_matcher_ransac_consistency_residual_threshold_px
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_ransac_consistency_min_score": (
+                        args.graph_matcher_ransac_consistency_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_ransac_consistency_margin": (
+                        args.graph_matcher_ransac_consistency_margin if args.train_graph_matcher else 0.0
                     ),
                     "matchability_weight": args.matchability_weight,
                     "descriptor_uncertainty_weight": args.descriptor_uncertainty_weight,
@@ -5015,6 +7402,7 @@ def main() -> int:
                     "orientation_consistency_weight": args.orientation_consistency_weight,
                     "scale_consistency_weight": args.scale_consistency_weight,
                     "affine_consistency_weight": args.affine_consistency_weight,
+                    "affine_regularization_weight": args.affine_regularization_weight,
                     **metrics,
                 }
             )
@@ -5085,8 +7473,9 @@ def main() -> int:
             temperature=args.temperature,
             training_crop_size=args.training_crop_size,
             training_max_image_size=args.training_max_image_size,
-            pair_cache=pair_cache,
-        )
+                pair_cache=pair_cache,
+                training_step=step,
+            )
         with eval_summary_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,

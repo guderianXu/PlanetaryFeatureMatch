@@ -23,8 +23,11 @@ class StabilityThresholds:
     rolling_window: int = 200
     max_nan_in_window: int = 20
     max_loss_multiplier: float = 3.0
+    min_loss_delta_for_explosion: float = 0.05
     min_top1_mean: float = 0.35
     min_match_score: float = -0.5
+    max_dustbin_rejection_ratio: float = 0.85
+    min_num_filtered_matches: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,13 @@ class TrainingStabilityTracker:
         self.best_recent_loss = float("inf")
         self.best_match_score = -float("inf")
 
+    def rolling_diagnostics(self) -> dict[str, float | int]:
+        return {
+            "nan_count": self.window.nonfinite_count("loss"),
+            "recent_loss_mean": self.window.mean("loss"),
+            "recent_top1_mean": self.window.mean("top1_accuracy"),
+        }
+
     def match_score(self, metrics: dict[str, object]) -> float:
         top1 = finite_float(metrics.get("top1_accuracy")) or 0.0
         rejected = finite_float(metrics.get("true_match_rejected_by_dustbin_ratio")) or 0.0
@@ -104,11 +114,34 @@ class TrainingStabilityTracker:
             elif (
                 math.isfinite(recent_loss)
                 and math.isfinite(self.best_recent_loss)
-                and recent_loss > self.best_recent_loss * self.thresholds.max_loss_multiplier
+                and recent_loss
+                > max(
+                    self.best_recent_loss * self.thresholds.max_loss_multiplier,
+                    self.best_recent_loss + self.thresholds.min_loss_delta_for_explosion,
+                )
             ):
                 should_stop = True
                 reason = "recent_loss_exceeded_best_window"
-            elif score < self.thresholds.min_match_score:
+            elif self.thresholds.max_dustbin_rejection_ratio < 1.0:
+                dustbin_rejection_mean = self.window.mean("true_match_rejected_by_dustbin_ratio")
+                if (
+                    math.isfinite(dustbin_rejection_mean)
+                    and dustbin_rejection_mean > self.thresholds.max_dustbin_rejection_ratio
+                ):
+                    should_stop = True
+                    reason = "dustbin_rejection_spike"
+            if not should_stop and self.thresholds.min_num_filtered_matches > 0:
+                filtered_values = self.window.values("num_filtered_matches")
+                if not filtered_values:
+                    filtered_values = self.window.values("visual_num_filtered_matches")
+                filtered_matches_mean = fmean(filtered_values) if filtered_values else float("nan")
+                if (
+                    math.isfinite(filtered_matches_mean)
+                    and filtered_matches_mean < self.thresholds.min_num_filtered_matches
+                ):
+                    should_stop = True
+                    reason = "num_filtered_matches_collapse"
+            if not should_stop and score < self.thresholds.min_match_score:
                 should_stop = True
                 reason = "match_score_below_threshold"
         return StabilityDecision(

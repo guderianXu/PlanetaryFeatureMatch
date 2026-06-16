@@ -58,6 +58,97 @@ class PFMTrainingStabilityTest(unittest.TestCase):
         self.assertTrue(decision.should_stop)
         self.assertIn("top1", decision.reason)
 
+    def test_tracker_requests_stop_on_dustbin_rejection_spike(self):
+        tracker = TrainingStabilityTracker(
+            thresholds=StabilityThresholds(
+                min_steps_before_early_stop=3,
+                rolling_window=3,
+                max_nan_in_window=3,
+                max_loss_multiplier=3.0,
+                min_top1_mean=0.4,
+                max_dustbin_rejection_ratio=0.85,
+            )
+        )
+
+        decision = None
+        for step in range(1, 4):
+            decision = tracker.update(
+                step,
+                {
+                    "loss": 4.0,
+                    "top1_accuracy": 0.9,
+                    "true_match_rejected_by_dustbin_ratio": 0.9,
+                },
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.should_stop)
+        self.assertEqual(decision.reason, "dustbin_rejection_spike")
+
+    def test_tracker_requests_stop_when_filtered_matches_collapse(self):
+        tracker = TrainingStabilityTracker(
+            thresholds=StabilityThresholds(
+                min_steps_before_early_stop=3,
+                rolling_window=3,
+                max_nan_in_window=3,
+                max_loss_multiplier=3.0,
+                min_top1_mean=0.4,
+                min_num_filtered_matches=16,
+            )
+        )
+
+        decision = None
+        for step in range(1, 4):
+            decision = tracker.update(
+                step,
+                {
+                    "loss": 4.0,
+                    "top1_accuracy": 0.9,
+                    "num_filtered_matches": 4,
+                },
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.should_stop)
+        self.assertEqual(decision.reason, "num_filtered_matches_collapse")
+
+    def test_tracker_does_not_stop_on_small_absolute_loss_spikes_when_matching_is_healthy(self):
+        tracker = TrainingStabilityTracker(
+            thresholds=StabilityThresholds(
+                min_steps_before_early_stop=5,
+                rolling_window=4,
+                max_nan_in_window=3,
+                max_loss_multiplier=3.0,
+                min_top1_mean=0.4,
+            )
+        )
+
+        for step in range(1, 5):
+            tracker.update(
+                step,
+                {
+                    "loss": 0.001,
+                    "top1_accuracy": 0.98,
+                    "true_match_rejected_by_dustbin_ratio": 0.0,
+                    "positive_vs_dustbin_margin_mean": 12.0,
+                },
+            )
+
+        decision = None
+        for step in range(5, 9):
+            decision = tracker.update(
+                step,
+                {
+                    "loss": 0.02,
+                    "top1_accuracy": 0.95,
+                    "true_match_rejected_by_dustbin_ratio": 0.0,
+                    "positive_vs_dustbin_margin_mean": 12.0,
+                },
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.should_stop)
+
     def test_tracker_marks_last_good_only_for_finite_reasonable_steps(self):
         tracker = TrainingStabilityTracker(
             thresholds=StabilityThresholds(
@@ -74,6 +165,26 @@ class PFMTrainingStabilityTest(unittest.TestCase):
 
         self.assertTrue(good.is_last_good)
         self.assertFalse(bad.is_last_good)
+
+    def test_tracker_exposes_rolling_diagnostics_for_training_logs(self):
+        tracker = TrainingStabilityTracker(
+            thresholds=StabilityThresholds(
+                min_steps_before_early_stop=10,
+                rolling_window=3,
+                max_nan_in_window=2,
+                max_loss_multiplier=3.0,
+                min_top1_mean=0.2,
+            )
+        )
+        tracker.update(1, {"loss": 3.0, "top1_accuracy": 0.8})
+        tracker.update(2, {"loss": math.nan, "top1_accuracy": 0.2})
+        tracker.update(3, {"loss": 1.0, "top1_accuracy": 0.5})
+
+        diagnostics = tracker.rolling_diagnostics()
+
+        self.assertEqual(diagnostics["nan_count"], 1)
+        self.assertAlmostEqual(diagnostics["recent_loss_mean"], 2.0)
+        self.assertAlmostEqual(diagnostics["recent_top1_mean"], 0.5)
 
 
 if __name__ == "__main__":

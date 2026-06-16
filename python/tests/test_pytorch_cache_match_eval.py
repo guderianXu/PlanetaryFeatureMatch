@@ -307,12 +307,22 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(tuple(meta.shape), (1, 16))
         self.assertAlmostEqual(float(meta[0, 4]), 0.7, places=5)
         self.assertAlmostEqual(float(meta[0, 5]), torch.tensor(2.0).log().item(), places=5)
-        self.assertAlmostEqual(float(meta[0, 12]), 0.6, places=5)
+        self.assertAlmostEqual(float(meta[0, 12]), 0.0, places=5)
         self.assertAlmostEqual(float(meta[0, 13]), 0.4, places=5)
-        self.assertAlmostEqual(float(meta[0, 14]), 0.2, places=5)
-        self.assertAlmostEqual(float(meta[0, 15]), 0.3, places=5)
+        self.assertAlmostEqual(float(meta[0, 14]), 0.0, places=5)
+        self.assertAlmostEqual(float(meta[0, 15]), 0.0, places=5)
 
-    def test_effective_keypoint_score_map_uses_reliability_maps(self):
+        full_meta = eval_py.graph_metadata_from_raw_features(
+            raw,
+            torch.tensor([[1.0, 1.0]]),
+            meta_dim=16,
+            include_reliability=True,
+        )
+        self.assertAlmostEqual(float(full_meta[0, 12]), 0.6, places=5)
+        self.assertAlmostEqual(float(full_meta[0, 14]), 0.2, places=5)
+        self.assertAlmostEqual(float(full_meta[0, 15]), 0.3, places=5)
+
+    def test_effective_keypoint_score_map_uses_matchability_but_not_uncertainty(self):
         heatmap = torch.tensor([[[[0.9, 0.9]]]], dtype=torch.float32)
         raw = pfm_model.RawFeatureMaps(
             heatmap=heatmap,
@@ -331,7 +341,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         score = eval_py.effective_keypoint_score_map(raw)
 
-        expected = torch.tensor([[[[0.18, 0.36]]]], dtype=torch.float32)
+        expected = torch.tensor([[[[0.18, 0.72]]]], dtype=torch.float32)
         self.assertTrue(torch.allclose(score, expected, atol=1.0e-6))
 
     def test_parse_args_accepts_min_target_gradient(self):
@@ -562,7 +572,7 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertGreater(fallback_result.matches, 0)
         self.assertEqual(strict_result.matches, 0)
 
-    def test_calibrated_graph_matches_can_lower_dustbin_rejection(self):
+    def test_calibrated_graph_matches_use_two_sided_logit_margin(self):
         logits = torch.tensor(
             [
                 [5.0, -5.0, 6.0],
@@ -572,16 +582,17 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             dtype=torch.float32,
         )
 
-        rejected_matches, _ = eval_py.calibrated_graph_matches_from_logits(logits, count_a=2, count_b=2)
-        accepted_matches, _ = eval_py.calibrated_graph_matches_from_logits(
+        accepted_matches, accepted_scores = eval_py.calibrated_graph_matches_from_logits(logits, count_a=2, count_b=2)
+        strict_matches, _ = eval_py.calibrated_graph_matches_from_logits(
             logits,
             count_a=2,
             count_b=2,
-            dustbin_delta=-2.0,
+            acceptance_margin=4.1,
         )
 
-        self.assertEqual(rejected_matches.tolist(), [])
         self.assertEqual(accepted_matches.tolist(), [[0, 0], [1, 1]])
+        self.assertTrue(torch.allclose(accepted_scores, torch.tensor([4.0, 4.0])))
+        self.assertEqual(strict_matches.tolist(), [])
 
     def test_graph_matcher_matches_can_filter_by_raw_margin(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
@@ -620,6 +631,62 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         )
 
         self.assertEqual(matches.tolist(), [])
+
+    def test_graph_matcher_matches_populates_logit_diagnostics(self):
+        desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        desc_b = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+        logits = torch.tensor(
+            [
+                [5.0, -5.0, 1.0],
+                [-5.0, 6.0, 1.0],
+                [1.0, 1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        accept_logits = torch.tensor(
+            [
+                [2.0, -2.0],
+                [-4.0, 1.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+            def graph_matcher(self, desc_a, keypoints_a, desc_b, keypoints_b):
+                return pfm_model.GraphMatcherOutput(
+                    logits=logits.to(desc_a.device),
+                    matches=torch.empty(0, 2, dtype=torch.long),
+                    scores=torch.empty(0, dtype=torch.float32),
+                    accept_logits=accept_logits.to(desc_a.device),
+                )
+
+        diagnostics: dict[str, torch.Tensor] = {}
+        matches, scores = eval_py.graph_matcher_matches(
+            DummyModel(),
+            desc_a,
+            keypoints,
+            desc_b,
+            keypoints,
+            max_matches=8,
+            graph_dustbin_delta=-0.01,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(matches.tolist(), [[1, 1], [0, 0]])
+        self.assertTrue(torch.allclose(scores, torch.tensor([4.02, 3.02]), atol=1e-6))
+        self.assertTrue(torch.allclose(diagnostics["pair_logit"], torch.tensor([6.0, 5.0])))
+        self.assertTrue(torch.allclose(diagnostics["row_dustbin_logit"], torch.tensor([1.0, 1.0])))
+        self.assertTrue(torch.allclose(diagnostics["col_dustbin_logit"], torch.tensor([1.0, 1.0])))
+        self.assertTrue(torch.allclose(diagnostics["positive_vs_dustbin_margin"], torch.tensor([4.0, 3.0])))
+        self.assertTrue(torch.allclose(diagnostics["raw_similarity"], torch.tensor([1.0, 1.0])))
+        self.assertTrue(torch.allclose(diagnostics["raw_margin"], torch.tensor([1.0, 1.0])))
+        self.assertTrue(torch.allclose(diagnostics["accept_logit"], torch.tensor([1.0, 2.0])))
+        self.assertTrue(torch.allclose(diagnostics["accept_probability"], torch.sigmoid(torch.tensor([1.0, 2.0]))))
 
     def test_graph_matcher_matches_passes_pruning_and_early_stop_thresholds(self):
         desc_a = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
@@ -836,6 +903,63 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
         self.assertEqual(kept_matches.size(0), 4)
         self.assertEqual(kept_scores.size(0), 4)
         self.assertNotIn([4, 4], kept_matches.tolist())
+
+    def test_local_geometry_filter_can_use_looser_threshold_than_correctness(self):
+        points_a = torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, 0.0]],
+            dtype=torch.float32,
+        )
+        points_b = points_a.clone()
+        points_b[-1] = points_a[-1] + torch.tensor([6.0, 0.0])
+        matches = torch.stack([torch.arange(points_a.size(0)), torch.arange(points_a.size(0))], dim=1)
+        scores = torch.linspace(1.0, 0.6, points_a.size(0))
+
+        strict_matches, _ = eval_py.apply_geometry_filter_to_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            geometry_filter="local",
+            threshold_px=5.0,
+            min_inliers=4,
+        )
+        loose_matches, _ = eval_py.apply_geometry_filter_to_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            geometry_filter="local",
+            threshold_px=8.0,
+            min_inliers=4,
+        )
+
+        self.assertEqual(strict_matches.tolist(), matches[:-1].tolist())
+        self.assertEqual(loose_matches.tolist(), matches.tolist())
+
+    def test_robust_geometry_filter_removes_homography_outlier(self):
+        points_a = torch.tensor(
+            [[2.0, 2.0], [20.0, 2.0], [2.0, 20.0], [20.0, 20.0], [12.0, 12.0]],
+            dtype=torch.float32,
+        )
+        points_b = torch.tensor(
+            [[5.0, 6.0], [23.0, 6.0], [5.0, 24.0], [23.0, 24.0], [30.0, 1.0]],
+            dtype=torch.float32,
+        )
+        matches = torch.stack([torch.arange(points_a.size(0)), torch.arange(points_a.size(0))], dim=1)
+        scores = torch.tensor([0.9, 0.8, 0.7, 0.6, 0.95], dtype=torch.float32)
+
+        kept, kept_scores = eval_py.apply_geometry_filter_to_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            geometry_filter="magsac",
+            threshold_px=1.5,
+            min_inliers=4,
+        )
+
+        self.assertEqual(kept.tolist(), matches[:-1].tolist())
+        self.assertEqual(kept_scores.tolist(), scores[:-1].tolist())
 
     def test_limit_pair_paths_can_take_seeded_random_subset(self):
         paths = [Path(f"source_000001/pair_{index:06d}.pt") for index in range(10)]

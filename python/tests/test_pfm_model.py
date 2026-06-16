@@ -115,6 +115,130 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(tuple(p2_keypoint.shape), (2, 8, 16, 20))
         self.assertEqual(tuple(p2_descriptor.shape), (2, 8, 16, 20))
 
+    def test_dual_fpn_lite_stage1_skip_can_affect_keypoint_feature(self):
+        fpn = pfm_model.DualFPNLite(base_channels=2)
+        with torch.no_grad():
+            fpn.keypoint_from_stage1.weight.fill_(1.0)
+            if fpn.keypoint_from_stage1.bias is not None:
+                fpn.keypoint_from_stage1.bias.zero_()
+        stage1 = torch.ones(1, 2, 8, 8)
+        stage2 = torch.zeros(1, 4, 4, 4)
+        stage3 = torch.zeros(1, 8, 2, 2)
+        stage4 = torch.zeros(1, 16, 1, 1)
+
+        p2_keypoint, p2_descriptor = fpn([stage1, stage2, stage3, stage4])
+
+        self.assertGreater(float(p2_keypoint.detach().abs().mean()), 0.5)
+        self.assertLess(float(p2_descriptor.detach().abs().max()), 1.0e-6)
+
+    def test_soft_quality_score_modulates_without_erasing_heatmap(self):
+        heatmap = torch.tensor([[[[0.8, 0.4]]]])
+        quality = torch.tensor([[[[0.0, 1.0]]]])
+
+        soft = pfm_model.apply_quality_score_mode(heatmap, quality, mode="soft")
+        legacy = pfm_model.apply_quality_score_mode(heatmap, quality, mode="multiply")
+        raw = pfm_model.apply_quality_score_mode(heatmap, quality, mode="raw")
+
+        self.assertTrue(torch.allclose(soft, torch.tensor([[[[0.4, 0.4]]]])))
+        self.assertTrue(torch.allclose(legacy, torch.tensor([[[[0.0, 0.4]]]])))
+        self.assertTrue(torch.allclose(raw, heatmap))
+
+    def test_sparse_head_plain_geometry_mode_skips_canonical_pooling(self):
+        head = pfm_model.SparseHead(input_channels=8, descriptor_dim=16, descriptor_geometry_mode="plain")
+
+        with mock.patch.object(pfm_model, "geometry_aware_descriptor_pool", side_effect=AssertionError):
+            output = head(torch.randn(1, 8, 8, 9))
+
+        self.assertEqual(tuple(output.descriptors.shape), (1, 16, 8, 9))
+        self.assertTrue(torch.allclose(output.descriptors.norm(dim=1), torch.ones(1, 8, 9), atol=1.0e-5))
+
+    def test_sparse_head_orientation_scale_mode_uses_identity_affine_for_pooling(self):
+        captured = {}
+
+        def fake_pool(descriptors, orientation, scale, affine):
+            captured["affine"] = affine.detach().clone()
+            return descriptors
+
+        head = pfm_model.SparseHead(
+            input_channels=8,
+            descriptor_dim=16,
+            descriptor_geometry_mode="orientation_scale",
+        )
+
+        with mock.patch.object(pfm_model, "geometry_aware_descriptor_pool", side_effect=fake_pool):
+            head(torch.randn(1, 8, 8, 9))
+
+        affine = captured["affine"]
+        self.assertTrue(torch.allclose(affine[:, 0], torch.ones_like(affine[:, 0])))
+        self.assertTrue(torch.allclose(affine[:, 1], torch.zeros_like(affine[:, 1])))
+        self.assertTrue(torch.allclose(affine[:, 2], torch.zeros_like(affine[:, 2])))
+        self.assertTrue(torch.allclose(affine[:, 3], torch.ones_like(affine[:, 3])))
+
+    def test_sparse_head_can_blend_original_and_pooled_descriptors(self):
+        captured = {}
+
+        def fake_pool(descriptors, orientation, scale, affine):
+            del orientation, scale, affine
+            pooled = torch.zeros_like(descriptors)
+            pooled[:, 0] = 1.0
+            captured["original"] = descriptors.detach().clone()
+            captured["pooled"] = pooled.detach().clone()
+            return pooled
+
+        head = pfm_model.SparseHead(
+            input_channels=8,
+            descriptor_dim=16,
+            descriptor_geometry_mode="full",
+            descriptor_geometry_blend_weight=0.25,
+        )
+
+        with mock.patch.object(pfm_model, "geometry_aware_descriptor_pool", side_effect=fake_pool):
+            output = head(torch.randn(1, 8, 8, 9))
+
+        expected = pfm_model.normalize_channels_stable(
+            0.75 * captured["original"] + 0.25 * captured["pooled"],
+        )
+        self.assertTrue(torch.allclose(output.descriptors, expected, atol=1.0e-6))
+
+    def test_sparse_head_clamps_scale_log_with_configured_bounds(self):
+        captured = {}
+
+        def fake_pool(descriptors, orientation, scale, affine):
+            del orientation, affine
+            captured["scale"] = scale.detach().clone()
+            return descriptors
+
+        head = pfm_model.SparseHead(
+            input_channels=8,
+            descriptor_dim=16,
+            descriptor_geometry_mode="full",
+            descriptor_scale_log_clamp_min=-0.7,
+            descriptor_scale_log_clamp_max=0.7,
+        )
+        with torch.no_grad():
+            head.scale.weight.zero_()
+            head.scale.bias.fill_(10.0)
+
+        with mock.patch.object(pfm_model, "geometry_aware_descriptor_pool", side_effect=fake_pool):
+            head(torch.randn(1, 8, 8, 9))
+
+        self.assertLessEqual(float(captured["scale"].max()), torch.exp(torch.tensor(0.7)).item() + 1.0e-6)
+
+    def test_phase4_descriptor_geometry_safety_schedule(self):
+        self.assertIsNone(pfm_model.descriptor_geometry_safety_for_progress("off", 0.5))
+
+        start = pfm_model.descriptor_geometry_safety_for_progress("phase4", 0.0)
+        mid_ramp = pfm_model.descriptor_geometry_safety_for_progress("phase4", 0.4)
+        late_ramp = pfm_model.descriptor_geometry_safety_for_progress("phase4", 0.8)
+        final = pfm_model.descriptor_geometry_safety_for_progress("phase4", 1.0)
+
+        self.assertEqual(start, (0.0, -0.7, 0.7))
+        self.assertAlmostEqual(mid_ramp[0], 0.15)
+        self.assertEqual(mid_ramp[1:], (-0.7, 0.7))
+        self.assertAlmostEqual(late_ramp[0], 0.4)
+        self.assertEqual(late_ramp[1:], (-1.2, 1.2))
+        self.assertEqual(final, (0.5, -1.2, 1.2))
+
     def test_geometry_aware_descriptor_pool_preserves_shape_and_normalization(self):
         descriptors = pfm_model.normalize_channels_stable(torch.randn(1, 8, 6, 7))
         orientation = pfm_model.normalize_channels_stable(torch.randn(1, 2, 6, 7))
@@ -151,20 +275,170 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(output.scores.dim(), 1)
 
     def test_graph_matcher_match_scores_include_accept_probability(self):
-        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=4, hidden_dim=8, attention_layers=1, keypoint_meta_dim=4)
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=4,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+            final_accept_score_mode="multiply",
+        )
         desc = torch.eye(4)
         keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
 
         output = graph(desc, keypoints, desc, keypoints, apply_candidate_mask=False)
 
         self.assertGreater(output.matches.size(0), 0)
-        row_prob = torch.softmax(output.logits[:4, :], dim=1)[:, :4]
-        col_prob = torch.softmax(output.logits[:, :4], dim=0)[:4, :]
-        dual_scores = row_prob * col_prob
+        margin_scores = (
+            output.logits[:4, :4]
+            - output.logits[:4, 4][:, None]
+            - output.logits[4, :4][None, :]
+        )
         source = output.matches[:, 0]
         target = output.matches[:, 1]
-        expected = dual_scores[source, target] * torch.sigmoid(output.accept_logits[source, target])
+        expected = margin_scores[source, target] * torch.sigmoid(output.accept_logits[source, target])
 
+        self.assertTrue(torch.allclose(output.scores, expected.cpu(), atol=1.0e-6))
+
+    def test_graph_matcher_can_disable_final_accept_score_gate(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=4,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+            final_accept_score_mode="none",
+        )
+        desc = torch.eye(4)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+
+        output = graph(desc, keypoints, desc, keypoints, apply_candidate_mask=False)
+
+        self.assertGreater(output.matches.size(0), 0)
+        margin_scores = (
+            output.logits[:4, :4]
+            - output.logits[:4, 4][:, None]
+            - output.logits[4, :4][None, :]
+        )
+        source = output.matches[:, 0]
+        target = output.matches[:, 1]
+        self.assertTrue(torch.allclose(output.scores, margin_scores[source, target].cpu(), atol=1.0e-6))
+
+    def test_graph_matcher_defaults_to_phase1_candidate_width(self):
+        graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=4, hidden_dim=8, attention_layers=1, keypoint_meta_dim=4)
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
+
+        self.assertEqual(graph.candidate_topk, 256)
+        self.assertEqual(model.config.matcher_candidate_topk, 256)
+
+    def test_graph_attention_residual_gate_can_start_as_identity(self):
+        layer = pfm_model.PlanetaryGraphAttentionLayer(hidden_dim=8, residual_gate_init=0.0)
+        features_a = torch.randn(4, 8)
+        features_b = torch.randn(5, 8)
+
+        refined_a, refined_b = layer(features_a, features_b)
+
+        self.assertTrue(torch.allclose(refined_a, features_a, atol=1.0e-6))
+        self.assertTrue(torch.allclose(refined_b, features_b, atol=1.0e-6))
+        self.assertAlmostEqual(float(layer.self_residual_gate.detach()), 0.0)
+        self.assertAlmostEqual(float(layer.cross_residual_gate.detach()), 0.0)
+        self.assertAlmostEqual(float(layer.feed_forward_residual_gate.detach()), 0.0)
+
+    def test_matcher_calibration_can_initialize_only_new_attention_layers(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=6,
+        )
+        with torch.no_grad():
+            for index, layer in enumerate(model.graph_matcher.attention_layers):
+                value = 0.6 + 0.05 * index
+                layer.self_residual_gate.fill_(value)
+                layer.cross_residual_gate.fill_(value)
+                layer.feed_forward_residual_gate.fill_(value)
+
+        model.set_matcher_calibration(
+            attention_residual_gate_init=0.05,
+            attention_residual_gate_start_layer=5,
+        )
+
+        for index, layer in enumerate(model.graph_matcher.attention_layers):
+            expected = 0.6 + 0.05 * index if index < 4 else 0.05
+            self.assertAlmostEqual(float(layer.self_residual_gate.detach()), expected)
+            self.assertAlmostEqual(float(layer.cross_residual_gate.detach()), expected)
+            self.assertAlmostEqual(float(layer.feed_forward_residual_gate.detach()), expected)
+
+    def test_graph_matcher_geometry_bias_is_clamped_after_scaling(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=4,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=16,
+            geometry_bias_scale=3.0,
+            geometry_bias_clamp=0.5,
+        )
+        with torch.no_grad():
+            graph.geometry_bias[-1].bias.fill_(100.0)
+        metadata = torch.zeros(3, 16)
+        metadata[:, 12] = 1.0
+
+        bias = graph._geometry_compatibility_bias(metadata, metadata)
+
+        self.assertLessEqual(float(bias.detach().max()), 0.5 + 1.0e-6)
+        self.assertGreaterEqual(float(bias.detach().min()), -0.5 - 1.0e-6)
+
+    def test_graph_matcher_can_decouple_accept_logits_from_assignment_logits(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=4,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+            accept_assignment_mode="off",
+            final_accept_score_mode="none",
+        )
+        with torch.no_grad():
+            graph.graph_delta_scale.fill_(0.0)
+            graph.raw_score_temperature.fill_(0.1)
+            graph.accept_logit_scale.fill_(2.0)
+        desc = torch.eye(4)
+        keypoints = torch.zeros(4, 4)
+        fake_accept = torch.full((4, 4), 1000.0)
+
+        with mock.patch.object(graph, "_acceptance_logits", return_value=fake_accept):
+            output = graph(desc, keypoints, desc, keypoints, apply_candidate_mask=False)
+
+        expected_pair_logits = (desc @ desc.T) / graph.raw_score_temperature.abs().clamp(0.03, 1.0)
+        self.assertTrue(torch.allclose(output.logits[:4, :4], expected_pair_logits, atol=1.0e-5))
+
+    def test_graph_matcher_final_additive_accept_score_calibrates_scores_only(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=4,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+            accept_assignment_mode="off",
+            final_accept_score_mode="add",
+            final_accept_score_alpha=0.1,
+        )
+        with torch.no_grad():
+            graph.graph_delta_scale.fill_(0.0)
+            graph.raw_score_temperature.fill_(0.1)
+        desc = torch.eye(4)
+        keypoints = torch.zeros(4, 4)
+
+        output = graph(desc, keypoints, desc, keypoints, apply_candidate_mask=False)
+
+        self.assertGreater(output.matches.size(0), 0)
+        margin_scores = (
+            output.logits[:4, :4]
+            - output.logits[:4, 4][:, None]
+            - output.logits[4, :4][None, :]
+        )
+        source = output.matches[:, 0]
+        target = output.matches[:, 1]
+        expected = (
+            margin_scores[source, target]
+            + 0.1 * torch.sigmoid(output.accept_logits[source, target])
+        )
         self.assertTrue(torch.allclose(output.scores, expected.cpu(), atol=1.0e-6))
 
     def test_graph_matcher_residual_logits_preserve_raw_descriptor_signal(self):
@@ -636,7 +910,30 @@ class PFMModelTest(unittest.TestCase):
         self.assertTrue(torch.allclose(meta[:, 14:15], descriptor_uncertainty))
         self.assertTrue(torch.allclose(meta[:, 15:16], no_match_prior))
 
-    def test_graph_matcher_uses_no_match_prior_for_dustbin_logits(self):
+    def test_graph_matcher_legacy_full_dustbin_bias_ignores_no_match_prior(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=2,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=16,
+            reliability_dustbin_bias_mode="full",
+        )
+        descriptors = torch.eye(2, dtype=torch.float32)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        metadata = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints,
+            meta_dim=16,
+            matchability=torch.full((2, 1), 0.5),
+            descriptor_uncertainty=torch.full((2, 1), 0.5),
+            no_match_prior=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+        )
+
+        output = graph(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
+
+        self.assertAlmostEqual(float((output.logits[1, -1] - output.logits[0, -1]).detach()), 0.0, places=6)
+        self.assertAlmostEqual(float((output.logits[-1, 1] - output.logits[-1, 0]).detach()), 0.0, places=6)
+
+    def test_graph_matcher_default_dustbin_bias_ignores_no_match_prior(self):
         graph = pfm_model.PlanetaryGraphMatcher(descriptor_dim=2, hidden_dim=8, attention_layers=1, keypoint_meta_dim=16)
         descriptors = torch.eye(2, dtype=torch.float32)
         keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
@@ -650,8 +947,67 @@ class PFMModelTest(unittest.TestCase):
 
         output = graph(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
 
-        self.assertGreater(float(output.logits[1, -1].detach()), float(output.logits[0, -1].detach()))
-        self.assertGreater(float(output.logits[-1, 1].detach()), float(output.logits[-1, 0].detach()))
+        self.assertAlmostEqual(float((output.logits[1, -1] - output.logits[0, -1]).detach()), 0.0, places=6)
+        self.assertAlmostEqual(float((output.logits[-1, 1] - output.logits[-1, 0]).detach()), 0.0, places=6)
+
+    def test_graph_matcher_legacy_full_pair_bias_is_noop(self):
+        descriptors = torch.eye(2, dtype=torch.float32)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        metadata = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints,
+            meta_dim=16,
+            matchability=torch.tensor([[1.0], [0.0]], dtype=torch.float32),
+            descriptor_uncertainty=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+            no_match_prior=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+        )
+        full = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=2,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=16,
+            reliability_pair_bias_mode="full",
+        )
+        off = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=2,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=16,
+            reliability_pair_bias_mode="off",
+        )
+        for graph in (full, off):
+            with torch.no_grad():
+                graph.graph_delta_scale.fill_(0.0)
+                graph.accept_logit_scale.fill_(0.0)
+                graph.raw_score_temperature.fill_(0.1)
+
+        full_output = full(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
+        off_output = off(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
+
+        self.assertLess(float((full_output.logits[0, 0] - full_output.logits[1, 1]).detach().abs()), 1.0e-5)
+        self.assertLess(float((off_output.logits[0, 0] - off_output.logits[1, 1]).detach().abs()), 1.0e-5)
+
+    def test_graph_matcher_legacy_matchability_dustbin_bias_is_noop(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=2,
+            hidden_dim=8,
+            attention_layers=1,
+            keypoint_meta_dim=16,
+            reliability_dustbin_bias_mode="matchability",
+        )
+        descriptors = torch.eye(2, dtype=torch.float32)
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        metadata = pfm_model.prepare_graph_keypoint_metadata(
+            keypoints,
+            meta_dim=16,
+            matchability=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+            descriptor_uncertainty=torch.full((2, 1), 0.5),
+            no_match_prior=torch.tensor([[0.0], [1.0]], dtype=torch.float32),
+        )
+
+        output = graph(descriptors, metadata, descriptors, metadata, apply_candidate_mask=False)
+
+        self.assertLess(float((output.logits[1, -1] - output.logits[0, -1]).detach().abs()), 1.0e-5)
+        self.assertLess(float((output.logits[-1, 1] - output.logits[-1, 0]).detach().abs()), 1.0e-5)
 
     def test_normalize_channels_handles_large_finite_values_without_zeroing(self):
         tensor = torch.tensor([[[[1.0e30]], [[2.0e30]], [[-3.0e30]]]], dtype=torch.float32)

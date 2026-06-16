@@ -17,6 +17,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VISUAL_SCRIPT = PROJECT_ROOT / "scripts" / "visualize_lazy_pose_matches.py"
+FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
+FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
+    "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
+)
+FOV76_POST_FILTER_PROFILES = (
+    FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
+    FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,8 @@ class GraphFilterConfig:
     min_raw_score: float
     min_raw_margin: float
     min_accept_probability: float
+    geometry_threshold_px: float
+    filtered_min_matches: int
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,21 @@ def parse_float_list(value: str) -> list[float]:
     return values
 
 
+def parse_int_list(value: str) -> list[int]:
+    values: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            values.append(int(item))
+        except ValueError as exc:
+            raise ValueError(f"invalid integer value: {item}") from exc
+    if not values:
+        raise ValueError("at least one integer value is required")
+    return values
+
+
 def _format_slug_float(value: float) -> str:
     return f"{value:g}".replace("-", "neg").replace(".", "p")
 
@@ -74,10 +99,14 @@ def slug_for_config(config: GraphFilterConfig) -> str:
         f"_raw{_format_slug_float(config.min_raw_score)}"
         f"_margin{_format_slug_float(config.min_raw_margin)}"
         f"_prob{_format_slug_float(config.min_accept_probability)}"
+        f"_geo{_format_slug_float(config.geometry_threshold_px)}"
+        f"_minmatch{config.filtered_min_matches}"
     )
 
 
 def iter_sweep_configs(args: argparse.Namespace) -> list[GraphFilterConfig]:
+    geometry_threshold_values = args.geometry_threshold_px_values or [args.geometry_threshold_px]
+    filtered_min_match_values = args.filtered_min_matches_values or [args.filtered_min_matches]
     configs = [
         GraphFilterConfig(
             min_score=min_score,
@@ -86,14 +115,27 @@ def iter_sweep_configs(args: argparse.Namespace) -> list[GraphFilterConfig]:
             min_raw_score=min_raw_score,
             min_raw_margin=min_raw_margin,
             min_accept_probability=min_accept_probability,
+            geometry_threshold_px=geometry_threshold_px,
+            filtered_min_matches=filtered_min_matches,
         )
-        for min_score, dustbin_delta, acceptance_margin, min_raw_score, min_raw_margin, min_accept_probability in product(
+        for (
+            min_score,
+            dustbin_delta,
+            acceptance_margin,
+            min_raw_score,
+            min_raw_margin,
+            min_accept_probability,
+            geometry_threshold_px,
+            filtered_min_matches,
+        ) in product(
             args.min_score_values,
             args.graph_dustbin_delta_values,
             args.graph_acceptance_margin_values,
             args.graph_min_raw_score_values,
             args.graph_min_raw_margin_values,
             args.graph_min_accept_probability_values,
+            geometry_threshold_values,
+            filtered_min_match_values,
         )
     ]
     return list(dict.fromkeys(configs))
@@ -110,6 +152,43 @@ def validate_config(config: GraphFilterConfig) -> None:
         raise ValueError("min_raw_margin must be nonnegative")
     if config.min_accept_probability < -1.0 or config.min_accept_probability > 1.0:
         raise ValueError("min_accept_probability must be in [-1, 1]")
+    if config.geometry_threshold_px < 0.0:
+        raise ValueError("geometry_threshold_px must be nonnegative")
+    if config.filtered_min_matches < 0:
+        raise ValueError("filtered_min_matches must be nonnegative; use 0 to disable this gate")
+
+
+def _set_profile_default(args: argparse.Namespace, name: str, value: object, default: object) -> None:
+    if getattr(args, name) == default:
+        setattr(args, name, value)
+
+
+def apply_post_filter_profile(args: argparse.Namespace) -> None:
+    profile = getattr(args, "post_filter_profile", "")
+    if not profile:
+        return
+    if profile not in FOV76_POST_FILTER_PROFILES:
+        raise ValueError(f"unknown post-filter profile: {profile}")
+    _set_profile_default(args, "geometry_filter", "local", "none")
+    _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)
+    _set_profile_default(args, "geometry_threshold_px_values", [5.0], None)
+    _set_profile_default(args, "filtered_geometry_filter", "magsac", "local")
+    _set_profile_default(args, "filtered_min_margin", 0.0, 0.02)
+    _set_profile_default(args, "filtered_min_matches", 16, 0)
+    _set_profile_default(args, "filtered_min_matches_values", [16], None)
+    _set_profile_default(args, "adaptive_geometry_rescue_variants", "extreme_02,extreme_03", "")
+    _set_profile_default(args, "adaptive_geometry_rescue_threshold_px", 10.0, 0.0)
+    _set_profile_default(args, "adaptive_geometry_rescue_min_match_gain", 5, 0)
+    _set_profile_default(args, "adaptive_geometry_rescue_max_base_matches", 16, -1)
+    _set_profile_default(args, "adaptive_geometry_rescue_max_homography_p90_px", 4.2, -1.0)
+    _set_profile_default(args, "adaptive_geometry_rescue_max_homography_median_px", 2.3, -1.0)
+    if profile == FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE:
+        _set_profile_default(args, "low_match_geometry_guard_variants", "extreme_02,extreme_03", "")
+        _set_profile_default(args, "low_match_geometry_guard_min_matches", 12, 0)
+        _set_profile_default(args, "low_match_geometry_guard_max_matches", 15, -1)
+        _set_profile_default(args, "low_match_geometry_guard_max_homography_p90_px", 2.8, -1.0)
+        _set_profile_default(args, "low_match_geometry_guard_max_homography_median_px", 1.5, -1.0)
+        _set_profile_default(args, "low_match_geometry_guard_min_score_mean", 19.0, float("-inf"))
 
 
 def _add_repeated(command: list[str], option: str, values: list[str]) -> None:
@@ -157,12 +236,18 @@ def build_visual_command(args: argparse.Namespace, *, config: GraphFilterConfig,
         "graph_matcher",
         "--max-keypoints",
         str(args.max_keypoints),
+        "--matcher-candidate-topk",
+        str(args.matcher_candidate_topk),
         "--max-matches",
         str(args.max_matches),
         "--draw-matches",
         str(args.draw_matches),
         "--threshold-px",
         str(args.threshold_px),
+        "--geometry-filter",
+        args.geometry_filter,
+        "--geometry-threshold-px",
+        str(config.geometry_threshold_px),
         "--min-score",
         str(config.min_score),
         "--graph-dustbin-delta",
@@ -195,7 +280,81 @@ def build_visual_command(args: argparse.Namespace, *, config: GraphFilterConfig,
         str(args.filtered_max_matches),
         "--filtered-draw-matches",
         str(args.filtered_draw_matches),
+        "--filtered-min-matches",
+        str(config.filtered_min_matches),
     ]
+    if getattr(args, "post_filter_profile", ""):
+        command.extend(["--post-filter-profile", args.post_filter_profile])
+    for value in args.filtered_min_matches_by_variant:
+        command.extend(["--filtered-min-matches-by-variant", value])
+    low_match_geometry_guard_variants = getattr(args, "low_match_geometry_guard_variants", "")
+    if low_match_geometry_guard_variants:
+        command.extend(["--low-match-geometry-guard-variants", low_match_geometry_guard_variants])
+        command.extend(
+            [
+                "--low-match-geometry-guard-min-matches",
+                str(getattr(args, "low_match_geometry_guard_min_matches", 0)),
+            ]
+        )
+        command.extend(
+            [
+                "--low-match-geometry-guard-max-matches",
+                str(getattr(args, "low_match_geometry_guard_max_matches", -1)),
+            ]
+        )
+        command.extend(
+            [
+                "--low-match-geometry-guard-max-homography-p90-px",
+                str(getattr(args, "low_match_geometry_guard_max_homography_p90_px", -1.0)),
+            ]
+        )
+        command.extend(
+            [
+                "--low-match-geometry-guard-max-homography-median-px",
+                str(getattr(args, "low_match_geometry_guard_max_homography_median_px", -1.0)),
+            ]
+        )
+        command.extend(
+            [
+                "--low-match-geometry-guard-min-score-mean",
+                str(getattr(args, "low_match_geometry_guard_min_score_mean", float("-inf"))),
+            ]
+        )
+    adaptive_geometry_rescue_variants = getattr(args, "adaptive_geometry_rescue_variants", "")
+    if adaptive_geometry_rescue_variants:
+        command.extend(["--adaptive-geometry-rescue-variants", adaptive_geometry_rescue_variants])
+        command.extend(
+            [
+                "--adaptive-geometry-rescue-threshold-px",
+                str(getattr(args, "adaptive_geometry_rescue_threshold_px", 0.0)),
+            ]
+        )
+        command.extend(
+            [
+                "--adaptive-geometry-rescue-min-match-gain",
+                str(getattr(args, "adaptive_geometry_rescue_min_match_gain", 0)),
+            ]
+        )
+        command.extend(
+            [
+                "--adaptive-geometry-rescue-max-base-matches",
+                str(getattr(args, "adaptive_geometry_rescue_max_base_matches", -1)),
+            ]
+        )
+        command.extend(
+            [
+                "--adaptive-geometry-rescue-max-homography-p90-px",
+                str(getattr(args, "adaptive_geometry_rescue_max_homography_p90_px", -1.0)),
+            ]
+        )
+        command.extend(
+            [
+                "--adaptive-geometry-rescue-max-homography-median-px",
+                str(getattr(args, "adaptive_geometry_rescue_max_homography_median_px", -1.0)),
+            ]
+        )
+        if getattr(args, "adaptive_geometry_rescue_require_score_mean_not_lower", False):
+            command.append("--adaptive-geometry-rescue-require-score-mean-not-lower")
     if args.run_dir is not None:
         command.extend(["--run-dir", str(args.run_dir)])
     if args.metrics_csv is not None:
@@ -215,6 +374,10 @@ def build_visual_command(args: argparse.Namespace, *, config: GraphFilterConfig,
     command.append("--shuffle" if args.shuffle else "--no-shuffle")
     command.append("--filtered-report" if args.filtered_report else "--no-filtered-report")
     command.append("--filtered-mutual" if args.filtered_mutual else "--no-filtered-mutual")
+    if args.write_all_summary:
+        command.append("--write-all-summary")
+    if args.write_match_details:
+        command.append("--write-match-details")
     command.append("--illumination-stress" if args.illumination_stress else "--no-illumination-stress")
     if args.input_local_contrast:
         command.extend(
@@ -248,12 +411,18 @@ def _summarize_csv(path: Path, *, exclude_filtered_labels: bool) -> tuple[int, i
 
 
 def summarize_report(report_dir: Path, *, config: GraphFilterConfig) -> FilterSweepSummary:
+    raw_summary = report_dir / "all_summary.csv"
+    if not raw_summary.exists():
+        raw_summary = report_dir / "summary.csv"
+    filtered_summary = report_dir / "all_filtered_summary.csv"
+    if not filtered_summary.exists():
+        filtered_summary = report_dir / "filtered_summary.csv"
     raw_rows, raw_matches, raw_correct, raw_wrong, raw_precision, raw_median_error = _summarize_csv(
-        report_dir / "summary.csv",
+        raw_summary,
         exclude_filtered_labels=True,
     )
     filtered_rows, filtered_matches, filtered_correct, filtered_wrong, filtered_precision, filtered_median_error = (
-        _summarize_csv(report_dir / "filtered_summary.csv", exclude_filtered_labels=False)
+        _summarize_csv(filtered_summary, exclude_filtered_labels=False)
     )
     return FilterSweepSummary(
         config=config,
@@ -281,6 +450,8 @@ def write_summary_csv(summaries: list[FilterSweepSummary], path: Path) -> None:
         "min_raw_score",
         "min_raw_margin",
         "min_accept_probability",
+        "geometry_threshold_px",
+        "filtered_min_matches",
         "raw_rows",
         "raw_matches",
         "raw_correct",
@@ -308,6 +479,8 @@ def write_summary_csv(summaries: list[FilterSweepSummary], path: Path) -> None:
                     "min_raw_score": f"{cfg.min_raw_score:g}",
                     "min_raw_margin": f"{cfg.min_raw_margin:g}",
                     "min_accept_probability": f"{cfg.min_accept_probability:g}",
+                    "geometry_threshold_px": f"{cfg.geometry_threshold_px:g}",
+                    "filtered_min_matches": cfg.filtered_min_matches,
                     "raw_rows": item.raw_rows,
                     "raw_matches": item.raw_matches,
                     "raw_correct": item.raw_correct,
@@ -334,6 +507,8 @@ def write_html_report(args: argparse.Namespace, summaries: list[FilterSweepSumma
         f"<td>{item.config.min_raw_score:g}</td>"
         f"<td>{item.config.min_raw_margin:g}</td>"
         f"<td>{item.config.min_accept_probability:g}</td>"
+        f"<td>{item.config.geometry_threshold_px:g}</td>"
+        f"<td>{item.config.filtered_min_matches}</td>"
         f"<td>{item.raw_matches}</td>"
         f"<td>{item.raw_correct}</td>"
         f"<td>{item.raw_precision:.3f}</td>"
@@ -371,7 +546,7 @@ pre {{ background: #101a24; padding: 12px; white-space: pre-wrap; }}
 <pre>{html.escape(json.dumps(metadata, ensure_ascii=False, indent=2))}</pre>
 <table>
 <thead>
-<tr><th>min score</th><th>dustbin</th><th>accept margin</th><th>raw score</th><th>raw margin</th><th>accept prob</th><th>raw matches</th><th>raw correct</th><th>raw precision</th><th>raw median px</th><th>filtered matches</th><th>filtered correct</th><th>filtered precision</th><th>filtered median px</th><th>Report</th></tr>
+<tr><th>min score</th><th>dustbin</th><th>accept margin</th><th>raw score</th><th>raw margin</th><th>accept prob</th><th>geo px</th><th>min matches</th><th>raw matches</th><th>raw correct</th><th>raw precision</th><th>raw median px</th><th>filtered matches</th><th>filtered correct</th><th>filtered precision</th><th>filtered median px</th><th>Report</th></tr>
 </thead>
 <tbody>
 {rows}
@@ -415,9 +590,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--descriptor-mode", choices=["learned", "texture", "blend"], default="learned")
     parser.add_argument("--keypoint-score-mode", choices=["texture", "learned"], default="learned")
     parser.add_argument("--max-keypoints", type=int, default=512)
+    parser.add_argument("--matcher-candidate-topk", type=int, default=-1)
     parser.add_argument("--max-matches", type=int, default=0)
     parser.add_argument("--draw-matches", type=int, default=0)
     parser.add_argument("--threshold-px", type=float, default=5.0)
+    parser.add_argument(
+        "--post-filter-profile",
+        choices=FOV76_POST_FILTER_PROFILES,
+        default="",
+        help="Apply a named post-filter profile after parsing default sweep options.",
+    )
+    parser.add_argument("--geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="none")
+    parser.add_argument("--geometry-threshold-px", type=float, default=0.0)
+    parser.add_argument("--geometry-threshold-px-values", type=parse_float_list, default=None)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--graph-width-prune-keep-ratio", type=float, default=1.0)
@@ -432,15 +617,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-configs", type=int, default=64)
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local"], default="local")
+    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="local")
     parser.add_argument("--filtered-max-matches", type=int, default=0)
     parser.add_argument("--filtered-draw-matches", type=int, default=0)
+    parser.add_argument("--filtered-min-matches", type=int, default=0)
+    parser.add_argument("--filtered-min-matches-values", type=parse_int_list, default=None)
+    parser.add_argument("--filtered-min-matches-by-variant", action="append", default=[])
+    parser.add_argument("--adaptive-geometry-rescue-variants", default="")
+    parser.add_argument("--adaptive-geometry-rescue-threshold-px", type=float, default=0.0)
+    parser.add_argument("--adaptive-geometry-rescue-min-match-gain", type=int, default=0)
+    parser.add_argument("--adaptive-geometry-rescue-max-base-matches", type=int, default=-1)
+    parser.add_argument("--adaptive-geometry-rescue-max-homography-p90-px", type=float, default=-1.0)
+    parser.add_argument("--adaptive-geometry-rescue-max-homography-median-px", type=float, default=-1.0)
+    parser.add_argument("--adaptive-geometry-rescue-require-score-mean-not-lower", action="store_true")
+    parser.add_argument("--low-match-geometry-guard-variants", default="")
+    parser.add_argument("--low-match-geometry-guard-min-matches", type=int, default=0)
+    parser.add_argument("--low-match-geometry-guard-max-matches", type=int, default=-1)
+    parser.add_argument("--low-match-geometry-guard-max-homography-p90-px", type=float, default=-1.0)
+    parser.add_argument("--low-match-geometry-guard-max-homography-median-px", type=float, default=-1.0)
+    parser.add_argument("--low-match-geometry-guard-min-score-mean", type=float, default=float("-inf"))
     parser.add_argument("--filtered-min-margin", type=float, default=0.02)
+    parser.add_argument("--write-all-summary", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--write-match-details", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
     parser.add_argument("--input-local-contrast-kernel", type=int, default=31)
     parser.add_argument("--illumination-stress", action=argparse.BooleanOptionalAction, default=False)
-    return parser.parse_args()
+    args = parser.parse_args()
+    apply_post_filter_profile(args)
+    return args
 
 
 def main() -> int:
@@ -450,6 +655,26 @@ def main() -> int:
         validate_config(config)
     if args.max_configs <= 0:
         raise ValueError("--max-configs must be positive")
+    if args.matcher_candidate_topk < -1:
+        raise ValueError("--matcher-candidate-topk must be nonnegative, or -1 to keep checkpoint config")
+    if args.adaptive_geometry_rescue_threshold_px < 0.0:
+        raise ValueError("--adaptive-geometry-rescue-threshold-px must be nonnegative")
+    if args.adaptive_geometry_rescue_min_match_gain < 0:
+        raise ValueError("--adaptive-geometry-rescue-min-match-gain must be nonnegative")
+    if args.adaptive_geometry_rescue_max_base_matches < -1:
+        raise ValueError("--adaptive-geometry-rescue-max-base-matches must be >= -1")
+    if args.adaptive_geometry_rescue_max_homography_p90_px < -1.0:
+        raise ValueError("--adaptive-geometry-rescue-max-homography-p90-px must be >= -1")
+    if args.adaptive_geometry_rescue_max_homography_median_px < -1.0:
+        raise ValueError("--adaptive-geometry-rescue-max-homography-median-px must be >= -1")
+    if args.low_match_geometry_guard_min_matches < 0:
+        raise ValueError("--low-match-geometry-guard-min-matches must be nonnegative")
+    if args.low_match_geometry_guard_max_matches < -1:
+        raise ValueError("--low-match-geometry-guard-max-matches must be >= -1")
+    if args.low_match_geometry_guard_max_homography_p90_px < -1.0:
+        raise ValueError("--low-match-geometry-guard-max-homography-p90-px must be >= -1")
+    if args.low_match_geometry_guard_max_homography_median_px < -1.0:
+        raise ValueError("--low-match-geometry-guard-max-homography-median-px must be >= -1")
     if len(configs) > args.max_configs:
         raise ValueError(f"refusing to run {len(configs)} configs; increase --max-configs to allow this sweep")
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -20,6 +20,13 @@ from torch.utils.checkpoint import checkpoint as activation_checkpoint
 from pfm_model_descriptors import geometry_aware_descriptor_pool, make_xy_grid, normalize_channels_stable
 
 INFERENCE_TEXTURE_BLEND_WEIGHT = 1.0
+DESCRIPTOR_GEOMETRY_MODES = ("full", "orientation_scale", "plain")
+DESCRIPTOR_GEOMETRY_SAFETY_SCHEDULES = ("off", "phase4")
+QUALITY_SCORE_MODES = ("soft", "multiply", "raw")
+MATCHER_RELIABILITY_PAIR_BIAS_MODES = ("full", "off")
+MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES = ("full", "matchability", "off")
+MATCHER_FINAL_ACCEPT_SCORE_MODES = ("multiply", "none", "add")
+MATCHER_ACCEPT_ASSIGNMENT_MODES = ("add", "off")
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,20 @@ class CheckpointConfig:
     graph_hidden_dim: int
     graph_attention_layers: int
     graph_keypoint_meta_dim: int = 2
+    descriptor_geometry_mode: str = "full"
+    quality_score_mode: str = "soft"
+    matcher_reliability_pair_bias_mode: str = "off"
+    matcher_reliability_dustbin_bias_mode: str = "off"
+    matcher_final_accept_score_mode: str = "none"
+    matcher_geometry_bias_scale: float = 1.0
+    matcher_accept_assignment_mode: str = "add"
+    matcher_final_accept_score_alpha: float = 0.05
+    matcher_geometry_bias_clamp: float = 2.0
+    matcher_attention_residual_gate_init: float = 1.0
+    matcher_candidate_topk: int = 256
+    descriptor_geometry_blend_weight: float = 1.0
+    descriptor_scale_log_clamp_min: float = -2.0
+    descriptor_scale_log_clamp_max: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -198,6 +219,7 @@ class DualFPNLite(nn.Module):
         if base_channels <= 0:
             raise ValueError("base_channels must be positive")
         p2_channels = base_channels * 2
+        self.keypoint_from_stage1 = nn.Conv2d(base_channels, p2_channels, 1)
         self.keypoint_from_stage3 = nn.Conv2d(base_channels * 4, p2_channels, 1)
         self.descriptor_from_stage3 = nn.Conv2d(base_channels * 4, p2_channels, 1)
         self.descriptor_from_stage4 = nn.Conv2d(base_channels * 8, p2_channels, 1)
@@ -206,6 +228,7 @@ class DualFPNLite(nn.Module):
             ZeroResidualContextBlock(p2_channels),
             ZeroResidualContextBlock(p2_channels, dilation=2),
         )
+        _zero_module(self.keypoint_from_stage1)
         _zero_module(self.keypoint_from_stage3)
         _zero_module(self.descriptor_from_stage3)
         _zero_module(self.descriptor_from_stage4)
@@ -217,14 +240,19 @@ class DualFPNLite(nn.Module):
         stage3: torch.Tensor,
         stage4: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del stage1
+        stage1_keypoint = F.interpolate(
+            self.keypoint_from_stage1(stage1),
+            size=stage2.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
         stage3_keypoint = F.interpolate(
             self.keypoint_from_stage3(stage3),
             size=stage2.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
-        p2_keypoint = self.keypoint_refine(stage2 + stage3_keypoint)
+        p2_keypoint = self.keypoint_refine(stage2 + stage1_keypoint + stage3_keypoint)
         desc_stage3 = F.interpolate(
             self.descriptor_from_stage3(stage3),
             size=stage2.shape[-2:],
@@ -322,6 +350,39 @@ def _zero_module(module: nn.Module) -> None:
             parameter.zero_()
 
 
+def apply_quality_score_mode(heatmap: torch.Tensor, quality: torch.Tensor, *, mode: str) -> torch.Tensor:
+    if mode == "raw":
+        return heatmap.clamp(0.0, 1.0)
+    if mode == "multiply":
+        return (heatmap * quality).clamp(0.0, 1.0)
+    if mode == "soft":
+        return (heatmap * (0.5 + 0.5 * quality)).clamp(0.0, 1.0)
+    raise ValueError(f"quality score mode must be one of {QUALITY_SCORE_MODES}")
+
+
+def descriptor_geometry_safety_for_progress(
+    schedule: str,
+    progress: float,
+) -> tuple[float, float, float] | None:
+    """Return descriptor geometry blend/clamp settings for the named training schedule."""
+
+    if schedule == "off":
+        return None
+    if schedule != "phase4":
+        raise ValueError(f"descriptor geometry safety schedule must be one of {DESCRIPTOR_GEOMETRY_SAFETY_SCHEDULES}")
+    if not math.isfinite(float(progress)):
+        raise ValueError("progress must be finite")
+    clipped = min(1.0, max(0.0, float(progress)))
+    if clipped < 0.2:
+        blend_weight = 0.0
+    elif clipped < 0.6:
+        blend_weight = 0.3 * ((clipped - 0.2) / 0.4)
+    else:
+        blend_weight = 0.3 + 0.2 * ((clipped - 0.6) / 0.4)
+    clamp_abs = 0.7 if clipped < 0.6 else 1.2
+    return (float(blend_weight), -float(clamp_abs), float(clamp_abs))
+
+
 class SparseHead(nn.Module):
     """稀疏特征头：同时预测关键点、descriptor 和局部几何。
 
@@ -330,12 +391,39 @@ class SparseHead(nn.Module):
     `geometry_aware_descriptor_pool()` 完成。
     """
 
-    def __init__(self, input_channels: int, descriptor_dim: int) -> None:
+    def __init__(
+        self,
+        input_channels: int,
+        descriptor_dim: int,
+        *,
+        descriptor_geometry_mode: str = "full",
+        descriptor_geometry_blend_weight: float = 1.0,
+        descriptor_scale_log_clamp_min: float = -2.0,
+        descriptor_scale_log_clamp_max: float = 2.0,
+    ) -> None:
         super().__init__()
         if input_channels <= 0 or descriptor_dim <= 0:
             raise ValueError("input_channels and descriptor_dim must be positive")
+        if descriptor_geometry_mode not in DESCRIPTOR_GEOMETRY_MODES:
+            raise ValueError(f"descriptor_geometry_mode must be one of {DESCRIPTOR_GEOMETRY_MODES}")
+        if (
+            not math.isfinite(float(descriptor_geometry_blend_weight))
+            or descriptor_geometry_blend_weight < 0.0
+            or descriptor_geometry_blend_weight > 1.0
+        ):
+            raise ValueError("descriptor_geometry_blend_weight must be in [0, 1]")
+        if (
+            not math.isfinite(float(descriptor_scale_log_clamp_min))
+            or not math.isfinite(float(descriptor_scale_log_clamp_max))
+            or descriptor_scale_log_clamp_min > descriptor_scale_log_clamp_max
+        ):
+            raise ValueError("descriptor scale log clamp bounds must be finite and ordered")
         self.input_channels = input_channels
         self.descriptor_dim = descriptor_dim
+        self.descriptor_geometry_mode = descriptor_geometry_mode
+        self.descriptor_geometry_blend_weight = float(descriptor_geometry_blend_weight)
+        self.descriptor_scale_log_clamp_min = float(descriptor_scale_log_clamp_min)
+        self.descriptor_scale_log_clamp_max = float(descriptor_scale_log_clamp_max)
         self.context = nn.Sequential(
             nn.Conv2d(input_channels, input_channels, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -433,7 +521,13 @@ class SparseHead(nn.Module):
 
         # 这三个几何头不是给外部直接显示用的，而是给 descriptor canonical pooling 用：
         # scale 控制采样半径，orientation 给出局部主方向，affine 捕捉斜视/局部剪切。
-        scale = torch.exp(torch.clamp(self.scale(geometry_context), min=-2.0, max=2.0))
+        scale = torch.exp(
+            torch.clamp(
+                self.scale(geometry_context),
+                min=float(self.descriptor_scale_log_clamp_min),
+                max=float(self.descriptor_scale_log_clamp_max),
+            )
+        )
         orientation = _normalize_channels(self.orientation(geometry_context))
         affine_delta = torch.tanh(self.affine(geometry_context)) * 0.1
         identity = affine_delta.new_tensor([1.0, 0.0, 0.0, 1.0]).view(1, 4, 1, 1)
@@ -443,14 +537,28 @@ class SparseHead(nn.Module):
         matchability = torch.sigmoid(self.matchability(geometry_context))
         descriptor_uncertainty = torch.sigmoid(self.descriptor_uncertainty(geometry_context))
         no_match_prior = torch.sigmoid(self.no_match_prior(geometry_context))
-        descriptors = _checkpoint_tensor_call(
-            activation_checkpointing,
-            geometry_aware_descriptor_pool,
-            descriptors,
-            orientation,
-            scale,
-            affine,
-        )
+        if self.descriptor_geometry_mode == "full":
+            pooling_affine = affine
+        elif self.descriptor_geometry_mode == "orientation_scale":
+            pooling_affine = identity.expand_as(affine)
+        elif self.descriptor_geometry_mode == "plain":
+            pooling_affine = None
+        else:
+            raise ValueError(f"unsupported descriptor geometry mode: {self.descriptor_geometry_mode}")
+        if pooling_affine is not None and self.descriptor_geometry_blend_weight > 0.0:
+            pooled_descriptors = _checkpoint_tensor_call(
+                activation_checkpointing,
+                geometry_aware_descriptor_pool,
+                descriptors,
+                orientation,
+                scale,
+                pooling_affine,
+            )
+            if self.descriptor_geometry_blend_weight >= 1.0:
+                descriptors = pooled_descriptors
+            else:
+                blend_weight = float(self.descriptor_geometry_blend_weight)
+                descriptors = _normalize_channels((1.0 - blend_weight) * descriptors + blend_weight * pooled_descriptors)
         return SparseHeadOutput(
             heatmap,
             descriptors,
@@ -646,11 +754,17 @@ def _attend(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, hidden_
 
 
 class PlanetaryGraphAttentionLayer(nn.Module):
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(self, hidden_dim: int, *, residual_gate_init: float = 1.0) -> None:
         super().__init__()
         if hidden_dim <= 0:
             raise ValueError("hidden_dim must be positive")
+        if not math.isfinite(float(residual_gate_init)):
+            raise ValueError("residual_gate_init must be finite")
         self.hidden_dim = hidden_dim
+        gate_init = float(max(0.0, min(1.0, residual_gate_init)))
+        self.self_residual_gate = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
+        self.cross_residual_gate = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
+        self.feed_forward_residual_gate = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
         self.self_query = nn.Linear(hidden_dim, hidden_dim)
         self.self_key = nn.Linear(hidden_dim, hidden_dim)
         self.self_value = nn.Linear(hidden_dim, hidden_dim)
@@ -669,18 +783,31 @@ class PlanetaryGraphAttentionLayer(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim),
         )
 
+    @staticmethod
+    def _clamped_gate(gate: torch.Tensor) -> torch.Tensor:
+        return gate.to(dtype=torch.float32).clamp(0.0, 1.0)
+
     def forward(self, features_a: torch.Tensor, features_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         self_a = _attend(self.self_query(features_a), self.self_key(features_a), self.self_value(features_a), self.hidden_dim)
         self_b = _attend(self.self_query(features_b), self.self_key(features_b), self.self_value(features_b), self.hidden_dim)
-        refined_a = self.self_norm(features_a + self.attention_dropout(self.self_output(self_a)))
-        refined_b = self.self_norm(features_b + self.attention_dropout(self.self_output(self_b)))
+        self_candidate_a = self.self_norm(features_a + self.attention_dropout(self.self_output(self_a)))
+        self_candidate_b = self.self_norm(features_b + self.attention_dropout(self.self_output(self_b)))
+        self_gate = self._clamped_gate(self.self_residual_gate).to(device=features_a.device, dtype=features_a.dtype)
+        refined_a = features_a + self_gate * (self_candidate_a - features_a)
+        refined_b = features_b + self_gate * (self_candidate_b - features_b)
         cross_a = _attend(self.cross_query(refined_a), self.cross_key(refined_b), self.cross_value(refined_b), self.hidden_dim)
         cross_b = _attend(self.cross_query(refined_b), self.cross_key(refined_a), self.cross_value(refined_a), self.hidden_dim)
-        refined_a = self.cross_norm(refined_a + self.attention_dropout(self.cross_output(cross_a)))
-        refined_b = self.cross_norm(refined_b + self.attention_dropout(self.cross_output(cross_b)))
+        cross_candidate_a = self.cross_norm(refined_a + self.attention_dropout(self.cross_output(cross_a)))
+        cross_candidate_b = self.cross_norm(refined_b + self.attention_dropout(self.cross_output(cross_b)))
+        cross_gate = self._clamped_gate(self.cross_residual_gate).to(device=features_a.device, dtype=features_a.dtype)
+        refined_a = refined_a + cross_gate * (cross_candidate_a - refined_a)
+        refined_b = refined_b + cross_gate * (cross_candidate_b - refined_b)
+        feed_candidate_a = self.feed_forward_norm(refined_a + self.feed_forward(refined_a))
+        feed_candidate_b = self.feed_forward_norm(refined_b + self.feed_forward(refined_b))
+        feed_gate = self._clamped_gate(self.feed_forward_residual_gate).to(device=features_a.device, dtype=features_a.dtype)
         return (
-            self.feed_forward_norm(refined_a + self.feed_forward(refined_a)),
-            self.feed_forward_norm(refined_b + self.feed_forward(refined_b)),
+            refined_a + feed_gate * (feed_candidate_a - refined_a),
+            refined_b + feed_gate * (feed_candidate_b - refined_b),
         )
 
 
@@ -691,15 +818,48 @@ class PlanetaryGraphMatcher(nn.Module):
         hidden_dim: int,
         attention_layers: int = 1,
         keypoint_meta_dim: int = 2,
-        candidate_topk: int = 64,
+        candidate_topk: int = 256,
+        reliability_pair_bias_mode: str = "off",
+        reliability_dustbin_bias_mode: str = "off",
+        final_accept_score_mode: str = "none",
+        geometry_bias_scale: float = 1.0,
+        accept_assignment_mode: str = "add",
+        final_accept_score_alpha: float = 0.05,
+        geometry_bias_clamp: float = 2.0,
+        attention_residual_gate_init: float = 1.0,
     ) -> None:
         super().__init__()
         if descriptor_dim <= 0 or hidden_dim <= 0 or attention_layers <= 0 or keypoint_meta_dim <= 0:
             raise ValueError("descriptor_dim, hidden_dim, attention_layers, and keypoint_meta_dim must be positive")
+        if candidate_topk < 0:
+            raise ValueError("candidate_topk must be nonnegative")
+        if reliability_pair_bias_mode not in MATCHER_RELIABILITY_PAIR_BIAS_MODES:
+            raise ValueError(f"reliability_pair_bias_mode must be one of {MATCHER_RELIABILITY_PAIR_BIAS_MODES}")
+        if reliability_dustbin_bias_mode not in MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES:
+            raise ValueError(f"reliability_dustbin_bias_mode must be one of {MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES}")
+        if final_accept_score_mode not in MATCHER_FINAL_ACCEPT_SCORE_MODES:
+            raise ValueError(f"final_accept_score_mode must be one of {MATCHER_FINAL_ACCEPT_SCORE_MODES}")
+        if accept_assignment_mode not in MATCHER_ACCEPT_ASSIGNMENT_MODES:
+            raise ValueError(f"accept_assignment_mode must be one of {MATCHER_ACCEPT_ASSIGNMENT_MODES}")
+        if not math.isfinite(float(geometry_bias_scale)):
+            raise ValueError("geometry_bias_scale must be finite")
+        if not math.isfinite(float(final_accept_score_alpha)) or final_accept_score_alpha < 0.0:
+            raise ValueError("final_accept_score_alpha must be finite and nonnegative")
+        if not math.isfinite(float(geometry_bias_clamp)) or geometry_bias_clamp < 0.0:
+            raise ValueError("geometry_bias_clamp must be finite and nonnegative")
+        if not math.isfinite(float(attention_residual_gate_init)):
+            raise ValueError("attention_residual_gate_init must be finite")
         self.descriptor_dim = descriptor_dim
         self.hidden_dim = hidden_dim
         self.keypoint_meta_dim = keypoint_meta_dim
         self.candidate_topk = int(candidate_topk)
+        self.reliability_pair_bias_mode = reliability_pair_bias_mode
+        self.reliability_dustbin_bias_mode = reliability_dustbin_bias_mode
+        self.final_accept_score_mode = final_accept_score_mode
+        self.geometry_bias_scale = float(geometry_bias_scale)
+        self.accept_assignment_mode = accept_assignment_mode
+        self.final_accept_score_alpha = float(final_accept_score_alpha)
+        self.geometry_bias_clamp = float(geometry_bias_clamp)
         self.descriptor_projection = nn.Linear(descriptor_dim, hidden_dim)
         self.keypoint_projection = nn.Linear(keypoint_meta_dim, hidden_dim)
         self.score_projection = nn.Linear(hidden_dim, hidden_dim)
@@ -714,12 +874,20 @@ class PlanetaryGraphMatcher(nn.Module):
             nn.Linear(max(16, hidden_dim // 8), 1),
         )
         self.logit_scale = nn.Parameter(torch.ones(1) * math.sqrt(float(hidden_dim)))
-        self.raw_score_temperature = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
-        self.graph_delta_scale = nn.Parameter(torch.tensor(0.20, dtype=torch.float32))
-        self.accept_logit_scale = nn.Parameter(torch.tensor(0.10, dtype=torch.float32))
+        self.raw_score_temperature = nn.Parameter(torch.tensor(0.15, dtype=torch.float32))
+        self.graph_delta_scale = nn.Parameter(torch.tensor(0.30, dtype=torch.float32))
+        self.accept_logit_scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
         self.dustbin_bias = nn.Parameter(torch.zeros(1))
         self.last_executed_attention_layers = 0
-        self.attention_layers = nn.ModuleList([PlanetaryGraphAttentionLayer(hidden_dim) for _ in range(attention_layers)])
+        self.attention_layers = nn.ModuleList(
+            [
+                PlanetaryGraphAttentionLayer(
+                    hidden_dim,
+                    residual_gate_init=attention_residual_gate_init,
+                )
+                for _ in range(attention_layers)
+            ]
+        )
         _zero_module(self.geometry_bias[-1])
         _zero_module(self.accept_head[-1])
 
@@ -739,17 +907,20 @@ class PlanetaryGraphMatcher(nn.Module):
         return meta[:, index]
 
     @classmethod
-    def _metadata_reliability_score(cls, meta: torch.Tensor) -> torch.Tensor:
-        matchability = cls._metadata_column(meta, 12, 0.5).clamp(0.0, 1.0)
-        uncertainty = cls._metadata_column(meta, 14, 0.5).clamp(0.0, 1.0)
-        no_match_prior = cls._metadata_column(meta, 15, 0.5).clamp(0.0, 1.0)
-        return (matchability - 0.5) - (uncertainty - 0.5) - (no_match_prior - 0.5)
+    def _metadata_reliability_score(cls, meta: torch.Tensor, *, mode: str = "full") -> torch.Tensor:
+        if mode in ("off", "full", "matchability"):
+            return meta.new_zeros((meta.size(0),))
+        raise ValueError(f"metadata reliability mode must be one of {MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES}")
 
-    @classmethod
-    def _pair_reliability_bias(cls, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
-        score_a = cls._metadata_reliability_score(meta_a)
-        score_b = cls._metadata_reliability_score(meta_b)
+    def _pair_reliability_bias(self, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
+        if self.reliability_pair_bias_mode == "off":
+            return meta_a.new_zeros((meta_a.size(0), meta_b.size(0)))
+        score_a = self._metadata_reliability_score(meta_a, mode="full")
+        score_b = self._metadata_reliability_score(meta_b, mode="full")
         return 0.5 * (score_a[:, None] + score_b[None, :])
+
+    def _dustbin_reliability_score(self, meta: torch.Tensor) -> torch.Tensor:
+        return self._metadata_reliability_score(meta, mode=self.reliability_dustbin_bias_mode)
 
     def _geometry_compatibility_bias(self, meta_a: torch.Tensor, meta_b: torch.Tensor) -> torch.Tensor:
         def column(meta: torch.Tensor, index: int, default: float = 0.0) -> torch.Tensor:
@@ -785,21 +956,43 @@ class PlanetaryGraphMatcher(nn.Module):
             ],
             dim=-1,
         )
-        return self.geometry_bias(features).squeeze(-1)
+        if self.geometry_bias_scale == 0.0:
+            return features.new_zeros(features.shape[:-1])
+        bias = self.geometry_bias(features).squeeze(-1) * float(self.geometry_bias_scale)
+        if self.geometry_bias_clamp > 0.0:
+            bias = bias.clamp(-float(self.geometry_bias_clamp), float(self.geometry_bias_clamp))
+        return bias
 
-    def _candidate_mask(self, desc_a: torch.Tensor, desc_b: torch.Tensor) -> torch.Tensor:
+    def _candidate_mask(
+        self,
+        desc_a: torch.Tensor,
+        desc_b: torch.Tensor,
+        meta_a: torch.Tensor | None = None,
+        meta_b: torch.Tensor | None = None,
+        *,
+        candidate_topk: int | None = None,
+        positive_pair_count: int = 0,
+    ) -> torch.Tensor:
         count_a = desc_a.size(0)
         count_b = desc_b.size(0)
-        if self.candidate_topk <= 0 or self.candidate_topk >= count_b:
+        topk = self.candidate_topk if candidate_topk is None else int(candidate_topk)
+        if topk <= 0 or topk >= count_b:
             return torch.ones(count_a, count_b, dtype=torch.bool, device=desc_a.device)
         similarity = F.normalize(desc_a, p=2, dim=1, eps=1.0e-12) @ F.normalize(desc_b, p=2, dim=1, eps=1.0e-12).T
+        if meta_a is not None and meta_b is not None and self.geometry_bias_scale != 0.0:
+            geometry_candidate_bias = self._geometry_compatibility_bias(meta_a, meta_b).detach().to(similarity.dtype)
+            similarity = similarity + 0.10 * geometry_candidate_bias.clamp(-1.0, 1.0)
         mask = torch.zeros(count_a, count_b, dtype=torch.bool, device=desc_a.device)
-        row_k = min(self.candidate_topk, count_b)
+        row_k = min(topk, count_b)
         row_indices = similarity.topk(row_k, dim=1).indices
         mask.scatter_(1, row_indices, True)
-        col_k = min(self.candidate_topk, count_a)
+        col_k = min(topk, count_a)
         col_indices = similarity.topk(col_k, dim=0).indices
         mask.scatter_(0, col_indices, True)
+        diagonal_count = min(int(positive_pair_count), count_a, count_b)
+        if diagonal_count > 0:
+            diagonal_indices = torch.arange(diagonal_count, device=desc_a.device)
+            mask[diagonal_indices, diagonal_indices] = True
         return mask
 
     def _acceptance_logits(
@@ -869,7 +1062,9 @@ class PlanetaryGraphMatcher(nn.Module):
         raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
         delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
         accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
-        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits
+        pair_logits = raw_similarity / raw_temperature + delta_scale * graph_delta
+        if self.accept_assignment_mode == "add":
+            pair_logits = pair_logits + accept_scale * accept_logits
         return pair_logits, accept_logits
 
     @staticmethod
@@ -928,6 +1123,8 @@ class PlanetaryGraphMatcher(nn.Module):
         max_attention_layers: int = 0,
         max_attention_work_fraction: float = 1.0,
         width_prune_keep_ratio: float = 1.0,
+        candidate_topk: int | None = None,
+        positive_pair_count_for_mask: int = 0,
     ) -> GraphMatcherOutput:
         if early_stop_min_confidence < -1.0:
             raise ValueError("early_stop_min_confidence must be at least -1.0; -1 disables early stopping")
@@ -1067,9 +1264,18 @@ class PlanetaryGraphMatcher(nn.Module):
             raw_temperature = self.raw_score_temperature.abs().clamp(0.03, 1.0)
             delta_scale = self.graph_delta_scale.clamp(0.0, 2.0)
             accept_scale = self.accept_logit_scale.clamp(0.0, 2.0)
-            pair_logits_work = raw_similarity / raw_temperature + delta_scale * graph_delta + accept_scale * accept_logits_work
+            pair_logits_work = raw_similarity / raw_temperature + delta_scale * graph_delta
+            if self.accept_assignment_mode == "add":
+                pair_logits_work = pair_logits_work + accept_scale * accept_logits_work
             if apply_candidate_mask:
-                candidate_mask = self._candidate_mask(desc_work_a, desc_work_b)
+                candidate_mask = self._candidate_mask(
+                    desc_work_a,
+                    desc_work_b,
+                    kp_work_a,
+                    kp_work_b,
+                    candidate_topk=candidate_topk,
+                    positive_pair_count=positive_pair_count_for_mask,
+                )
                 pair_logits_work = pair_logits_work.masked_fill(~candidate_mask, -1.0e4)
                 accept_logits_work = accept_logits_work.masked_fill(~candidate_mask, -1.0e4)
             if restore_pruned_logits:
@@ -1091,28 +1297,47 @@ class PlanetaryGraphMatcher(nn.Module):
         logits[: descriptors_a.size(0), : descriptors_b.size(0)] = pair_logits
         if descriptors_a.size(0) > 0:
             logits[: descriptors_a.size(0), descriptors_b.size(0)] = (
-                logits[: descriptors_a.size(0), descriptors_b.size(0)] - self._metadata_reliability_score(kp_a)
+                logits[: descriptors_a.size(0), descriptors_b.size(0)] - self._dustbin_reliability_score(kp_a)
             )
         if descriptors_b.size(0) > 0:
             logits[descriptors_a.size(0), : descriptors_b.size(0)] = (
-                logits[descriptors_a.size(0), : descriptors_b.size(0)] - self._metadata_reliability_score(kp_b)
+                logits[descriptors_a.size(0), : descriptors_b.size(0)] - self._dustbin_reliability_score(kp_b)
             )
-        row_logits = logits[: descriptors_a.size(0), :]
-        row_prob = torch.softmax(logits[: descriptors_a.size(0), :], dim=1)[:, : descriptors_b.size(0)]
-        col_prob = torch.softmax(logits[:, : descriptors_b.size(0)], dim=0)[: descriptors_a.size(0), :]
-        dual_scores = row_prob * col_prob
-        best_values, best_indices = dual_scores.max(dim=1)
-        source_indices = torch.arange(descriptors_a.size(0), device=best_indices.device)
-        inlier_mask = best_values.gt(torch.softmax(row_logits, dim=1)[:, -1])
-        if descriptors_a.size(0) > 0 and descriptors_b.size(0) > 0:
-            reverse_best = dual_scores.max(dim=0).indices
-            mutual_sources = reverse_best.index_select(0, best_indices.clamp(0, descriptors_b.size(0) - 1))
-            inlier_mask = inlier_mask & mutual_sources.eq(source_indices)
-        source_indices = source_indices[inlier_mask]
-        target_indices = best_indices[inlier_mask]
-        probabilities = best_values[inlier_mask]
-        if probabilities.numel() > 0 and accept_logits.numel() > 0:
+        count_a = descriptors_a.size(0)
+        count_b = descriptors_b.size(0)
+        if count_a > 0 and count_b > 0:
+            margin_scores = (
+                logits[:count_a, :count_b]
+                - logits[:count_a, count_b][:, None]
+                - logits[count_a, :count_b][None, :]
+            )
+            best_values, best_indices = margin_scores.max(dim=1)
+            source_indices = torch.arange(count_a, device=best_indices.device)
+            reverse_best = margin_scores.max(dim=0).indices
+            mutual_sources = reverse_best.index_select(0, best_indices)
+            inlier_mask = best_values.gt(0.0) & mutual_sources.eq(source_indices)
+            source_indices = source_indices[inlier_mask]
+            target_indices = best_indices[inlier_mask]
+            probabilities = best_values[inlier_mask]
+        else:
+            source_indices = torch.empty(0, dtype=torch.long, device=logits.device)
+            target_indices = torch.empty(0, dtype=torch.long, device=logits.device)
+            probabilities = logits.new_empty((0,))
+        if (
+            self.final_accept_score_mode == "multiply"
+            and probabilities.numel() > 0
+            and accept_logits.numel() > 0
+        ):
             probabilities = probabilities * torch.sigmoid(accept_logits[source_indices, target_indices])
+        elif (
+            self.final_accept_score_mode == "add"
+            and probabilities.numel() > 0
+            and accept_logits.numel() > 0
+        ):
+            probabilities = (
+                probabilities
+                + float(self.final_accept_score_alpha) * torch.sigmoid(accept_logits[source_indices, target_indices])
+            )
         matches = torch.stack([source_indices, target_indices], dim=1).to(device="cpu", dtype=torch.long).contiguous()
         scores = probabilities.to(device="cpu", dtype=torch.float32).contiguous()
         kept_keypoints_a = int(indices_a.numel())
@@ -1456,8 +1681,58 @@ class PlanetaryFeatureMatcher(nn.Module):
         graph_hidden_dim: int = 512,
         graph_attention_layers: int = 8,
         graph_keypoint_meta_dim: int = 16,
+        descriptor_geometry_mode: str = "full",
+        quality_score_mode: str = "soft",
+        matcher_reliability_pair_bias_mode: str = "off",
+        matcher_reliability_dustbin_bias_mode: str = "off",
+        matcher_final_accept_score_mode: str = "none",
+        matcher_geometry_bias_scale: float = 1.0,
+        matcher_accept_assignment_mode: str = "add",
+        matcher_final_accept_score_alpha: float = 0.05,
+        matcher_geometry_bias_clamp: float = 2.0,
+        matcher_attention_residual_gate_init: float = 1.0,
+        matcher_candidate_topk: int = 256,
+        descriptor_geometry_blend_weight: float = 1.0,
+        descriptor_scale_log_clamp_min: float = -2.0,
+        descriptor_scale_log_clamp_max: float = 2.0,
     ) -> None:
         super().__init__()
+        if descriptor_geometry_mode not in DESCRIPTOR_GEOMETRY_MODES:
+            raise ValueError(f"descriptor_geometry_mode must be one of {DESCRIPTOR_GEOMETRY_MODES}")
+        if quality_score_mode not in QUALITY_SCORE_MODES:
+            raise ValueError(f"quality_score_mode must be one of {QUALITY_SCORE_MODES}")
+        if matcher_reliability_pair_bias_mode not in MATCHER_RELIABILITY_PAIR_BIAS_MODES:
+            raise ValueError(f"matcher_reliability_pair_bias_mode must be one of {MATCHER_RELIABILITY_PAIR_BIAS_MODES}")
+        if matcher_reliability_dustbin_bias_mode not in MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES:
+            raise ValueError(
+                f"matcher_reliability_dustbin_bias_mode must be one of {MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES}"
+            )
+        if matcher_final_accept_score_mode not in MATCHER_FINAL_ACCEPT_SCORE_MODES:
+            raise ValueError(f"matcher_final_accept_score_mode must be one of {MATCHER_FINAL_ACCEPT_SCORE_MODES}")
+        if matcher_accept_assignment_mode not in MATCHER_ACCEPT_ASSIGNMENT_MODES:
+            raise ValueError(f"matcher_accept_assignment_mode must be one of {MATCHER_ACCEPT_ASSIGNMENT_MODES}")
+        if not math.isfinite(float(matcher_geometry_bias_scale)):
+            raise ValueError("matcher_geometry_bias_scale must be finite")
+        if not math.isfinite(float(matcher_final_accept_score_alpha)) or matcher_final_accept_score_alpha < 0.0:
+            raise ValueError("matcher_final_accept_score_alpha must be finite and nonnegative")
+        if not math.isfinite(float(matcher_geometry_bias_clamp)) or matcher_geometry_bias_clamp < 0.0:
+            raise ValueError("matcher_geometry_bias_clamp must be finite and nonnegative")
+        if not math.isfinite(float(matcher_attention_residual_gate_init)):
+            raise ValueError("matcher_attention_residual_gate_init must be finite")
+        if matcher_candidate_topk < 0:
+            raise ValueError("matcher_candidate_topk must be nonnegative")
+        if (
+            not math.isfinite(float(descriptor_geometry_blend_weight))
+            or descriptor_geometry_blend_weight < 0.0
+            or descriptor_geometry_blend_weight > 1.0
+        ):
+            raise ValueError("descriptor_geometry_blend_weight must be in [0, 1]")
+        if (
+            not math.isfinite(float(descriptor_scale_log_clamp_min))
+            or not math.isfinite(float(descriptor_scale_log_clamp_max))
+            or descriptor_scale_log_clamp_min > descriptor_scale_log_clamp_max
+        ):
+            raise ValueError("descriptor scale log clamp bounds must be finite and ordered")
         self.config = CheckpointConfig(
             input_channels,
             base_channels,
@@ -1465,10 +1740,31 @@ class PlanetaryFeatureMatcher(nn.Module):
             graph_hidden_dim,
             graph_attention_layers,
             graph_keypoint_meta_dim,
+            descriptor_geometry_mode,
+            quality_score_mode,
+            matcher_reliability_pair_bias_mode,
+            matcher_reliability_dustbin_bias_mode,
+            matcher_final_accept_score_mode,
+            float(matcher_geometry_bias_scale),
+            matcher_accept_assignment_mode,
+            float(matcher_final_accept_score_alpha),
+            float(matcher_geometry_bias_clamp),
+            float(matcher_attention_residual_gate_init),
+            int(matcher_candidate_topk),
+            float(descriptor_geometry_blend_weight),
+            float(descriptor_scale_log_clamp_min),
+            float(descriptor_scale_log_clamp_max),
         )
         self.backbone = Backbone(input_channels, base_channels)
         self.dual_fpn = DualFPNLite(base_channels)
-        self.sparse_head = SparseHead(base_channels * 2, descriptor_dim)
+        self.sparse_head = SparseHead(
+            base_channels * 2,
+            descriptor_dim,
+            descriptor_geometry_mode=descriptor_geometry_mode,
+            descriptor_geometry_blend_weight=descriptor_geometry_blend_weight,
+            descriptor_scale_log_clamp_min=descriptor_scale_log_clamp_min,
+            descriptor_scale_log_clamp_max=descriptor_scale_log_clamp_max,
+        )
         self.texture_adapter = TextureDescriptorAdapter(descriptor_dim)
         self.descriptor_fusion = DescriptorFusionAdapter(descriptor_dim)
         self.dense_head = DenseHead(base_channels)
@@ -1479,6 +1775,159 @@ class PlanetaryFeatureMatcher(nn.Module):
             graph_hidden_dim,
             graph_attention_layers,
             graph_keypoint_meta_dim,
+            reliability_pair_bias_mode=matcher_reliability_pair_bias_mode,
+            reliability_dustbin_bias_mode=matcher_reliability_dustbin_bias_mode,
+            final_accept_score_mode=matcher_final_accept_score_mode,
+            geometry_bias_scale=matcher_geometry_bias_scale,
+            accept_assignment_mode=matcher_accept_assignment_mode,
+            final_accept_score_alpha=matcher_final_accept_score_alpha,
+            geometry_bias_clamp=matcher_geometry_bias_clamp,
+            attention_residual_gate_init=matcher_attention_residual_gate_init,
+            candidate_topk=matcher_candidate_topk,
+        )
+
+    def set_descriptor_geometry_mode(self, mode: str) -> None:
+        if mode not in DESCRIPTOR_GEOMETRY_MODES:
+            raise ValueError(f"descriptor geometry mode must be one of {DESCRIPTOR_GEOMETRY_MODES}")
+        self.sparse_head.descriptor_geometry_mode = mode
+        self.config = replace(self.config, descriptor_geometry_mode=mode)
+
+    def set_descriptor_geometry_safety(
+        self,
+        *,
+        blend_weight: float | None = None,
+        scale_log_clamp_min: float | None = None,
+        scale_log_clamp_max: float | None = None,
+    ) -> None:
+        resolved_blend = (
+            self.config.descriptor_geometry_blend_weight
+            if blend_weight is None
+            else float(blend_weight)
+        )
+        resolved_min = (
+            self.config.descriptor_scale_log_clamp_min
+            if scale_log_clamp_min is None
+            else float(scale_log_clamp_min)
+        )
+        resolved_max = (
+            self.config.descriptor_scale_log_clamp_max
+            if scale_log_clamp_max is None
+            else float(scale_log_clamp_max)
+        )
+        if not math.isfinite(resolved_blend) or resolved_blend < 0.0 or resolved_blend > 1.0:
+            raise ValueError("descriptor geometry blend weight must be in [0, 1]")
+        if not math.isfinite(resolved_min) or not math.isfinite(resolved_max) or resolved_min > resolved_max:
+            raise ValueError("descriptor scale log clamp bounds must be finite and ordered")
+        self.sparse_head.descriptor_geometry_blend_weight = resolved_blend
+        self.sparse_head.descriptor_scale_log_clamp_min = resolved_min
+        self.sparse_head.descriptor_scale_log_clamp_max = resolved_max
+        self.config = replace(
+            self.config,
+            descriptor_geometry_blend_weight=resolved_blend,
+            descriptor_scale_log_clamp_min=resolved_min,
+            descriptor_scale_log_clamp_max=resolved_max,
+        )
+
+    def set_quality_score_mode(self, mode: str) -> None:
+        if mode not in QUALITY_SCORE_MODES:
+            raise ValueError(f"quality score mode must be one of {QUALITY_SCORE_MODES}")
+        self.config = replace(self.config, quality_score_mode=mode)
+
+    def set_matcher_calibration(
+        self,
+        *,
+        reliability_pair_bias_mode: str | None = None,
+        reliability_dustbin_bias_mode: str | None = None,
+        final_accept_score_mode: str | None = None,
+        geometry_bias_scale: float | None = None,
+        accept_assignment_mode: str | None = None,
+        final_accept_score_alpha: float | None = None,
+        geometry_bias_clamp: float | None = None,
+        attention_residual_gate_init: float | None = None,
+        attention_residual_gate_start_layer: int = 1,
+        candidate_topk: int | None = None,
+    ) -> None:
+        pair_mode = self.config.matcher_reliability_pair_bias_mode if reliability_pair_bias_mode is None else reliability_pair_bias_mode
+        dustbin_mode = (
+            self.config.matcher_reliability_dustbin_bias_mode
+            if reliability_dustbin_bias_mode is None
+            else reliability_dustbin_bias_mode
+        )
+        accept_mode = self.config.matcher_final_accept_score_mode if final_accept_score_mode is None else final_accept_score_mode
+        geometry_scale = (
+            self.config.matcher_geometry_bias_scale if geometry_bias_scale is None else float(geometry_bias_scale)
+        )
+        accept_assignment = (
+            self.config.matcher_accept_assignment_mode
+            if accept_assignment_mode is None
+            else accept_assignment_mode
+        )
+        accept_alpha = (
+            self.config.matcher_final_accept_score_alpha
+            if final_accept_score_alpha is None
+            else float(final_accept_score_alpha)
+        )
+        geometry_clamp = (
+            self.config.matcher_geometry_bias_clamp
+            if geometry_bias_clamp is None
+            else float(geometry_bias_clamp)
+        )
+        residual_gate_init = (
+            None if attention_residual_gate_init is None else float(attention_residual_gate_init)
+        )
+        candidate_count = self.config.matcher_candidate_topk if candidate_topk is None else int(candidate_topk)
+        if pair_mode not in MATCHER_RELIABILITY_PAIR_BIAS_MODES:
+            raise ValueError(f"reliability_pair_bias_mode must be one of {MATCHER_RELIABILITY_PAIR_BIAS_MODES}")
+        if dustbin_mode not in MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES:
+            raise ValueError(f"reliability_dustbin_bias_mode must be one of {MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES}")
+        if accept_mode not in MATCHER_FINAL_ACCEPT_SCORE_MODES:
+            raise ValueError(f"final_accept_score_mode must be one of {MATCHER_FINAL_ACCEPT_SCORE_MODES}")
+        if accept_assignment not in MATCHER_ACCEPT_ASSIGNMENT_MODES:
+            raise ValueError(f"accept_assignment_mode must be one of {MATCHER_ACCEPT_ASSIGNMENT_MODES}")
+        if not math.isfinite(float(geometry_scale)):
+            raise ValueError("geometry_bias_scale must be finite")
+        if not math.isfinite(float(accept_alpha)) or accept_alpha < 0.0:
+            raise ValueError("final_accept_score_alpha must be finite and nonnegative")
+        if not math.isfinite(float(geometry_clamp)) or geometry_clamp < 0.0:
+            raise ValueError("geometry_bias_clamp must be finite and nonnegative")
+        if residual_gate_init is not None and not math.isfinite(float(residual_gate_init)):
+            raise ValueError("attention_residual_gate_init must be finite")
+        if int(attention_residual_gate_start_layer) < 1:
+            raise ValueError("attention_residual_gate_start_layer must be at least 1")
+        if candidate_count < 0:
+            raise ValueError("candidate_topk must be nonnegative")
+        self.graph_matcher.reliability_pair_bias_mode = pair_mode
+        self.graph_matcher.reliability_dustbin_bias_mode = dustbin_mode
+        self.graph_matcher.final_accept_score_mode = accept_mode
+        self.graph_matcher.geometry_bias_scale = float(geometry_scale)
+        self.graph_matcher.accept_assignment_mode = accept_assignment
+        self.graph_matcher.final_accept_score_alpha = float(accept_alpha)
+        self.graph_matcher.geometry_bias_clamp = float(geometry_clamp)
+        self.graph_matcher.candidate_topk = int(candidate_count)
+        if residual_gate_init is not None:
+            clamped_gate_init = float(max(0.0, min(1.0, residual_gate_init)))
+            start_index = int(attention_residual_gate_start_layer) - 1
+            for index, layer in enumerate(self.graph_matcher.attention_layers):
+                if index < start_index:
+                    continue
+                layer.self_residual_gate.data.fill_(clamped_gate_init)
+                layer.cross_residual_gate.data.fill_(clamped_gate_init)
+                layer.feed_forward_residual_gate.data.fill_(clamped_gate_init)
+        self.config = replace(
+            self.config,
+            matcher_reliability_pair_bias_mode=pair_mode,
+            matcher_reliability_dustbin_bias_mode=dustbin_mode,
+            matcher_final_accept_score_mode=accept_mode,
+            matcher_geometry_bias_scale=float(geometry_scale),
+            matcher_accept_assignment_mode=accept_assignment,
+            matcher_final_accept_score_alpha=float(accept_alpha),
+            matcher_geometry_bias_clamp=float(geometry_clamp),
+            matcher_attention_residual_gate_init=(
+                self.config.matcher_attention_residual_gate_init
+                if residual_gate_init is None
+                else float(residual_gate_init)
+            ),
+            matcher_candidate_topk=int(candidate_count),
         )
 
     def learned_descriptor_map_single(
@@ -1554,10 +2003,14 @@ class PlanetaryFeatureMatcher(nn.Module):
         sparse = self.sparse_head(p2_keypoint, p2_descriptor, activation_checkpointing=activation_checkpointing)
         descriptors = self.fuse_descriptor_maps(sparse.descriptors, image, texture_blend_weight=texture_blend_weight)
         texture_saliency = make_rotation_invariant_texture_saliency(image, sparse.heatmap.size(2), sparse.heatmap.size(3))
-        dense = self.dense_head(features[0], features[0])
-        dense_confidence = F.interpolate(dense.confidence, size=sparse.heatmap.shape[-2:], mode="nearest")
-        quality = self.quality_head(descriptors, sparse.heatmap, texture_saliency, dense_confidence)
-        heatmap = (sparse.heatmap * quality).clamp(0.0, 1.0)
+        if self.config.quality_score_mode == "raw":
+            dense_confidence = torch.ones_like(sparse.heatmap)
+            quality = torch.ones_like(sparse.heatmap)
+        else:
+            dense = self.dense_head(features[0], features[0])
+            dense_confidence = F.interpolate(dense.confidence, size=sparse.heatmap.shape[-2:], mode="nearest")
+            quality = self.quality_head(descriptors, sparse.heatmap, texture_saliency, dense_confidence)
+        heatmap = apply_quality_score_mode(sparse.heatmap, quality, mode=self.config.quality_score_mode)
         return RawFeatureMaps(
             heatmap,
             descriptors,
@@ -1592,6 +2045,7 @@ def checkpoint_config_from_state_dict(state: dict[str, torch.Tensor]) -> Checkpo
         graph_hidden_dim=_read_int_from_state(state, "config.graph_hidden_dim", max(32, descriptor_dim)),
         graph_attention_layers=_read_int_from_state(state, "config.graph_attention_layers", 1),
         graph_keypoint_meta_dim=_read_int_from_state(state, "config.graph_keypoint_meta_dim", 2),
+        matcher_candidate_topk=_read_int_from_state(state, "config.matcher_candidate_topk", 256),
     )
 
 
@@ -1627,6 +2081,20 @@ def load_libtorch_checkpoint(
         graph_hidden_dim=config.graph_hidden_dim,
         graph_attention_layers=config.graph_attention_layers,
         graph_keypoint_meta_dim=config.graph_keypoint_meta_dim,
+        descriptor_geometry_mode=config.descriptor_geometry_mode,
+        quality_score_mode=config.quality_score_mode,
+        matcher_reliability_pair_bias_mode=config.matcher_reliability_pair_bias_mode,
+        matcher_reliability_dustbin_bias_mode=config.matcher_reliability_dustbin_bias_mode,
+        matcher_final_accept_score_mode=config.matcher_final_accept_score_mode,
+        matcher_geometry_bias_scale=config.matcher_geometry_bias_scale,
+        matcher_accept_assignment_mode=config.matcher_accept_assignment_mode,
+        matcher_final_accept_score_alpha=config.matcher_final_accept_score_alpha,
+        matcher_geometry_bias_clamp=config.matcher_geometry_bias_clamp,
+        matcher_attention_residual_gate_init=config.matcher_attention_residual_gate_init,
+        matcher_candidate_topk=config.matcher_candidate_topk,
+        descriptor_geometry_blend_weight=config.descriptor_geometry_blend_weight,
+        descriptor_scale_log_clamp_min=config.descriptor_scale_log_clamp_min,
+        descriptor_scale_log_clamp_max=config.descriptor_scale_log_clamp_max,
     ).to(device)
     model_state = {key: value for key, value in raw_state.items() if not key.startswith("config.")}
     model_state = _with_default_compatible_state(model, model_state)
@@ -1665,6 +2133,20 @@ def load_pytorch_state(
         graph_hidden_dim=resolved_graph_hidden_dim,
         graph_attention_layers=resolved_graph_attention_layers,
         graph_keypoint_meta_dim=int(config_dict.get("graph_keypoint_meta_dim", 2)),
+        descriptor_geometry_mode=str(config_dict.get("descriptor_geometry_mode", "full")),
+        quality_score_mode=str(config_dict.get("quality_score_mode", "soft")),
+        matcher_reliability_pair_bias_mode=str(config_dict.get("matcher_reliability_pair_bias_mode", "off")),
+        matcher_reliability_dustbin_bias_mode=str(config_dict.get("matcher_reliability_dustbin_bias_mode", "off")),
+        matcher_final_accept_score_mode=str(config_dict.get("matcher_final_accept_score_mode", "none")),
+        matcher_geometry_bias_scale=float(config_dict.get("matcher_geometry_bias_scale", 1.0)),
+        matcher_accept_assignment_mode=str(config_dict.get("matcher_accept_assignment_mode", "add")),
+        matcher_final_accept_score_alpha=float(config_dict.get("matcher_final_accept_score_alpha", 0.05)),
+        matcher_geometry_bias_clamp=float(config_dict.get("matcher_geometry_bias_clamp", 2.0)),
+        matcher_attention_residual_gate_init=float(config_dict.get("matcher_attention_residual_gate_init", 1.0)),
+        matcher_candidate_topk=int(config_dict.get("matcher_candidate_topk", 256)),
+        descriptor_geometry_blend_weight=float(config_dict.get("descriptor_geometry_blend_weight", 1.0)),
+        descriptor_scale_log_clamp_min=float(config_dict.get("descriptor_scale_log_clamp_min", -2.0)),
+        descriptor_scale_log_clamp_max=float(config_dict.get("descriptor_scale_log_clamp_max", 2.0)),
     )
     model = PlanetaryFeatureMatcher(
         input_channels=config.input_channels,
@@ -1673,6 +2155,20 @@ def load_pytorch_state(
         graph_hidden_dim=config.graph_hidden_dim,
         graph_attention_layers=config.graph_attention_layers,
         graph_keypoint_meta_dim=config.graph_keypoint_meta_dim,
+        descriptor_geometry_mode=config.descriptor_geometry_mode,
+        quality_score_mode=config.quality_score_mode,
+        matcher_reliability_pair_bias_mode=config.matcher_reliability_pair_bias_mode,
+        matcher_reliability_dustbin_bias_mode=config.matcher_reliability_dustbin_bias_mode,
+        matcher_final_accept_score_mode=config.matcher_final_accept_score_mode,
+        matcher_geometry_bias_scale=config.matcher_geometry_bias_scale,
+        matcher_accept_assignment_mode=config.matcher_accept_assignment_mode,
+        matcher_final_accept_score_alpha=config.matcher_final_accept_score_alpha,
+        matcher_geometry_bias_clamp=config.matcher_geometry_bias_clamp,
+        matcher_attention_residual_gate_init=config.matcher_attention_residual_gate_init,
+        matcher_candidate_topk=config.matcher_candidate_topk,
+        descriptor_geometry_blend_weight=config.descriptor_geometry_blend_weight,
+        descriptor_scale_log_clamp_min=config.descriptor_scale_log_clamp_min,
+        descriptor_scale_log_clamp_max=config.descriptor_scale_log_clamp_max,
     ).to(device)
     model_state = _with_default_compatible_state(model, payload["model"])
     result = model.load_state_dict(model_state, strict=strict)

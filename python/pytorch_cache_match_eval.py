@@ -591,7 +591,24 @@ def graph_matcher_matches(
     metadata_a: torch.Tensor | None = None,
     metadata_b: torch.Tensor | None = None,
     graph_stats: dict[str, float | int] | None = None,
+    diagnostics: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    def set_empty_diagnostics(device: torch.device) -> None:
+        if diagnostics is None:
+            return
+        diagnostics.clear()
+        for key in (
+            "pair_logit",
+            "row_dustbin_logit",
+            "col_dustbin_logit",
+            "positive_vs_dustbin_margin",
+            "raw_similarity",
+            "raw_margin",
+            "accept_logit",
+            "accept_probability",
+        ):
+            diagnostics[key] = torch.empty(0, dtype=torch.float32, device=device)
+
     if max_matches < 0:
         raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
     if graph_acceptance_margin < 0.0:
@@ -611,6 +628,7 @@ def graph_matcher_matches(
     if graph_width_prune_keep_ratio < 0.0 or graph_width_prune_keep_ratio > 1.0:
         raise ValueError("graph_width_prune_keep_ratio must be in [0, 1]")
     if desc_a.size(0) == 0 or desc_b.size(0) == 0:
+        set_empty_diagnostics(desc_a.device)
         return (
             torch.empty(0, 2, dtype=torch.long, device=desc_a.device),
             torch.empty(0, dtype=torch.float32, device=desc_a.device),
@@ -689,6 +707,7 @@ def graph_matcher_matches(
         matches = output.matches.to(device=desc_a.device)
         scores = output.scores.to(device=desc_a.device)
     if scores.numel() == 0:
+        set_empty_diagnostics(desc_a.device)
         return matches, scores
     keep = scores >= float(min_score)
     if graph_min_raw_score > -1.0 or graph_min_raw_margin > 0.0:
@@ -720,7 +739,55 @@ def graph_matcher_matches(
     scores = scores[keep]
     limit = scores.numel() if max_matches == 0 else max_matches
     order = torch.argsort(scores, descending=True)[:limit]
-    return matches.index_select(0, order), scores.index_select(0, order)
+    matches = matches.index_select(0, order)
+    scores = scores.index_select(0, order)
+    if diagnostics is not None:
+        diagnostics.clear()
+        if matches.numel() == 0:
+            set_empty_diagnostics(desc_a.device)
+        else:
+            match_indices = matches.to(output.logits.device)
+            source_indices = match_indices[:, 0]
+            target_indices = match_indices[:, 1]
+            logits = output.logits.to(torch.float32)
+            pair_logits = logits[source_indices, target_indices]
+            row_dustbin = logits[source_indices, desc_b.size(0)]
+            col_dustbin = logits[desc_a.size(0), target_indices]
+            raw_similarity = cyclic_descriptor_similarity(desc_a, desc_b).to(torch.float32)
+            raw_values = raw_similarity[source_indices.to(raw_similarity.device), target_indices.to(raw_similarity.device)]
+            if raw_similarity.size(1) > 1:
+                raw_top2 = raw_similarity.topk(2, dim=1).values
+                raw_margins = raw_top2[:, 0] - raw_top2[:, 1]
+            else:
+                raw_margins = torch.full(
+                    (raw_similarity.size(0),),
+                    float("inf"),
+                    dtype=torch.float32,
+                    device=raw_similarity.device,
+                )
+            raw_margin_values = raw_margins.index_select(0, source_indices.to(raw_similarity.device))
+            if output.accept_logits is None:
+                accept_values = torch.full_like(pair_logits, float("nan"))
+            else:
+                accept_logits = output.accept_logits.to(device=output.logits.device, dtype=torch.float32)
+                accept_values = accept_logits[source_indices, target_indices]
+            values = {
+                "pair_logit": pair_logits,
+                "row_dustbin_logit": row_dustbin,
+                "col_dustbin_logit": col_dustbin,
+                "positive_vs_dustbin_margin": pair_logits - row_dustbin - col_dustbin,
+                "raw_similarity": raw_values,
+                "raw_margin": raw_margin_values,
+                "accept_logit": accept_values,
+                "accept_probability": torch.sigmoid(accept_values),
+            }
+            diagnostics.update(
+                {
+                    key: value.detach().to(device=desc_a.device, dtype=torch.float32).contiguous()
+                    for key, value in values.items()
+                }
+            )
+    return matches, scores
 
 
 def calibrated_graph_matches_from_logits(
@@ -747,14 +814,14 @@ def calibrated_graph_matches_from_logits(
         adjusted[:count_a, count_b] += float(dustbin_delta)
         adjusted[count_a, :count_b] += float(dustbin_delta)
         adjusted[count_a, count_b] += float(dustbin_delta)
-    row_logits = adjusted[:count_a, :]
-    row_prob = torch.softmax(row_logits, dim=1)[:, :count_b]
-    col_prob = torch.softmax(adjusted[:, :count_b], dim=0)[:count_a, :]
-    dual_scores = row_prob * col_prob
-    best_values, best_indices = dual_scores.max(dim=1)
-    dustbin_prob = torch.softmax(row_logits, dim=1)[:, -1]
-    inlier_mask = best_values.gt(dustbin_prob + float(acceptance_margin))
-    best_sources = dual_scores.max(dim=0).indices
+    margin_scores = (
+        adjusted[:count_a, :count_b]
+        - adjusted[:count_a, count_b][:, None]
+        - adjusted[count_a, :count_b][None, :]
+    )
+    best_values, best_indices = margin_scores.max(dim=1)
+    inlier_mask = best_values.gt(float(acceptance_margin))
+    best_sources = margin_scores.max(dim=0).indices
     source_indices = torch.arange(count_a, device=logits.device)
     mutual_mask = best_sources.index_select(0, best_indices).eq(source_indices)
     keep = inlier_mask & mutual_mask
@@ -790,10 +857,18 @@ def effective_keypoint_score_map(raw: pfm_model.RawFeatureMaps | None) -> torch.
     score = raw.heatmap.to(torch.float32)
     if raw.matchability is not None:
         score = score * raw.matchability.to(device=score.device, dtype=torch.float32).clamp(0.0, 1.0)
-    if raw.descriptor_uncertainty is not None:
-        uncertainty = raw.descriptor_uncertainty.to(device=score.device, dtype=torch.float32).clamp(0.0, 1.0)
-        score = score * (1.0 - uncertainty)
     return score.clamp(0.0, 1.0)
+
+
+def decouple_reliability_metadata(metadata: torch.Tensor) -> torch.Tensor:
+    """Remove reliability shortcuts from GraphMatcher metadata while preserving geometry/context."""
+
+    adjusted = metadata.clone()
+    if adjusted.size(1) > 12:
+        adjusted[:, 12:13] = 0.0
+    if adjusted.size(1) > 14:
+        adjusted[:, 14 : min(adjusted.size(1), 16)] = 0.0
+    return adjusted
 
 
 def graph_metadata_from_raw_features(
@@ -802,6 +877,7 @@ def graph_metadata_from_raw_features(
     *,
     meta_dim: int,
     fallback_scores: torch.Tensor | None = None,
+    include_reliability: bool = False,
 ) -> torch.Tensor | None:
     if raw is None:
         return None
@@ -816,7 +892,7 @@ def graph_metadata_from_raw_features(
     matchability = sample_map_rows_at_keypoints(raw.matchability, keypoints, width=1)
     descriptor_uncertainty = sample_map_rows_at_keypoints(raw.descriptor_uncertainty, keypoints, width=1)
     no_match_prior = sample_map_rows_at_keypoints(raw.no_match_prior, keypoints, width=1)
-    return pfm_model.prepare_graph_keypoint_metadata(
+    metadata = pfm_model.prepare_graph_keypoint_metadata(
         keypoints,
         meta_dim=meta_dim,
         scores=scores.squeeze(1) if scores is not None else None,
@@ -829,6 +905,9 @@ def graph_metadata_from_raw_features(
         descriptor_uncertainty=descriptor_uncertainty.squeeze(1) if descriptor_uncertainty is not None else None,
         no_match_prior=no_match_prior.squeeze(1) if no_match_prior is not None else None,
     )
+    if include_reliability:
+        return metadata
+    return decouple_reliability_metadata(metadata)
 
 
 def _fit_affine(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
@@ -950,6 +1029,103 @@ def filter_local_displacement_consistent_matches(
     return kept_matches.index_select(0, order.to(kept_matches.device)), kept_scores.index_select(0, order)
 
 
+def filter_robust_homography_consistent_matches(
+    points_a: torch.Tensor,
+    points_b: torch.Tensor,
+    matches: torch.Tensor,
+    scores: torch.Tensor,
+    *,
+    threshold_px: float,
+    method: str = "ransac",
+    min_inliers: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if method not in {"ransac", "magsac"}:
+        raise ValueError("robust homography method must be ransac or magsac")
+    if matches.size(0) < max(4, min_inliers):
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=matches.device),
+            torch.empty(0, dtype=torch.float32, device=scores.device),
+        )
+    src = points_a.index_select(0, matches[:, 0].to(points_a.device)).detach().cpu().numpy().astype(np.float32)
+    dst = points_b.index_select(0, matches[:, 1].to(points_b.device)).detach().cpu().numpy().astype(np.float32)
+    robust_method = cv2.RANSAC
+    if method == "magsac" and hasattr(cv2, "USAC_MAGSAC"):
+        robust_method = cv2.USAC_MAGSAC
+    _, mask = cv2.findHomography(
+        src,
+        dst,
+        method=robust_method,
+        ransacReprojThreshold=float(threshold_px),
+        maxIters=5000,
+        confidence=0.999,
+    )
+    if mask is None:
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=matches.device),
+            torch.empty(0, dtype=torch.float32, device=scores.device),
+        )
+    keep = np.flatnonzero(mask.reshape(-1).astype(bool))
+    if keep.size < min_inliers:
+        return (
+            torch.empty(0, 2, dtype=torch.long, device=matches.device),
+            torch.empty(0, dtype=torch.float32, device=scores.device),
+        )
+    keep_indices = torch.from_numpy(keep.astype(np.int64, copy=False)).to(matches.device)
+    kept_matches = matches.index_select(0, keep_indices)
+    kept_scores = scores.index_select(0, keep_indices.to(scores.device))
+    order = kept_scores.detach().cpu().argsort(descending=True).to(kept_scores.device)
+    return kept_matches.index_select(0, order.to(kept_matches.device)), kept_scores.index_select(0, order)
+
+
+def apply_geometry_filter_to_matches(
+    points_a: torch.Tensor,
+    points_b: torch.Tensor,
+    matches: torch.Tensor,
+    scores: torch.Tensor,
+    *,
+    geometry_filter: str,
+    threshold_px: float,
+    min_inliers: int = 4,
+    local_neighbors: int = 12,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if threshold_px < 0.0:
+        raise ValueError("threshold_px must be non-negative")
+    if min_inliers < 0:
+        raise ValueError("min_inliers must be non-negative")
+    if geometry_filter == "none":
+        return matches, scores
+    if geometry_filter == "affine":
+        return filter_affine_consistent_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            threshold_px=threshold_px,
+            min_inliers=min_inliers,
+        )
+    if geometry_filter == "local":
+        return filter_local_displacement_consistent_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            threshold_px=threshold_px,
+            neighbors=local_neighbors,
+            min_inliers=min_inliers,
+        )
+    if geometry_filter in {"ransac", "magsac"}:
+        return filter_robust_homography_consistent_matches(
+            points_a,
+            points_b,
+            matches,
+            scores,
+            threshold_px=threshold_px,
+            method=geometry_filter,
+            min_inliers=min_inliers,
+        )
+    raise ValueError(f"unsupported geometry filter: {geometry_filter}")
+
+
 def _normalize_xy(points_xy: torch.Tensor, height: int, width: int) -> torch.Tensor:
     x = points_xy[:, 0] * (2.0 / float(max(1, width - 1))) - 1.0
     y = points_xy[:, 1] * (2.0 / float(max(1, height - 1))) - 1.0
@@ -995,6 +1171,7 @@ def match_pair_descriptor_maps(
     graph_width_prune_keep_ratio: float = 1.0,
     mutual: bool = False,
     geometry_filter: str = "none",
+    geometry_threshold_px: float = 0.0,
     texture_fraction: float = 1.0,
     weak_texture_fraction: float = 0.0,
     keypoint_spatial_bins: int = 0,
@@ -1170,16 +1347,18 @@ def match_pair_descriptor_maps(
         image_height=image_height_b,
         image_width=image_width_b,
     )
-    if geometry_filter == "affine":
+    geometry_filter_threshold = float(geometry_threshold_px) if geometry_threshold_px > 0.0 else float(threshold_px)
+    if geometry_filter != "none":
         local_indices = torch.arange(matches.size(0), dtype=torch.long, device=matches.device)
         local_matches = torch.stack([local_indices, local_indices], dim=1)
         local_scores = torch.arange(matches.size(0), 0, -1, dtype=torch.float32, device=matches.device)
-        kept_local, _ = filter_affine_consistent_matches(
+        kept_local, _ = apply_geometry_filter_to_matches(
             points_a,
             points_b,
             local_matches,
             local_scores,
-            threshold_px=threshold_px,
+            geometry_filter=geometry_filter,
+            threshold_px=geometry_filter_threshold,
             min_inliers=4,
         )
         if kept_local.numel() == 0:
@@ -1188,26 +1367,6 @@ def match_pair_descriptor_maps(
         matches = matches.index_select(0, keep.to(matches.device))
         points_a = points_a.index_select(0, keep)
         points_b = points_b.index_select(0, keep.to(points_b.device))
-    elif geometry_filter == "local":
-        local_indices = torch.arange(matches.size(0), dtype=torch.long, device=matches.device)
-        local_matches = torch.stack([local_indices, local_indices], dim=1)
-        local_scores = torch.arange(matches.size(0), 0, -1, dtype=torch.float32, device=matches.device)
-        kept_local, _ = filter_local_displacement_consistent_matches(
-            points_a,
-            points_b,
-            local_matches,
-            local_scores,
-            threshold_px=threshold_px,
-            min_inliers=4,
-        )
-        if kept_local.numel() == 0:
-            return match_eval_result(matches=0, correct=0, wrong=0, precision=0.0, graph_stats=graph_stats)
-        keep = kept_local[:, 0].to(points_a.device)
-        matches = matches.index_select(0, keep.to(matches.device))
-        points_a = points_a.index_select(0, keep)
-        points_b = points_b.index_select(0, keep.to(points_b.device))
-    elif geometry_filter != "none":
-        raise ValueError(f"unsupported geometry filter: {geometry_filter}")
     target_b = sample_warp(pair.warp_a_to_b, points_a)
     errors = (target_b.to(points_b.device) - points_b).norm(dim=1)
     correct = int(errors.le(threshold_px).sum().detach().cpu())
@@ -1339,6 +1498,7 @@ def evaluate_pair_path(
     mutual: bool,
     geometry_filter: str,
     keypoint_spatial_bins: int,
+    geometry_threshold_px: float = 0.0,
     weak_texture_fraction: float = 0.0,
     keypoint_cell_cap: int = 0,
     keypoint_score_mode: str = "texture",
@@ -1355,6 +1515,8 @@ def evaluate_pair_path(
     graph_max_attention_work_fraction: float = 1.0,
     graph_width_prune_keep_ratio: float = 1.0,
 ) -> MatchEvalResult:
+    if geometry_threshold_px < 0.0:
+        raise ValueError("geometry_threshold_px must be non-negative")
     if min_target_gradient < 0.0:
         raise ValueError("min_target_gradient must be non-negative")
     if min_target_local_contrast < 0.0:
@@ -1407,6 +1569,7 @@ def evaluate_pair_path(
             graph_width_prune_keep_ratio=graph_width_prune_keep_ratio,
             mutual=mutual,
             geometry_filter=geometry_filter,
+            geometry_threshold_px=geometry_threshold_px,
             keypoint_spatial_bins=keypoint_spatial_bins,
             keypoint_cell_cap=keypoint_cell_cap,
             keypoint_scores_a=keypoint_scores_a,
@@ -1458,6 +1621,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--descriptor-topk", type=int, default=1)
     parser.add_argument("--mutual", action="store_true")
     parser.add_argument("--geometry-filter", choices=["none", "affine", "local"], default="none")
+    parser.add_argument(
+        "--geometry-threshold-px",
+        type=float,
+        default=0.0,
+        help="Geometry-consistency threshold in image pixels; 0 reuses --threshold-px.",
+    )
     parser.add_argument("--min-score", type=float, default=-1.0)
     parser.add_argument("--min-margin", type=float, default=0.0)
     parser.add_argument("--graph-dustbin-delta", type=float, default=0.0)
@@ -1489,6 +1658,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-max-attention-work-fraction must be in [0, 1]")
     if args.graph_width_prune_keep_ratio < 0.0 or args.graph_width_prune_keep_ratio > 1.0:
         parser.error("--graph-width-prune-keep-ratio must be in [0, 1]")
+    if args.geometry_threshold_px < 0.0:
+        parser.error("--geometry-threshold-px must be nonnegative")
     return args
 
 
@@ -1562,6 +1733,7 @@ def main() -> int:
                 min_target_local_contrast=args.min_target_local_contrast,
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
+                geometry_threshold_px=args.geometry_threshold_px,
                 keypoint_spatial_bins=args.keypoint_spatial_bins,
                 keypoint_cell_cap=args.keypoint_cell_cap,
                 keypoint_score_mode=args.keypoint_score_mode,
