@@ -2159,6 +2159,51 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(float(identical), 0.0, places=6)
         self.assertEqual(float(identical_metrics["violations"]), 0.0)
 
+    def test_graph_matcher_teacher_match_count_floor_loss_preserves_true_pair_count(self):
+        teacher_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, 5.0, 4.0, -5.0],
+                [4.0, 4.0, 5.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        student_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, -2.0, 4.0, -5.0],
+                [4.0, 4.0, -3.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        teacher = pfm_model.GraphMatcherOutput(teacher_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+        student = pfm_model.GraphMatcherOutput(student_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+
+        loss, metrics = train.graph_matcher_teacher_match_count_floor_loss(
+            student,
+            teacher,
+            positive_count=3,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+        identical, identical_metrics = train.graph_matcher_teacher_match_count_floor_loss(
+            teacher,
+            teacher,
+            positive_count=3,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        self.assertEqual(float(metrics["teacher_count"]), 3.0)
+        self.assertEqual(float(metrics["student_count"]), 1.0)
+        self.assertEqual(float(metrics["count_deficit"]), 2.0)
+        self.assertGreater(float(metrics["violations"]), 0.0)
+        self.assertAlmostEqual(float(identical), 0.0, places=6)
+        self.assertEqual(float(identical_metrics["count_deficit"]), 0.0)
+
     def test_graph_matcher_correspondence_loss_can_distill_external_teacher_distribution(self):
         model = pfm_model.PlanetaryFeatureMatcher(
             base_channels=4,
@@ -2687,6 +2732,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             teacher_score_floor_weight=0.5,
             teacher_score_floor_tolerance=0.25,
             teacher_score_floor_min_score=0.0,
+            teacher_match_count_floor_weight=0.25,
+            teacher_match_count_floor_threshold=12.0,
+            teacher_match_count_floor_margin=0.5,
             return_components=True,
         )
 
@@ -2695,6 +2743,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("graph_matcher_teacher_score_floor_violations", components)
         self.assertIn("graph_matcher_teacher_score_floor_delta_mean", components)
         self.assertIn("graph_matcher_teacher_score_floor_teacher_score_mean", components)
+        self.assertIn("graph_matcher_teacher_match_count_floor_loss", components)
+        self.assertIn("graph_matcher_teacher_match_count_floor_teacher_count", components)
+        self.assertIn("graph_matcher_teacher_match_count_floor_student_count", components)
+        self.assertIn("graph_matcher_teacher_match_count_floor_count_deficit", components)
 
     def test_graph_matcher_correspondence_loss_can_use_frozen_teacher_guard_model(self):
         model = pfm_model.PlanetaryFeatureMatcher(
@@ -2758,6 +2810,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 "graph_matcher_teacher_score_floor_violations": torch.tensor(3.0),
                 "graph_matcher_teacher_score_floor_delta_mean": torch.tensor(-0.4),
                 "graph_matcher_teacher_score_floor_teacher_score_mean": torch.tensor(1.2),
+                "graph_matcher_teacher_match_count_floor_loss": torch.tensor(0.0625),
+                "graph_matcher_teacher_match_count_floor_teacher_count": torch.tensor(8.0),
+                "graph_matcher_teacher_match_count_floor_student_count": torch.tensor(6.0),
+                "graph_matcher_teacher_match_count_floor_count_deficit": torch.tensor(2.0),
             }
 
         with (
@@ -2800,6 +2856,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 graph_matcher_teacher_score_floor_weight=0.25,
                 graph_matcher_teacher_score_floor_tolerance=0.3,
                 graph_matcher_teacher_score_floor_min_score=0.4,
+                graph_matcher_teacher_match_count_floor_weight=0.02,
+                graph_matcher_teacher_match_count_floor_threshold=18.0,
+                graph_matcher_teacher_match_count_floor_margin=0.5,
             )
 
         self.assertEqual(len(graph_calls), 1)
@@ -2810,9 +2869,13 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(graph_calls[0]["teacher_score_floor_weight"], 0.25)
         self.assertAlmostEqual(graph_calls[0]["teacher_score_floor_tolerance"], 0.3)
         self.assertAlmostEqual(graph_calls[0]["teacher_score_floor_min_score"], 0.4)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_weight"], 0.02)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_threshold"], 18.0)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_margin"], 0.5)
         self.assertAlmostEqual(graph_calls[0]["teacher_distillation_weight"], 0.0)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_guard_loss"], 0.5)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_score_floor_loss"], 0.125)
+        self.assertAlmostEqual(metrics["graph_matcher_teacher_match_count_floor_loss"], 0.0625)
 
     def test_train_step_passes_teacher_distillation_to_graph_loss(self):
         pair_path = Path("pair_000001.pt")
@@ -3225,6 +3288,12 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.35",
             "--graph-matcher-teacher-score-floor-min-score",
             "0.2",
+            "--graph-matcher-teacher-match-count-floor-weight",
+            "0.03",
+            "--graph-matcher-teacher-match-count-floor-threshold",
+            "18.0",
+            "--graph-matcher-teacher-match-count-floor-margin",
+            "0.5",
             "--graph-matcher-teacher-distillation-weight",
             "0.35",
             "--graph-matcher-teacher-distillation-temperature",
@@ -3358,6 +3427,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_weight, 0.45)
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_tolerance, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_min_score, 0.2)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_weight, 0.03)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_threshold, 18.0)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_margin, 0.5)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_weight, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_temperature, 1.75)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_guard_reject_threshold, 0.2)

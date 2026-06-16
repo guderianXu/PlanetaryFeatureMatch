@@ -143,6 +143,11 @@ GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
     "graph_matcher_teacher_score_floor_violations",
     "graph_matcher_teacher_score_floor_delta_mean",
     "graph_matcher_teacher_score_floor_teacher_score_mean",
+    "graph_matcher_teacher_match_count_floor_loss",
+    "graph_matcher_teacher_match_count_floor_teacher_count",
+    "graph_matcher_teacher_match_count_floor_student_count",
+    "graph_matcher_teacher_match_count_floor_count_deficit",
+    "graph_matcher_teacher_match_count_floor_topk_score_mean",
     "graph_matcher_extra_false_match_pairs",
 )
 RELIABILITY_METRIC_FIELDS = (
@@ -3121,6 +3126,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_teacher_score_floor_weight",
         "graph_matcher_teacher_score_floor_tolerance",
         "graph_matcher_teacher_score_floor_min_score",
+        "graph_matcher_teacher_match_count_floor_weight",
+        "graph_matcher_teacher_match_count_floor_threshold",
+        "graph_matcher_teacher_match_count_floor_margin",
         "graph_matcher_teacher_distillation_weight",
         "graph_matcher_teacher_distillation_temperature",
         "graph_matcher_positive_dustbin_guard_reject_threshold",
@@ -3531,6 +3539,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 graph_matcher_teacher_score_floor_weight=args.graph_matcher_teacher_score_floor_weight,
                 graph_matcher_teacher_score_floor_tolerance=args.graph_matcher_teacher_score_floor_tolerance,
                 graph_matcher_teacher_score_floor_min_score=args.graph_matcher_teacher_score_floor_min_score,
+                graph_matcher_teacher_match_count_floor_weight=(
+                    args.graph_matcher_teacher_match_count_floor_weight
+                ),
+                graph_matcher_teacher_match_count_floor_threshold=(
+                    args.graph_matcher_teacher_match_count_floor_threshold
+                ),
+                graph_matcher_teacher_match_count_floor_margin=args.graph_matcher_teacher_match_count_floor_margin,
                 graph_matcher_teacher_distillation_weight=args.graph_matcher_teacher_distillation_weight,
                 graph_matcher_teacher_distillation_temperature=(
                     args.graph_matcher_teacher_distillation_temperature
@@ -3705,6 +3720,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_teacher_score_floor_min_score": (
                     f"{args.graph_matcher_teacher_score_floor_min_score if args.train_graph_matcher else 0.0:.6f}"
                 ),
+                "graph_matcher_teacher_match_count_floor_weight": (
+                    f"{args.graph_matcher_teacher_match_count_floor_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_threshold": (
+                    f"{args.graph_matcher_teacher_match_count_floor_threshold if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_margin": (
+                    f"{args.graph_matcher_teacher_match_count_floor_margin if args.train_graph_matcher else 0.0:.6f}"
+                ),
                 "graph_matcher_teacher_distillation_weight": (
                     f"{args.graph_matcher_teacher_distillation_weight if args.train_graph_matcher else 0.0:.6f}"
                 ),
@@ -3823,6 +3847,33 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 "graph_matcher_teacher_guard_false_edges": (
                     f"{metrics.get('graph_matcher_teacher_guard_false_edges', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_score_floor_loss": (
+                    f"{metrics.get('graph_matcher_teacher_score_floor_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_score_floor_violations": (
+                    f"{metrics.get('graph_matcher_teacher_score_floor_violations', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_score_floor_delta_mean": (
+                    f"{metrics.get('graph_matcher_teacher_score_floor_delta_mean', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_score_floor_teacher_score_mean": (
+                    f"{metrics.get('graph_matcher_teacher_score_floor_teacher_score_mean', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_loss": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_floor_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_teacher_count": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_floor_teacher_count', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_student_count": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_floor_student_count', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_count_deficit": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_floor_count_deficit', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_floor_topk_score_mean": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_floor_topk_score_mean', 0.0):.6f}"
                 ),
                 "graph_matcher_executed_attention_layers": (
                     f"{metrics.get('graph_matcher_executed_attention_layers', 0.0):.0f}"
@@ -4344,6 +4395,15 @@ def _save_training_state(
                 "graph_matcher_teacher_score_floor_min_score": float(
                     args.graph_matcher_teacher_score_floor_min_score
                 ),
+                "graph_matcher_teacher_match_count_floor_weight": float(
+                    args.graph_matcher_teacher_match_count_floor_weight
+                ),
+                "graph_matcher_teacher_match_count_floor_threshold": float(
+                    args.graph_matcher_teacher_match_count_floor_threshold
+                ),
+                "graph_matcher_teacher_match_count_floor_margin": float(
+                    args.graph_matcher_teacher_match_count_floor_margin
+                ),
                 "graph_matcher_teacher_distillation_weight": float(
                     args.graph_matcher_teacher_distillation_weight
                 ),
@@ -4547,6 +4607,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-score-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-tolerance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-temperature", type=float, default=1.0)
     parser.add_argument("--graph-matcher-positive-dustbin-guard-reject-threshold", type=float, default=1.1)
@@ -4728,6 +4791,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-score-floor-tolerance must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         parser.error("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-floor-weight must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
+        parser.error("--graph-matcher-teacher-match-count-floor-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-floor-margin must be nonnegative")
     if args.graph_matcher_teacher_distillation_weight < 0.0:
         parser.error("--graph-matcher-teacher-distillation-weight must be nonnegative")
     if (
@@ -4738,10 +4807,11 @@ def parse_args() -> argparse.Namespace:
     if (
         args.graph_matcher_teacher_guard_weight > 0.0
         or args.graph_matcher_teacher_score_floor_weight > 0.0
+        or args.graph_matcher_teacher_match_count_floor_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, or distillation weight is positive"
         )
     if (
         not math.isfinite(float(args.descriptor_geometry_blend_weight))
@@ -5163,6 +5233,12 @@ def main() -> int:
         raise ValueError("--graph-matcher-teacher-score-floor-tolerance must be non-negative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         raise ValueError("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
+        raise ValueError("--graph-matcher-teacher-match-count-floor-weight must be non-negative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
+        raise ValueError("--graph-matcher-teacher-match-count-floor-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
+        raise ValueError("--graph-matcher-teacher-match-count-floor-margin must be non-negative")
     if (
         not math.isfinite(float(args.graph_matcher_teacher_distillation_temperature))
         or args.graph_matcher_teacher_distillation_temperature <= 0.0

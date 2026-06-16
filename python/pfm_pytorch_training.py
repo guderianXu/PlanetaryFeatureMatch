@@ -111,6 +111,11 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_teacher_score_floor_violations",
     "graph_matcher_teacher_score_floor_delta_mean",
     "graph_matcher_teacher_score_floor_teacher_score_mean",
+    "graph_matcher_teacher_match_count_floor_loss",
+    "graph_matcher_teacher_match_count_floor_teacher_count",
+    "graph_matcher_teacher_match_count_floor_student_count",
+    "graph_matcher_teacher_match_count_floor_count_deficit",
+    "graph_matcher_teacher_match_count_floor_topk_score_mean",
     "graph_matcher_executed_attention_layers",
     "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
@@ -1559,6 +1564,9 @@ def graph_matcher_correspondence_loss(
     teacher_score_floor_weight: float = 0.0,
     teacher_score_floor_tolerance: float = 0.0,
     teacher_score_floor_min_score: float = 0.0,
+    teacher_match_count_floor_weight: float = 0.0,
+    teacher_match_count_floor_threshold: float = 0.0,
+    teacher_match_count_floor_margin: float = 0.0,
     teacher_distillation_weight: float = 0.0,
     teacher_distillation_temperature: float = 1.0,
     positive_dustbin_guard_reject_threshold: float = 1.1,
@@ -1618,6 +1626,8 @@ def graph_matcher_correspondence_loss(
         teacher_guard_metrics: dict[str, torch.Tensor] | None = None,
         teacher_score_floor_loss: torch.Tensor | None = None,
         teacher_score_floor_metrics: dict[str, torch.Tensor] | None = None,
+        teacher_match_count_floor_loss: torch.Tensor | None = None,
+        teacher_match_count_floor_metrics: dict[str, torch.Tensor] | None = None,
         ransac_consistency_loss: torch.Tensor | None = None,
         ransac_consistency_metrics: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -1761,6 +1771,31 @@ def graph_matcher_correspondence_loss(
                 if teacher_score_floor_metrics is None
                 else teacher_score_floor_metrics["teacher_score_mean"]
             ),
+            "graph_matcher_teacher_match_count_floor_loss": (
+                total_loss.new_zeros(())
+                if teacher_match_count_floor_loss is None
+                else teacher_match_count_floor_loss
+            ),
+            "graph_matcher_teacher_match_count_floor_teacher_count": (
+                total_loss.new_zeros(())
+                if teacher_match_count_floor_metrics is None
+                else teacher_match_count_floor_metrics["teacher_count"]
+            ),
+            "graph_matcher_teacher_match_count_floor_student_count": (
+                total_loss.new_zeros(())
+                if teacher_match_count_floor_metrics is None
+                else teacher_match_count_floor_metrics["student_count"]
+            ),
+            "graph_matcher_teacher_match_count_floor_count_deficit": (
+                total_loss.new_zeros(())
+                if teacher_match_count_floor_metrics is None
+                else teacher_match_count_floor_metrics["count_deficit"]
+            ),
+            "graph_matcher_teacher_match_count_floor_topk_score_mean": (
+                total_loss.new_zeros(())
+                if teacher_match_count_floor_metrics is None
+                else teacher_match_count_floor_metrics["topk_score_mean"]
+            ),
             "graph_matcher_executed_attention_layers": executed_attention_layers,
             "graph_matcher_attention_work_fraction": attention_work_fraction,
             "graph_matcher_positive_pairs": positive_pairs,
@@ -1821,6 +1856,8 @@ def graph_matcher_correspondence_loss(
         raise ValueError("teacher_guard_weight must be nonnegative")
     if teacher_score_floor_weight < 0.0:
         raise ValueError("teacher_score_floor_weight must be nonnegative")
+    if teacher_match_count_floor_weight < 0.0:
+        raise ValueError("teacher_match_count_floor_weight must be nonnegative")
     if teacher_distillation_weight < 0.0:
         raise ValueError("teacher_distillation_weight must be nonnegative")
     if not math.isfinite(float(teacher_distillation_temperature)) or teacher_distillation_temperature <= 0.0:
@@ -1833,6 +1870,10 @@ def graph_matcher_correspondence_loss(
         raise ValueError("teacher_score_floor_tolerance must be nonnegative")
     if not math.isfinite(float(teacher_score_floor_min_score)):
         raise ValueError("teacher_score_floor_min_score must be finite")
+    if not math.isfinite(float(teacher_match_count_floor_threshold)):
+        raise ValueError("teacher_match_count_floor_threshold must be finite")
+    if teacher_match_count_floor_margin < 0.0:
+        raise ValueError("teacher_match_count_floor_margin must be nonnegative")
     if (
         teacher_guard_model is not None
         and teacher_guard_model.config.graph_keypoint_meta_dim != model.config.graph_keypoint_meta_dim
@@ -2164,11 +2205,13 @@ def graph_matcher_correspondence_loss(
     if (
         teacher_guard_weight > 0.0
         or teacher_score_floor_weight > 0.0
+        or teacher_match_count_floor_weight > 0.0
         or teacher_distillation_weight > 0.0
     ) and resolved_teacher_guard_output is None:
         resolved_teacher_guard_output = run_teacher_guard_matcher(attention_layer_budget)
     teacher_guard_loss = output.logits.new_zeros(())
     teacher_score_floor_loss = output.logits.new_zeros(())
+    teacher_match_count_floor_loss = output.logits.new_zeros(())
     teacher_distillation_loss = output.logits.new_zeros(())
     teacher_guard_metrics = {
         "positive_margin_loss": output.logits.new_zeros(()),
@@ -2180,6 +2223,13 @@ def graph_matcher_correspondence_loss(
         "violations": output.logits.new_zeros(()),
         "score_delta_mean": output.logits.new_zeros(()),
         "teacher_score_mean": output.logits.new_zeros(()),
+    }
+    teacher_match_count_floor_metrics = {
+        "teacher_count": output.logits.new_zeros(()),
+        "student_count": output.logits.new_zeros(()),
+        "count_deficit": output.logits.new_zeros(()),
+        "topk_score_mean": output.logits.new_zeros(()),
+        "violations": output.logits.new_zeros(()),
     }
     dustbin_diagnostics = graph_matcher_dustbin_diagnostics(output, positive_count=count)
     dustbin_guard_enabled = should_apply_positive_dustbin_guard(
@@ -2261,6 +2311,18 @@ def graph_matcher_correspondence_loss(
             min_teacher_score=teacher_score_floor_min_score,
         )
         loss = loss + float(teacher_score_floor_weight) * teacher_score_floor_loss
+    if teacher_match_count_floor_weight > 0.0 and resolved_teacher_guard_output is not None:
+        (
+            teacher_match_count_floor_loss,
+            teacher_match_count_floor_metrics,
+        ) = graph_matcher_teacher_match_count_floor_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            score_threshold=teacher_match_count_floor_threshold,
+            margin=teacher_match_count_floor_margin,
+        )
+        loss = loss + float(teacher_match_count_floor_weight) * teacher_match_count_floor_loss
     if teacher_distillation_weight > 0.0 and resolved_teacher_guard_output is not None:
         teacher_distillation_loss = graph_matcher_depth_distillation_loss(
             output,
@@ -2469,6 +2531,8 @@ def graph_matcher_correspondence_loss(
             teacher_guard_metrics=teacher_guard_metrics,
             teacher_score_floor_loss=teacher_score_floor_loss,
             teacher_score_floor_metrics=teacher_score_floor_metrics,
+            teacher_match_count_floor_loss=teacher_match_count_floor_loss,
+            teacher_match_count_floor_metrics=teacher_match_count_floor_metrics,
             ransac_consistency_loss=ransac_consistency_loss,
             ransac_consistency_metrics=ransac_consistency_metrics,
         )
@@ -3057,6 +3121,72 @@ def graph_matcher_teacher_score_floor_loss(
         "violations": deficit.gt(0.0).to(student_logits.dtype).sum().detach(),
         "score_delta_mean": score_delta.detach().mean(),
         "teacher_score_mean": selected_teacher.detach().mean(),
+    }
+    return loss, metrics
+
+
+def graph_matcher_teacher_match_count_floor_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    score_threshold: float = 0.0,
+    margin: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Keep at least the teacher's high-confidence true-pair count."""
+
+    if not math.isfinite(float(score_threshold)):
+        raise ValueError("score_threshold must be finite")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    zero = student.logits.new_zeros(())
+    metrics = {
+        "teacher_count": zero,
+        "student_count": zero,
+        "count_deficit": zero,
+        "topk_score_mean": zero,
+        "violations": zero,
+    }
+    if count <= 0:
+        return zero, metrics
+
+    device = student.logits.device
+    indices = torch.arange(count, device=device)
+    student_logits = student.logits
+    teacher_logits = teacher.logits.detach().to(device=device, dtype=student_logits.dtype)
+
+    def true_final_scores(logits: torch.Tensor) -> torch.Tensor:
+        true_logits = logits[:count, :count][indices, indices]
+        row_dustbin = logits[:count, logits.size(1) - 1]
+        col_dustbin = logits[logits.size(0) - 1, :count]
+        return true_logits - row_dustbin - col_dustbin
+
+    teacher_scores = true_final_scores(teacher_logits)
+    teacher_count_tensor = teacher_scores.ge(float(score_threshold)).to(student_logits.dtype).sum()
+    teacher_count = int(teacher_count_tensor.detach().cpu().item())
+    if teacher_count <= 0:
+        return zero, metrics
+
+    student_scores = true_final_scores(student_logits)
+    required_score = float(score_threshold) + float(margin)
+    student_count_tensor = student_scores.ge(required_score).to(student_logits.dtype).sum()
+    selected_student = torch.topk(student_scores, k=min(teacher_count, student_scores.numel())).values
+    deficit = (required_score - selected_student).clamp_min(0.0)
+    loss = deficit.pow(2).mean() if deficit.numel() else zero
+    count_deficit = (teacher_count_tensor - student_count_tensor).clamp_min(0.0)
+    metrics = {
+        "teacher_count": teacher_count_tensor.detach(),
+        "student_count": student_count_tensor.detach(),
+        "count_deficit": count_deficit.detach(),
+        "topk_score_mean": selected_student.detach().mean(),
+        "violations": deficit.gt(0.0).to(student_logits.dtype).sum().detach(),
     }
     return loss, metrics
 
@@ -4261,6 +4391,9 @@ def train_step(
     graph_matcher_teacher_score_floor_weight: float = 0.0,
     graph_matcher_teacher_score_floor_tolerance: float = 0.0,
     graph_matcher_teacher_score_floor_min_score: float = 0.0,
+    graph_matcher_teacher_match_count_floor_weight: float = 0.0,
+    graph_matcher_teacher_match_count_floor_threshold: float = 0.0,
+    graph_matcher_teacher_match_count_floor_margin: float = 0.0,
     graph_matcher_teacher_distillation_weight: float = 0.0,
     graph_matcher_teacher_distillation_temperature: float = 1.0,
     graph_matcher_positive_dustbin_guard_reject_threshold: float = 1.1,
@@ -4313,6 +4446,7 @@ def train_step(
         ("graph_matcher_ransac_consistency_weight", graph_matcher_ransac_consistency_weight),
         ("graph_matcher_teacher_guard_weight", graph_matcher_teacher_guard_weight),
         ("graph_matcher_teacher_score_floor_weight", graph_matcher_teacher_score_floor_weight),
+        ("graph_matcher_teacher_match_count_floor_weight", graph_matcher_teacher_match_count_floor_weight),
         ("graph_matcher_teacher_distillation_weight", graph_matcher_teacher_distillation_weight),
         (
             "graph_matcher_teacher_guard_positive_margin_tolerance",
@@ -4326,11 +4460,17 @@ def train_step(
             "graph_matcher_teacher_score_floor_tolerance",
             graph_matcher_teacher_score_floor_tolerance,
         ),
+        (
+            "graph_matcher_teacher_match_count_floor_margin",
+            graph_matcher_teacher_match_count_floor_margin,
+        ),
     ):
         if value < 0.0:
             raise ValueError(f"{name} must be nonnegative")
     if not math.isfinite(float(graph_matcher_teacher_score_floor_min_score)):
         raise ValueError("graph_matcher_teacher_score_floor_min_score must be finite")
+    if not math.isfinite(float(graph_matcher_teacher_match_count_floor_threshold)):
+        raise ValueError("graph_matcher_teacher_match_count_floor_threshold must be finite")
     if (
         not math.isfinite(float(graph_matcher_mined_false_match_reference_margin))
         or graph_matcher_mined_false_match_reference_margin < -1.0
@@ -4858,6 +4998,11 @@ def train_step(
                                 teacher_score_floor_weight=graph_matcher_teacher_score_floor_weight,
                                 teacher_score_floor_tolerance=graph_matcher_teacher_score_floor_tolerance,
                                 teacher_score_floor_min_score=graph_matcher_teacher_score_floor_min_score,
+                                teacher_match_count_floor_weight=graph_matcher_teacher_match_count_floor_weight,
+                                teacher_match_count_floor_threshold=(
+                                    graph_matcher_teacher_match_count_floor_threshold
+                                ),
+                                teacher_match_count_floor_margin=graph_matcher_teacher_match_count_floor_margin,
                                 teacher_distillation_weight=graph_matcher_teacher_distillation_weight,
                                 teacher_distillation_temperature=(
                                     graph_matcher_teacher_distillation_temperature
@@ -6064,6 +6209,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-score-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-tolerance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-temperature", type=float, default=1.0)
     parser.add_argument("--graph-matcher-positive-dustbin-guard-reject-threshold", type=float, default=1.1)
@@ -6317,6 +6465,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-score-floor-tolerance must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         parser.error("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-floor-weight must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
+        parser.error("--graph-matcher-teacher-match-count-floor-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-floor-margin must be nonnegative")
     if args.graph_matcher_teacher_distillation_weight < 0.0:
         parser.error("--graph-matcher-teacher-distillation-weight must be nonnegative")
     if (
@@ -6327,10 +6481,11 @@ def parse_args() -> argparse.Namespace:
     if (
         args.graph_matcher_teacher_guard_weight > 0.0
         or args.graph_matcher_teacher_score_floor_weight > 0.0
+        or args.graph_matcher_teacher_match_count_floor_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, or distillation weight is positive"
         )
     if not math.isfinite(float(args.graph_matcher_positive_dustbin_guard_reject_threshold)):
         parser.error("--graph-matcher-positive-dustbin-guard-reject-threshold must be finite")
@@ -6587,6 +6742,15 @@ def save_pytorch_training_state(
             "graph_matcher_teacher_score_floor_min_score": float(
                 getattr(args, "graph_matcher_teacher_score_floor_min_score", 0.0)
             ),
+            "graph_matcher_teacher_match_count_floor_weight": float(
+                getattr(args, "graph_matcher_teacher_match_count_floor_weight", 0.0)
+            ),
+            "graph_matcher_teacher_match_count_floor_threshold": float(
+                getattr(args, "graph_matcher_teacher_match_count_floor_threshold", 0.0)
+            ),
+            "graph_matcher_teacher_match_count_floor_margin": float(
+                getattr(args, "graph_matcher_teacher_match_count_floor_margin", 0.0)
+            ),
             "graph_matcher_teacher_distillation_weight": float(
                 getattr(args, "graph_matcher_teacher_distillation_weight", 0.0)
             ),
@@ -6633,7 +6797,10 @@ def main() -> int:
             f"false_margin_tolerance={args.graph_matcher_teacher_guard_false_margin_tolerance:.3f} "
             f"score_floor_weight={args.graph_matcher_teacher_score_floor_weight:.3f} "
             f"score_floor_tolerance={args.graph_matcher_teacher_score_floor_tolerance:.3f} "
-            f"score_floor_min_score={args.graph_matcher_teacher_score_floor_min_score:.3f}",
+            f"score_floor_min_score={args.graph_matcher_teacher_score_floor_min_score:.3f} "
+            f"match_count_floor_weight={args.graph_matcher_teacher_match_count_floor_weight:.3f} "
+            f"match_count_floor_threshold={args.graph_matcher_teacher_match_count_floor_threshold:.3f} "
+            f"match_count_floor_margin={args.graph_matcher_teacher_match_count_floor_margin:.3f}",
             flush=True,
         )
     trainable = descriptor_parameters(
@@ -6860,6 +7027,9 @@ def main() -> int:
                 "graph_matcher_teacher_score_floor_weight",
                 "graph_matcher_teacher_score_floor_tolerance",
                 "graph_matcher_teacher_score_floor_min_score",
+                "graph_matcher_teacher_match_count_floor_weight",
+                "graph_matcher_teacher_match_count_floor_threshold",
+                "graph_matcher_teacher_match_count_floor_margin",
                 "graph_matcher_teacher_distillation_weight",
                 "graph_matcher_teacher_distillation_temperature",
                 "graph_matcher_positive_dustbin_guard_reject_threshold",
@@ -6951,6 +7121,11 @@ def main() -> int:
                 "graph_matcher_teacher_score_floor_violations",
                 "graph_matcher_teacher_score_floor_delta_mean",
                 "graph_matcher_teacher_score_floor_teacher_score_mean",
+                "graph_matcher_teacher_match_count_floor_loss",
+                "graph_matcher_teacher_match_count_floor_teacher_count",
+                "graph_matcher_teacher_match_count_floor_student_count",
+                "graph_matcher_teacher_match_count_floor_count_deficit",
+                "graph_matcher_teacher_match_count_floor_topk_score_mean",
                 "graph_matcher_executed_attention_layers",
                 "graph_matcher_attention_work_fraction",
                 "graph_matcher_positive_pairs",
@@ -7193,6 +7368,13 @@ def main() -> int:
                 graph_matcher_teacher_score_floor_weight=args.graph_matcher_teacher_score_floor_weight,
                 graph_matcher_teacher_score_floor_tolerance=args.graph_matcher_teacher_score_floor_tolerance,
                 graph_matcher_teacher_score_floor_min_score=args.graph_matcher_teacher_score_floor_min_score,
+                graph_matcher_teacher_match_count_floor_weight=(
+                    args.graph_matcher_teacher_match_count_floor_weight
+                ),
+                graph_matcher_teacher_match_count_floor_threshold=(
+                    args.graph_matcher_teacher_match_count_floor_threshold
+                ),
+                graph_matcher_teacher_match_count_floor_margin=args.graph_matcher_teacher_match_count_floor_margin,
                 graph_matcher_teacher_distillation_weight=args.graph_matcher_teacher_distillation_weight,
                 graph_matcher_teacher_distillation_temperature=(
                     args.graph_matcher_teacher_distillation_temperature
@@ -7310,6 +7492,15 @@ def main() -> int:
                     ),
                     "graph_matcher_teacher_score_floor_min_score": (
                         args.graph_matcher_teacher_score_floor_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_match_count_floor_weight": (
+                        args.graph_matcher_teacher_match_count_floor_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_match_count_floor_threshold": (
+                        args.graph_matcher_teacher_match_count_floor_threshold if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_match_count_floor_margin": (
+                        args.graph_matcher_teacher_match_count_floor_margin if args.train_graph_matcher else 0.0
                     ),
                     "graph_matcher_teacher_distillation_weight": (
                         args.graph_matcher_teacher_distillation_weight if args.train_graph_matcher else 0.0

@@ -278,6 +278,12 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.35",
             "--graph-matcher-teacher-score-floor-min-score",
             "0.2",
+            "--graph-matcher-teacher-match-count-floor-weight",
+            "0.03",
+            "--graph-matcher-teacher-match-count-floor-threshold",
+            "18.0",
+            "--graph-matcher-teacher-match-count-floor-margin",
+            "0.5",
             "--graph-matcher-teacher-distillation-weight",
             "0.35",
             "--graph-matcher-teacher-distillation-temperature",
@@ -414,6 +420,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_weight, 0.45)
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_tolerance, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_score_floor_min_score, 0.2)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_weight, 0.03)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_threshold, 18.0)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_margin, 0.5)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_weight, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_temperature, 1.75)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_guard_reject_threshold, 0.2)
@@ -2375,6 +2384,12 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                 "0.3",
                 "--graph-matcher-teacher-score-floor-min-score",
                 "0.4",
+                "--graph-matcher-teacher-match-count-floor-weight",
+                "0.02",
+                "--graph-matcher-teacher-match-count-floor-threshold",
+                "18.0",
+                "--graph-matcher-teacher-match-count-floor-margin",
+                "0.5",
                 "--no-save-best-checkpoints",
                 "--no-auto-visual-report",
                 "--no-gpu-monitor",
@@ -2395,6 +2410,10 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                     "graph_matcher_teacher_score_floor_violations": 2.0,
                     "graph_matcher_teacher_score_floor_delta_mean": -0.4,
                     "graph_matcher_teacher_score_floor_teacher_score_mean": 1.2,
+                    "graph_matcher_teacher_match_count_floor_loss": 0.0625,
+                    "graph_matcher_teacher_match_count_floor_teacher_count": 8.0,
+                    "graph_matcher_teacher_match_count_floor_student_count": 6.0,
+                    "graph_matcher_teacher_match_count_floor_count_deficit": 2.0,
                 }
 
             with (
@@ -2416,7 +2435,11 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_score_floor_weight"], 0.25)
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_score_floor_tolerance"], 0.3)
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_score_floor_min_score"], 0.4)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_weight"], 0.02)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_threshold"], 18.0)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_margin"], 0.5)
         self.assertIn("graph_matcher_teacher_score_floor_loss", metrics_text)
+        self.assertIn("graph_matcher_teacher_match_count_floor_loss", metrics_text)
         self.assertIn("0.125000", metrics_text)
 
     def test_run_train_passes_training_image_size_controls_to_train_step(self) -> None:
