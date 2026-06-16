@@ -20,6 +20,7 @@ class SelectorConfig:
     min_rescue_matches: int = 8
     max_rescue_homography_p90_px: float = 3.2
     max_rescue_homography_median_px: float = 1.8
+    max_rescue_homography_p90_delta_px: float = -1.0
     min_rescue_score_mean: float = 16.0
     require_rescue_score_mean_not_lower: bool = True
 
@@ -113,6 +114,17 @@ def selector_reason(base_row: dict[str, object], rescue_row: dict[str, object], 
         and (not math.isfinite(rescue_p90) or rescue_p90 > config.max_rescue_homography_p90_px)
     ):
         return f"blocked_homography_p90:{finite_or(rescue_p90, float('inf')):.6g}>{config.max_rescue_homography_p90_px:.6g}"
+
+    if config.max_rescue_homography_p90_delta_px >= 0:
+        base_p90 = safe_float(base_row.get("homography_residual_p90_px"))
+        if not (math.isfinite(base_p90) and math.isfinite(rescue_p90)):
+            return "blocked_homography_p90_delta:missing"
+        p90_delta = rescue_p90 - base_p90
+        if p90_delta > config.max_rescue_homography_p90_delta_px:
+            return (
+                f"blocked_homography_p90_delta:"
+                f"{p90_delta:.6g}>{config.max_rescue_homography_p90_delta_px:.6g}"
+            )
 
     rescue_median = safe_float(rescue_row.get("homography_residual_median_px"))
     if (
@@ -375,6 +387,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-rescue-matches", type=int, default=8)
     parser.add_argument("--max-rescue-homography-p90-px", type=float, default=3.2)
     parser.add_argument("--max-rescue-homography-median-px", type=float, default=1.8)
+    parser.add_argument("--max-rescue-homography-p90-delta-px", type=float, default=-1.0)
     parser.add_argument("--min-rescue-score-mean", type=float, default=16.0)
     parser.add_argument("--allow-rescue-score-mean-drop", action="store_true")
     return parser
@@ -389,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         min_rescue_matches=args.min_rescue_matches,
         max_rescue_homography_p90_px=args.max_rescue_homography_p90_px,
         max_rescue_homography_median_px=args.max_rescue_homography_median_px,
+        max_rescue_homography_p90_delta_px=args.max_rescue_homography_p90_delta_px,
         min_rescue_score_mean=args.min_rescue_score_mean,
         require_rescue_score_mean_not_lower=not args.allow_rescue_score_mean_drop,
     )

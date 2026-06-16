@@ -1016,6 +1016,11 @@ def _dual_selector_config_from_args(args: argparse.Namespace) -> dual_rescue_mod
         min_rescue_matches=args.dual_checkpoint_rescue_min_rescue_matches,
         max_rescue_homography_p90_px=args.dual_checkpoint_rescue_max_homography_p90_px,
         max_rescue_homography_median_px=args.dual_checkpoint_rescue_max_homography_median_px,
+        max_rescue_homography_p90_delta_px=getattr(
+            args,
+            "dual_checkpoint_rescue_max_homography_p90_delta_px",
+            -1.0,
+        ),
         min_rescue_score_mean=args.dual_checkpoint_rescue_min_score_mean,
         require_rescue_score_mean_not_lower=not args.dual_checkpoint_rescue_allow_score_mean_drop,
     )
@@ -1041,6 +1046,7 @@ def _dual_selector_metadata(args: argparse.Namespace) -> dict[str, object]:
                 "min_rescue_matches": config.min_rescue_matches,
                 "max_rescue_homography_p90_px": config.max_rescue_homography_p90_px,
                 "max_rescue_homography_median_px": config.max_rescue_homography_median_px,
+                "max_rescue_homography_p90_delta_px": config.max_rescue_homography_p90_delta_px,
                 "min_rescue_score_mean": config.min_rescue_score_mean,
                 "require_rescue_score_mean_not_lower": config.require_rescue_score_mean_not_lower,
             },
@@ -1138,6 +1144,7 @@ def run_dual_checkpoint_selector(args: argparse.Namespace) -> Path:
             "min_rescue_matches": config.min_rescue_matches,
             "max_rescue_homography_p90_px": config.max_rescue_homography_p90_px,
             "max_rescue_homography_median_px": config.max_rescue_homography_median_px,
+            "max_rescue_homography_p90_delta_px": config.max_rescue_homography_p90_delta_px,
             "min_rescue_score_mean": config.min_rescue_score_mean,
             "require_rescue_score_mean_not_lower": config.require_rescue_score_mean_not_lower,
         },
@@ -1680,6 +1687,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dual-checkpoint-rescue-min-rescue-matches", type=int, default=8)
     parser.add_argument("--dual-checkpoint-rescue-max-homography-p90-px", type=float, default=3.2)
     parser.add_argument("--dual-checkpoint-rescue-max-homography-median-px", type=float, default=1.8)
+    parser.add_argument("--dual-checkpoint-rescue-max-homography-p90-delta-px", type=float, default=-1.0)
     parser.add_argument("--dual-checkpoint-rescue-min-score-mean", type=float, default=16.0)
     parser.add_argument("--dual-checkpoint-rescue-allow-score-mean-drop", action="store_true")
     parser.add_argument("--write-match-details", action=argparse.BooleanOptionalAction, default=False)

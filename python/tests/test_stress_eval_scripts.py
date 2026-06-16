@@ -165,6 +165,36 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(summary["filtered_wrong"], 1)
         self.assertAlmostEqual(float(summary["filtered_precision"]), 37.0 / 38.0, places=6)
 
+    def test_dual_checkpoint_rescue_selector_can_block_p90_regressions(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        baseline[1]["homography_residual_p90_px"] = "1.5"
+        rescue[1]["homography_residual_p90_px"] = "2.0"
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02", "extreme_03"),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            max_rescue_homography_p90_delta_px=0.0,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=True,
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase3zn")
+        self.assertIn("homography_p90_delta", combined[1]["selector_reason"])
+        self.assertEqual(combined[1]["homography_p90_delta"], "0.500000")
+
     def test_dual_checkpoint_rescue_cli_combines_multiple_sources(self) -> None:
         dual_rescue_mod = self.dual_rescue_module()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2725,6 +2755,40 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.dual_checkpoint_rescue_min_match_gain, 2)
         self.assertEqual(selector_config.min_rescue_matches, 8)
         self.assertEqual(selector_config.min_match_gain, 2)
+
+    def test_fov76_promotion_pipeline_parses_dual_selector_p90_delta_guard(self) -> None:
+        argv = [
+            "run_fov76_checkpoint_promotion_pipeline.py",
+            "--pair-root",
+            "/data/pairs",
+            "--guard-root",
+            "/data/pairs/hard_mining/guard",
+            "--output-dir",
+            "/out/eval",
+            "--baseline-state",
+            "/runs/base/state.pt",
+            "--baseline-run-dir",
+            "/runs/base/train_output",
+            "--candidate-state",
+            "/runs/cand/state.pt",
+            "--candidate-run-dir",
+            "/runs/cand/train_output",
+            "--candidate-label",
+            "candidate_active",
+            "--guard-candidate-label",
+            "candidate_active",
+            "--dual-checkpoint-rescue-selector",
+            "--dual-checkpoint-rescue-max-homography-p90-delta-px",
+            "0.0",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = fov76_gate_mod.parse_args()
+        selector_config = fov76_gate_mod._dual_selector_config_from_args(args)
+        metadata = fov76_gate_mod._dual_selector_metadata(args)
+
+        self.assertEqual(selector_config.max_rescue_homography_p90_delta_px, 0.0)
+        self.assertEqual(metadata["config"]["max_rescue_homography_p90_delta_px"], 0.0)
 
     def test_fov76_promotion_pipeline_dual_rescue_profile_sets_ransac_minmatch16(self) -> None:
         argv = [
