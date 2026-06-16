@@ -2682,7 +2682,9 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(promotion_command[promotion_command.index("--max-guard-precision-drop") + 1], "0.0")
         self.assertEqual(promotion_command[promotion_command.index("--max-guard-wrong-increase") + 1], "0")
         self.assertEqual(args.dual_checkpoint_rescue_min_rescue_matches, 16)
+        self.assertEqual(args.dual_checkpoint_rescue_min_match_gain, 3)
         self.assertEqual(selector_config.min_rescue_matches, 16)
+        self.assertEqual(selector_config.min_match_gain, 3)
 
     def test_fov76_low_match_guard_profile_preserves_explicit_dual_selector_minmatch(self) -> None:
         argv = [
@@ -2707,6 +2709,8 @@ class StressEvalScriptsTest(unittest.TestCase):
             "candidate_active",
             "--post-filter-profile",
             "fov76_geo5_geo10_extreme_rescue_lowmatch_guard",
+            "--dual-checkpoint-rescue-min-match-gain",
+            "2",
             "--dual-checkpoint-rescue-min-rescue-matches",
             "8",
         ]
@@ -2717,7 +2721,9 @@ class StressEvalScriptsTest(unittest.TestCase):
         selector_config = fov76_gate_mod._dual_selector_config_from_args(args)
 
         self.assertEqual(args.dual_checkpoint_rescue_min_rescue_matches, 8)
+        self.assertEqual(args.dual_checkpoint_rescue_min_match_gain, 2)
         self.assertEqual(selector_config.min_rescue_matches, 8)
+        self.assertEqual(selector_config.min_match_gain, 2)
 
     def test_fov76_promotion_pipeline_dual_rescue_profile_sets_ransac_minmatch16(self) -> None:
         argv = [
@@ -2748,11 +2754,14 @@ class StressEvalScriptsTest(unittest.TestCase):
             args = fov76_gate_mod.parse_args()
 
         self.assertEqual(args.dual_checkpoint_rescue_min_rescue_matches, 8)
+        self.assertEqual(args.dual_checkpoint_rescue_min_match_gain, 1)
         fov76_gate_mod.apply_dual_checkpoint_rescue_profile(args)
         config = fov76_gate_mod._dual_selector_config_from_args(args)
 
         self.assertEqual(args.dual_checkpoint_rescue_min_rescue_matches, 16)
+        self.assertEqual(args.dual_checkpoint_rescue_min_match_gain, 3)
         self.assertEqual(config.min_rescue_matches, 16)
+        self.assertEqual(config.min_match_gain, 3)
 
     def test_fov76_promotion_pipeline_dual_rescue_profile_preserves_explicit_minmatch(self) -> None:
         argv = [

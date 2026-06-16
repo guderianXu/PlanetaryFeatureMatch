@@ -169,6 +169,13 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         _set_profile_default(args, "low_match_geometry_guard_min_score_mean", 19.0, float("-inf"))
         _set_profile_default_unless_explicit(
             args,
+            "dual_checkpoint_rescue_min_match_gain",
+            3,
+            1,
+            "--dual-checkpoint-rescue-min-match-gain",
+        )
+        _set_profile_default_unless_explicit(
+            args,
             "dual_checkpoint_rescue_min_rescue_matches",
             16,
             8,
@@ -265,6 +272,13 @@ def apply_dual_checkpoint_rescue_profile(args: argparse.Namespace) -> None:
     if profile not in FOV76_DUAL_CHECKPOINT_RESCUE_PROFILES:
         raise ValueError(f"unknown dual-checkpoint rescue profile: {profile}")
     if profile == FOV76_RANSAC_MINMATCH16_DUAL_RESCUE_PROFILE:
+        _set_profile_default_unless_explicit(
+            args,
+            "dual_checkpoint_rescue_min_match_gain",
+            3,
+            1,
+            "--dual-checkpoint-rescue-min-match-gain",
+        )
         _set_profile_default_unless_explicit(
             args,
             "dual_checkpoint_rescue_min_rescue_matches",
