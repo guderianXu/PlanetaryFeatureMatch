@@ -987,6 +987,64 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         )
         self.assertIn("runs/phase85_extreme01_near_boundary_false_edge_train_eval_20260621.sh", text)
 
+    def test_phase141_gap_replay_conservative_launcher_limits_phase140_recall_pressure(self) -> None:
+        text = self.read_script("runs/phase141_extreme01_02_gap_replay_conservative_train_eval_20260622.sh")
+
+        self.assertIn("pgrep -af 'batch_pose_sim_dataset.py|pfm_pytorch_training.py|sat_sim_cuda", text)
+        self.assertIn('export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"', text)
+        self.assertIn("phase140_gap_replay_mixed_train.csv", text)
+        self.assertIn('export PFM_PHASE41_STEPS="${PFM_PHASE41_STEPS:-30}"', text)
+        self.assertIn(
+            'export PFM_PHASE41_GRAPH_MATCHER_TRUE_MATCH_MARGIN_WEIGHT="${PFM_PHASE41_GRAPH_MATCHER_TRUE_MATCH_MARGIN_WEIGHT:-0.060}"',
+            text,
+        )
+        self.assertIn(
+            'export PFM_PHASE41_GRAPH_MATCHER_TRUE_GEOMETRY_MATCH_COUNT_FLOOR_WEIGHT="${PFM_PHASE41_GRAPH_MATCHER_TRUE_GEOMETRY_MATCH_COUNT_FLOOR_WEIGHT:-0.015}"',
+            text,
+        )
+        self.assertIn(
+            'export PFM_PHASE41_WARP_OUTLIER_ACCEPT_WEIGHT="${PFM_PHASE41_WARP_OUTLIER_ACCEPT_WEIGHT:-0.010}"',
+            text,
+        )
+        self.assertIn(
+            'export PFM_PHASE41_EVAL_SUBDIR="${PFM_PHASE41_EVAL_SUBDIR:-pfm_eval_kp6144_bins16_cap12_top512_accept_multiply_phase141_gap_replay_conservative}"',
+            text,
+        )
+        self.assertIn('exec bash runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh', text)
+
+    def test_phase143_pair_accept_gate_launcher_trains_calibrator_and_pair_accept_head(self) -> None:
+        text = self.read_script("runs/phase143_phase142_pair_accept_gate_train_eval_20260622.sh")
+
+        self.assertIn("phase142_phase141_observable_gate_sweep_20260622", text)
+        self.assertIn("apply_all_split_variant_safe_valid0356314_hmed1195/hybrid_rows.csv", text)
+        self.assertIn("scripts/train_match_set_rejection_calibrator.py", text)
+        self.assertIn("--threshold-objective hybrid_lightglue_wrong_cap", text)
+        self.assertIn("scripts/apply_match_set_rejection_calibrator.py", text)
+        self.assertIn("scripts/build_gate_acceptance_training_manifest.py", text)
+        self.assertIn('export PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY="${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-1}"', text)
+        self.assertIn('export PFM_PHASE41_PAIR_ACCEPT_LOSS_WEIGHT="${PFM_PHASE41_PAIR_ACCEPT_LOSS_WEIGHT:-1.0}"', text)
+        self.assertIn("phase143_phase142_pair_accept_gate_train_eval_20260622", text)
+
+    def test_phase144_phase141_wrong_risk_launcher_reuses_phase123_false_replay_on_phase141(self) -> None:
+        text = self.read_script("runs/phase144_phase141_wrong_risk_false_replay_train_eval_20260622.sh")
+
+        self.assertIn("phase141_extreme01_02_gap_replay_conservative_train_eval_20260622", text)
+        self.assertIn("phase140_gap_replay_mixed_train.csv", text)
+        self.assertIn('export PFM_PHASE123_TARGET_HARD_FRACTION="${PFM_PHASE123_TARGET_HARD_FRACTION:-0.04}"', text)
+        self.assertIn('export PFM_PHASE41_EVAL_SUBDIR="${PFM_PHASE41_EVAL_SUBDIR:-pfm_eval_kp6144_bins16_cap12_top512_accept_multiply_phase144_wrong_risk_false_replay}"', text)
+        self.assertIn("exec bash runs/phase123_phase122_targeted_false_replay_train_eval_20260621.sh", text)
+
+    def test_phase145_extreme01_guard_launcher_mines_only_extreme01_false_edges(self) -> None:
+        text = self.read_script("runs/phase145_extreme01_precision_guard_train_eval_20260622.sh")
+
+        self.assertIn("phase144_phase141_wrong_risk_false_replay_train_eval_20260622", text)
+        self.assertIn("--target-variant extreme_01", text)
+        self.assertNotIn("--target-variant extreme_02", text)
+        self.assertNotIn("--target-variant extreme_03", text)
+        self.assertIn('export PFM_PHASE123_DEV_FALSE_CSV="${PFM_PHASE123_DEV_FALSE_CSV:-${DEV_FALSE_CSV}}"', text)
+        self.assertIn('export PFM_PHASE41_EVAL_SUBDIR="${PFM_PHASE41_EVAL_SUBDIR:-pfm_eval_kp6144_bins16_cap12_top512_accept_multiply_phase145_extreme01_guard}"', text)
+        self.assertIn("exec bash runs/phase123_phase122_targeted_false_replay_train_eval_20260621.sh", text)
+
 
 if __name__ == "__main__":
     unittest.main()
