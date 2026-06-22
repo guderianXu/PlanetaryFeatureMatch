@@ -1038,6 +1038,32 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(args.validation_cache_dir, [Path("val_numeric"), Path("val_timestamp")])
         self.assertTrue(args.exclude_self_pairs)
 
+    def test_parse_args_accepts_keypoint_offset_weight(self):
+        argv = [
+            "pfm_pytorch_training.py",
+            "--init-random",
+            "--cache-dir",
+            "train",
+            "--keypoint-offset-weight",
+            "0.2",
+            "--selected-keypoint-offset-weight",
+            "0.3",
+            "--selected-keypoint-offset-max-points",
+            "64",
+            "--selected-keypoint-offset-inverse-radius-px",
+            "2.25",
+            "--train-keypoint-offset-head-only",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = train.parse_args()
+
+        self.assertEqual(args.keypoint_offset_weight, 0.2)
+        self.assertEqual(args.selected_keypoint_offset_weight, 0.3)
+        self.assertEqual(args.selected_keypoint_offset_max_points, 64)
+        self.assertEqual(args.selected_keypoint_offset_inverse_radius_px, 2.25)
+        self.assertTrue(args.train_keypoint_offset_head_only)
+
     def test_repeat_hard_pairs_from_summary_after_base_training_paths(self):
         paths = [
             Path("cache/source_a/pair_000001.pt"),
@@ -1318,6 +1344,71 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertLess(float(high_loss), float(low_loss))
 
+    def test_keypoint_offset_supervision_loss_rewards_subpixel_offsets(self):
+        points = torch.tensor([[0.25, 0.0], [1.49, 0.51]], dtype=torch.float32)
+        good = torch.zeros(1, 2, 2, 2)
+        good[0, 0, 0, 0] = 0.25
+        good[0, 1, 0, 0] = 0.0
+        good[0, 0, 1, 1] = 0.49
+        good[0, 1, 1, 1] = -0.49
+        bad = torch.zeros_like(good)
+
+        good_loss = train.keypoint_offset_supervision_loss(good, points)
+        bad_loss = train.keypoint_offset_supervision_loss(bad, points)
+
+        self.assertLess(float(good_loss), 1.0e-6)
+        self.assertGreater(float(bad_loss), 0.05)
+
+    def test_selected_keypoint_offset_supervision_targets_inference_selected_grid(self):
+        view = torch.ones(1, 4, 4)
+        yy, xx = torch.meshgrid(torch.arange(4), torch.arange(4), indexing="ij")
+        warp = torch.stack([xx.to(torch.float32) + 0.25, yy.to(torch.float32)], dim=-1)
+        pair = SyntheticPair(view_a=view, view_b=view, warp_a_to_b=warp, valid_mask=torch.ones(4, 4, dtype=torch.bool))
+        descriptors = torch.zeros(1, 2, 4, 4)
+        heatmap = torch.zeros(1, 1, 4, 4)
+        heatmap[0, 0, 1, 1] = 1.0
+        good_a_offsets = torch.zeros(1, 2, 4, 4)
+        good_b_offsets = torch.zeros(1, 2, 4, 4)
+        good_a_offsets[0, 0, 1, 1] = -0.25
+        good_b_offsets[0, 0, 1, 1] = 0.25
+        bad_offsets = torch.zeros_like(good_a_offsets)
+
+        def sparse(offsets: torch.Tensor) -> train.TrainingSparseMaps:
+            return train.TrainingSparseMaps(
+                descriptors=descriptors,
+                heatmap=heatmap,
+                keypoint_offsets=offsets,
+                matchability=torch.zeros(1, 1, 4, 4),
+                descriptor_uncertainty=torch.zeros(1, 1, 4, 4),
+                no_match_prior=torch.zeros(1, 1, 4, 4),
+                scale=torch.ones(1, 1, 4, 4),
+                orientation=torch.zeros(1, 2, 4, 4),
+                affine=torch.zeros(1, 4, 4, 4),
+            )
+
+        good_loss, good_metrics = train.selected_keypoint_offset_supervision_loss(
+            pair,
+            sparse(good_a_offsets),
+            sparse(good_b_offsets),
+            max_points=1,
+            min_intensity=0.0,
+            inverse_radius_px=0.30,
+        )
+        bad_loss, bad_metrics = train.selected_keypoint_offset_supervision_loss(
+            pair,
+            sparse(bad_offsets),
+            sparse(bad_offsets),
+            max_points=1,
+            min_intensity=0.0,
+            inverse_radius_px=0.30,
+        )
+
+        self.assertLess(float(good_loss), 1.0e-6)
+        self.assertGreater(float(bad_loss), 0.01)
+        self.assertEqual(float(good_metrics["forward_points"]), 1.0)
+        self.assertEqual(float(good_metrics["reverse_points"]), 1.0)
+        self.assertEqual(float(bad_metrics["points"]), 2.0)
+
     def test_descriptor_parameters_can_include_keypoint_head(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=8, graph_attention_layers=1)
 
@@ -1325,8 +1416,48 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         selected_ids = {id(parameter) for parameter in selected}
         self.assertIn(id(model.sparse_head.heatmap.weight), selected_ids)
+        self.assertIn(id(model.sparse_head.keypoint_offsets.weight), selected_ids)
         self.assertTrue(model.sparse_head.heatmap.weight.requires_grad)
         self.assertFalse(model.backbone.stage1[0].weight.requires_grad)
+
+    def test_descriptor_parameters_can_include_only_keypoint_offsets(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=8, graph_attention_layers=1)
+
+        selected = train.descriptor_parameters(
+            model,
+            train_descriptor_head=False,
+            train_keypoint_offset_head=True,
+        )
+
+        selected_ids = {id(parameter) for parameter in selected}
+        self.assertIn(id(model.sparse_head.keypoint_offsets.weight), selected_ids)
+        self.assertIn(id(model.sparse_head.keypoint_offsets.bias), selected_ids)
+        self.assertTrue(model.sparse_head.keypoint_offsets.weight.requires_grad)
+        self.assertFalse(model.sparse_head.heatmap.weight.requires_grad)
+        self.assertFalse(next(model.sparse_head.keypoint_context.parameters()).requires_grad)
+        self.assertFalse(model.backbone.stage1[0].weight.requires_grad)
+
+    def test_freeze_non_trainable_batch_norm_statistics_sets_frozen_bn_to_eval(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=8, graph_attention_layers=1)
+        model.train()
+        train.descriptor_parameters(
+            model,
+            train_descriptor_head=False,
+            train_keypoint_offset_head=True,
+        )
+
+        train.freeze_non_trainable_batch_norm_statistics(model)
+
+        self.assertFalse(model.backbone.stage1[1].training)
+        self.assertFalse(model.backbone.stage1[4].training)
+
+    def test_pair_accept_head_only_requires_frozen_non_trainable_batch_norm_statistics(self):
+        args = argparse.Namespace(
+            train_keypoint_offset_head_only=False,
+            train_pair_accept_head_only=True,
+        )
+
+        self.assertTrue(train.should_freeze_non_trainable_batch_norm_statistics(args))
 
     def test_descriptor_parameters_can_include_texture_adapter(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=8, graph_attention_layers=1)
@@ -1411,6 +1542,31 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertFalse(model.graph_matcher.attention_layers[0].self_query.weight.requires_grad)
         self.assertFalse(model.graph_matcher.descriptor_projection.weight.requires_grad)
 
+    def test_descriptor_parameters_can_train_pair_accept_head_only(self):
+        model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=8, graph_attention_layers=1)
+
+        selected = train.descriptor_parameters(
+            model,
+            train_descriptor_head=False,
+            train_graph_matcher=True,
+            train_graph_calibration_only=True,
+            train_pair_accept_head_only=True,
+        )
+
+        selected_ids = {id(parameter) for parameter in selected}
+        self.assertIn(id(model.graph_matcher.pair_accept_head[-1].weight), selected_ids)
+        self.assertIn(id(model.graph_matcher.pair_accept_head[-1].bias), selected_ids)
+        self.assertIn(id(model.graph_matcher.pair_accept_context_head[-1].weight), selected_ids)
+        self.assertIn(id(model.graph_matcher.pair_accept_context_head[-1].bias), selected_ids)
+        self.assertTrue(model.graph_matcher.pair_accept_head[-1].weight.requires_grad)
+        self.assertTrue(model.graph_matcher.pair_accept_context_head[-1].weight.requires_grad)
+        self.assertNotIn(id(model.graph_matcher.accept_head[-1].weight), selected_ids)
+        self.assertNotIn(id(model.graph_matcher.geometry_bias[-1].weight), selected_ids)
+        self.assertNotIn(id(model.graph_matcher.dustbin_bias), selected_ids)
+        self.assertFalse(model.graph_matcher.accept_head[-1].weight.requires_grad)
+        self.assertFalse(model.graph_matcher.geometry_bias[-1].weight.requires_grad)
+        self.assertFalse(model.graph_matcher.dustbin_bias.requires_grad)
+
     def test_graph_matcher_correspondence_loss_backpropagates_to_matcher(self):
         model = pfm_model.PlanetaryFeatureMatcher(base_channels=4, descriptor_dim=8, graph_hidden_dim=16, graph_attention_layers=1)
         descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
@@ -1422,6 +1578,26 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(model.graph_matcher.descriptor_projection.weight.grad)
+
+    def test_graph_matcher_pair_acceptance_loss_uses_target_and_weight(self):
+        output = pfm_model.GraphMatcherOutput(
+            logits=torch.zeros(2, 2),
+            matches=torch.empty(0, 2, dtype=torch.long),
+            scores=torch.empty(0),
+            accept_logits=torch.zeros(2, 2),
+            pair_accept_logit=torch.tensor(0.0),
+        )
+
+        loss, metrics = train.graph_matcher_pair_acceptance_loss(
+            output,
+            target=0.0,
+            weight=3.0,
+        )
+
+        self.assertTrue(torch.allclose(loss, torch.tensor(2.0794415), atol=1.0e-5))
+        self.assertAlmostEqual(metrics["target"], 0.0)
+        self.assertAlmostEqual(metrics["weight"], 3.0)
+        self.assertAlmostEqual(metrics["probability"], 0.5)
 
     def test_descriptor_parameters_can_include_reliability_head(self):
         model = pfm_model.PlanetaryFeatureMatcher(
@@ -1942,6 +2118,130 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(float(logits.grad[0, 3]), 0.0)
         self.assertEqual(float(logits.grad[3, 1]), 0.0)
 
+    def test_graph_matcher_warp_outlier_loss_penalizes_exact_warp_outlier(self):
+        logits = torch.full((4, 4), -5.0, requires_grad=True)
+        with torch.no_grad():
+            logits[0, 0] = 5.0
+            logits[1, 1] = 5.0
+            logits[2, 2] = 5.0
+            logits[0, 1] = 14.0
+            logits[0, 3] = 4.0
+            logits[3, 1] = 4.0
+        accept_logits = torch.zeros(3, 3, requires_grad=True)
+        with torch.no_grad():
+            accept_logits[0, 1] = 6.0
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+            accept_logits=accept_logits,
+        )
+        points_b = torch.tensor([[0.0, 0.0], [12.0, 0.0], [24.0, 0.0]], dtype=torch.float32)
+
+        loss, metrics = train.graph_matcher_warp_outlier_loss(
+            output,
+            positive_count=3,
+            points_b_xy=points_b,
+            topk=1,
+            residual_threshold_px=3.0,
+            min_score=0.01,
+            margin=0.25,
+        )
+        loss.backward()
+
+        self.assertGreater(float(loss.detach()), 0.0)
+        self.assertEqual(float(metrics["edges"]), 1.0)
+        self.assertGreater(float(metrics["residual_mean_px"]), 3.0)
+        self.assertGreater(float(metrics["accept_mean"]), 0.0)
+        self.assertGreater(float(logits.grad[0, 1]), 0.0)
+        self.assertEqual(float(logits.grad[0, 3]), 0.0)
+        self.assertEqual(float(logits.grad[3, 1]), 0.0)
+
+    def test_graph_matcher_warp_outlier_accept_loss_only_trains_accept_logits(self):
+        logits = torch.full((4, 4), -5.0, requires_grad=True)
+        with torch.no_grad():
+            logits[0, 0] = 5.0
+            logits[1, 1] = 5.0
+            logits[2, 2] = 5.0
+            logits[0, 1] = 14.0
+            logits[0, 3] = 4.0
+            logits[3, 1] = 4.0
+        accept_logits = torch.zeros(3, 3, requires_grad=True)
+        with torch.no_grad():
+            accept_logits[0, 1] = 6.0
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+            accept_logits=accept_logits,
+        )
+        points_b = torch.tensor([[0.0, 0.0], [12.0, 0.0], [24.0, 0.0]], dtype=torch.float32)
+
+        loss, metrics = train.graph_matcher_warp_outlier_accept_loss(
+            output,
+            positive_count=3,
+            points_b_xy=points_b,
+            topk=1,
+            residual_threshold_px=3.0,
+            min_score=0.01,
+        )
+        loss.backward()
+
+        self.assertGreater(float(loss.detach()), 0.0)
+        self.assertEqual(float(metrics["edges"]), 1.0)
+        self.assertGreater(float(metrics["score_mean"]), 0.0)
+        self.assertGreater(float(metrics["residual_mean_px"]), 3.0)
+        self.assertGreater(float(metrics["probability_mean"]), 0.9)
+        self.assertIsNone(logits.grad)
+        self.assertGreater(float(accept_logits.grad[0, 1]), 0.0)
+        self.assertEqual(float(accept_logits.grad[0, 0]), 0.0)
+
+    def test_graph_matcher_warp_soft_boundary_loss_uses_near_miss_soft_targets(self):
+        logits = torch.full((4, 4), -5.0, requires_grad=True)
+        with torch.no_grad():
+            logits[0, 0] = 5.0
+            logits[1, 1] = 5.0
+            logits[2, 2] = 5.0
+            logits[0, 1] = 14.0
+            logits[0, 2] = 16.0
+            logits[0, 3] = 4.0
+            logits[3, 1] = 4.0
+        accept_logits = torch.zeros(3, 3, requires_grad=True)
+        with torch.no_grad():
+            accept_logits[0, 1] = 6.0
+            accept_logits[0, 2] = 6.0
+        output = pfm_model.GraphMatcherOutput(
+            logits=logits,
+            matches=torch.empty((0, 2), dtype=torch.long),
+            scores=torch.empty((0,), dtype=torch.float32),
+            accept_logits=accept_logits,
+        )
+        points_b = torch.tensor([[0.0, 0.0], [6.5, 0.0], [12.0, 0.0]], dtype=torch.float32)
+
+        loss, metrics = train.graph_matcher_warp_soft_boundary_loss(
+            output,
+            positive_count=3,
+            points_b_xy=points_b,
+            topk=1,
+            lower_residual_px=5.0,
+            upper_residual_px=8.0,
+            min_score=0.01,
+        )
+        loss.backward()
+
+        self.assertGreater(float(loss.detach()), 0.0)
+        self.assertEqual(float(metrics["edges"]), 1.0)
+        self.assertAlmostEqual(float(metrics["residual_mean_px"]), 6.5)
+        self.assertAlmostEqual(float(metrics["target_mean"]), 0.5)
+        self.assertGreater(float(metrics["score_probability_mean"]), 0.9)
+        self.assertGreater(float(metrics["accept_probability_mean"]), 0.9)
+        self.assertGreater(float(logits.grad[0, 1]), 0.0)
+        self.assertEqual(float(logits.grad[0, 2]), 0.0)
+        self.assertEqual(float(logits.grad[0, 3]), 0.0)
+        self.assertEqual(float(logits.grad[3, 1]), 0.0)
+        self.assertGreater(float(accept_logits.grad[0, 1]), 0.0)
+        self.assertEqual(float(accept_logits.grad[0, 2]), 0.0)
+
     def test_graph_matcher_mined_false_match_loss_can_cap_extreme_spikes(self):
         logits = torch.full((4, 4), -5.0)
         logits[0, 0] = 2.0
@@ -2203,6 +2503,136 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertGreater(float(metrics["violations"]), 0.0)
         self.assertAlmostEqual(float(identical), 0.0, places=6)
         self.assertEqual(float(identical_metrics["count_deficit"]), 0.0)
+
+    def test_graph_matcher_true_geometry_match_count_floor_loss_uses_manifest_target(self):
+        student_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, -2.0, 4.0, -5.0],
+                [4.0, 4.0, -3.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        good_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, 5.0, 4.0, -5.0],
+                [4.0, 4.0, 5.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        student = pfm_model.GraphMatcherOutput(student_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+        good = pfm_model.GraphMatcherOutput(good_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+
+        loss, metrics = train.graph_matcher_true_geometry_match_count_floor_loss(
+            student,
+            positive_count=3,
+            target_count=30.0,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+        safe_loss, safe_metrics = train.graph_matcher_true_geometry_match_count_floor_loss(
+            good,
+            positive_count=3,
+            target_count=30.0,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        self.assertEqual(float(metrics["target_count"]), 3.0)
+        self.assertEqual(float(metrics["student_count"]), 1.0)
+        self.assertEqual(float(metrics["count_deficit"]), 2.0)
+        self.assertGreater(float(metrics["violations"]), 0.0)
+        self.assertAlmostEqual(float(safe_loss), 0.0, places=6)
+        self.assertEqual(float(safe_metrics["count_deficit"]), 0.0)
+
+    def test_graph_matcher_teacher_match_count_ceiling_loss_limits_extra_true_pair_count(self):
+        teacher_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, 1.0, 4.0, -5.0],
+                [4.0, 4.0, 0.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        student_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 3.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        teacher = pfm_model.GraphMatcherOutput(teacher_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+        student = pfm_model.GraphMatcherOutput(student_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+
+        loss, metrics = train.graph_matcher_teacher_match_count_ceiling_loss(
+            student,
+            teacher,
+            positive_count=3,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+        identical, identical_metrics = train.graph_matcher_teacher_match_count_ceiling_loss(
+            teacher,
+            teacher,
+            positive_count=3,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        self.assertEqual(float(metrics["teacher_count"]), 1.0)
+        self.assertEqual(float(metrics["student_count"]), 3.0)
+        self.assertEqual(float(metrics["count_excess"]), 2.0)
+        self.assertGreater(float(metrics["violations"]), 0.0)
+        self.assertAlmostEqual(float(identical), 0.0, places=6)
+        self.assertEqual(float(identical_metrics["count_excess"]), 0.0)
+
+    def test_graph_matcher_teacher_match_count_ceiling_loss_ignores_extra_false_pairs(self):
+        teacher_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, 4.0, 4.0, -5.0],
+                [4.0, 5.0, 4.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 0.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, 0.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, 4.0, -20.0, -5.0],
+                [-5.0, -5.0, -5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        student_logits = torch.tensor(
+            [
+                [5.0, 4.0, 4.0, 4.0, 4.0, -5.0],
+                [4.0, 5.0, 4.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, 4.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, 3.0, 4.0, -5.0],
+                [4.0, 4.0, 4.0, 4.0, -20.0, -5.0],
+                [-5.0, -5.0, -5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        teacher = pfm_model.GraphMatcherOutput(teacher_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+        student = pfm_model.GraphMatcherOutput(student_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+
+        loss, metrics = train.graph_matcher_teacher_match_count_ceiling_loss(
+            student,
+            teacher,
+            positive_count=2,
+            score_threshold=12.0,
+            margin=0.5,
+        )
+
+        self.assertAlmostEqual(float(loss), 0.0, places=6)
+        self.assertEqual(float(metrics["teacher_count"]), 2.0)
+        self.assertEqual(float(metrics["student_count"]), 2.0)
+        self.assertEqual(float(metrics["count_excess"]), 0.0)
+        self.assertEqual(float(metrics["violations"]), 0.0)
 
     def test_graph_matcher_correspondence_loss_can_distill_external_teacher_distribution(self):
         model = pfm_model.PlanetaryFeatureMatcher(
@@ -2654,6 +3084,53 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("graph_matcher_mined_false_match_reference_filtered_edges", components)
         self.assertIn("graph_matcher_extra_false_match_pairs", components)
 
+    def test_graph_matcher_correspondence_loss_returns_warp_outlier_components(self):
+        model = pfm_model.PlanetaryFeatureMatcher(
+            base_channels=4,
+            descriptor_dim=8,
+            graph_hidden_dim=16,
+            graph_attention_layers=1,
+        )
+        descriptors_a = pfm_model.normalize_channels_stable(torch.randn(1, 8, 4, 4))
+        descriptors_b = descriptors_a.clone()
+        points = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+
+        loss, components = train.graph_matcher_correspondence_loss(
+            model,
+            descriptors_a,
+            descriptors_b,
+            points,
+            points,
+            warp_outlier_weight=0.5,
+            warp_outlier_topk=2,
+            warp_outlier_residual_threshold_px=0.5,
+            warp_outlier_min_score=0.0,
+            warp_outlier_margin=0.25,
+            warp_soft_boundary_weight=0.2,
+            warp_soft_boundary_topk=2,
+            warp_soft_boundary_lower_residual_px=5.0,
+            warp_soft_boundary_upper_residual_px=8.0,
+            warp_soft_boundary_min_score=0.0,
+            return_components=True,
+        )
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIn("graph_matcher_warp_outlier_loss", components)
+        self.assertIn("graph_matcher_warp_outlier_edges", components)
+        self.assertIn("graph_matcher_warp_outlier_residual_mean_px", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_mean", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_loss", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_edges", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_score_mean", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_residual_mean_px", components)
+        self.assertIn("graph_matcher_warp_outlier_accept_probability_mean", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_loss", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_edges", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_residual_mean_px", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_target_mean", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_score_probability_mean", components)
+        self.assertIn("graph_matcher_warp_soft_boundary_accept_probability_mean", components)
+
     def test_graph_matcher_correspondence_loss_returns_teacher_guard_components(self):
         model = pfm_model.PlanetaryFeatureMatcher(
             base_channels=4,
@@ -2735,6 +3212,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             teacher_match_count_floor_weight=0.25,
             teacher_match_count_floor_threshold=12.0,
             teacher_match_count_floor_margin=0.5,
+            teacher_match_count_ceiling_weight=0.25,
+            teacher_match_count_ceiling_threshold=12.0,
+            teacher_match_count_ceiling_margin=0.5,
             return_components=True,
         )
 
@@ -2747,6 +3227,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertIn("graph_matcher_teacher_match_count_floor_teacher_count", components)
         self.assertIn("graph_matcher_teacher_match_count_floor_student_count", components)
         self.assertIn("graph_matcher_teacher_match_count_floor_count_deficit", components)
+        self.assertIn("graph_matcher_teacher_match_count_ceiling_loss", components)
+        self.assertIn("graph_matcher_teacher_match_count_ceiling_teacher_count", components)
+        self.assertIn("graph_matcher_teacher_match_count_ceiling_student_count", components)
+        self.assertIn("graph_matcher_teacher_match_count_ceiling_count_excess", components)
 
     def test_graph_matcher_correspondence_loss_can_use_frozen_teacher_guard_model(self):
         model = pfm_model.PlanetaryFeatureMatcher(
@@ -2814,6 +3298,10 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 "graph_matcher_teacher_match_count_floor_teacher_count": torch.tensor(8.0),
                 "graph_matcher_teacher_match_count_floor_student_count": torch.tensor(6.0),
                 "graph_matcher_teacher_match_count_floor_count_deficit": torch.tensor(2.0),
+                "graph_matcher_teacher_match_count_ceiling_loss": torch.tensor(0.03125),
+                "graph_matcher_teacher_match_count_ceiling_teacher_count": torch.tensor(8.0),
+                "graph_matcher_teacher_match_count_ceiling_student_count": torch.tensor(10.0),
+                "graph_matcher_teacher_match_count_ceiling_count_excess": torch.tensor(2.0),
             }
 
         with (
@@ -2859,6 +3347,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
                 graph_matcher_teacher_match_count_floor_weight=0.02,
                 graph_matcher_teacher_match_count_floor_threshold=18.0,
                 graph_matcher_teacher_match_count_floor_margin=0.5,
+                graph_matcher_teacher_match_count_ceiling_weight=0.03,
+                graph_matcher_teacher_match_count_ceiling_threshold=18.0,
+                graph_matcher_teacher_match_count_ceiling_margin=0.75,
             )
 
         self.assertEqual(len(graph_calls), 1)
@@ -2872,10 +3363,14 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_weight"], 0.02)
         self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_threshold"], 18.0)
         self.assertAlmostEqual(graph_calls[0]["teacher_match_count_floor_margin"], 0.5)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_ceiling_weight"], 0.03)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_ceiling_threshold"], 18.0)
+        self.assertAlmostEqual(graph_calls[0]["teacher_match_count_ceiling_margin"], 0.75)
         self.assertAlmostEqual(graph_calls[0]["teacher_distillation_weight"], 0.0)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_guard_loss"], 0.5)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_score_floor_loss"], 0.125)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_match_count_floor_loss"], 0.0625)
+        self.assertAlmostEqual(metrics["graph_matcher_teacher_match_count_ceiling_loss"], 0.03125)
 
     def test_train_step_passes_teacher_distillation_to_graph_loss(self):
         pair_path = Path("pair_000001.pt")
@@ -2940,6 +3435,110 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(graph_calls[0]["teacher_distillation_weight"], 0.35)
         self.assertAlmostEqual(graph_calls[0]["teacher_distillation_temperature"], 1.75)
         self.assertAlmostEqual(metrics["graph_matcher_teacher_distillation_loss"], 0.75)
+
+    def test_train_step_passes_warp_outlier_options_to_graph_loss(self):
+        pair_path = Path("pair_warp_outlier.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 4, 4),
+            view_b=torch.ones(1, 4, 4),
+            warp_a_to_b=torch.zeros(4, 4, 2),
+            valid_mask=torch.ones(4, 4, dtype=torch.bool),
+        )
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        graph_calls: list[dict] = []
+
+        def fake_graph_loss(*_args, **kwargs):
+            graph_calls.append(kwargs)
+            return parameter * 2.0, {
+                "graph_matcher_total_loss": torch.tensor(2.0),
+                "graph_matcher_warp_outlier_loss": torch.tensor(0.25),
+                "graph_matcher_warp_outlier_edges": torch.tensor(3.0),
+                "graph_matcher_warp_outlier_residual_mean_px": torch.tensor(9.0),
+                "graph_matcher_warp_outlier_accept_mean": torch.tensor(0.7),
+                "graph_matcher_warp_outlier_accept_loss": torch.tensor(0.125),
+                "graph_matcher_warp_outlier_accept_edges": torch.tensor(4.0),
+                "graph_matcher_warp_outlier_accept_score_mean": torch.tensor(1.5),
+                "graph_matcher_warp_outlier_accept_residual_mean_px": torch.tensor(10.0),
+                "graph_matcher_warp_outlier_accept_probability_mean": torch.tensor(0.8),
+                "graph_matcher_warp_soft_boundary_loss": torch.tensor(0.0625),
+                "graph_matcher_warp_soft_boundary_edges": torch.tensor(5.0),
+                "graph_matcher_warp_soft_boundary_residual_mean_px": torch.tensor(6.5),
+                "graph_matcher_warp_soft_boundary_target_mean": torch.tensor(0.5),
+                "graph_matcher_warp_soft_boundary_score_probability_mean": torch.tensor(0.6),
+                "graph_matcher_warp_soft_boundary_accept_probability_mean": torch.tensor(0.7),
+            }
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 4, 4, 4),
+                    torch.ones(1, 4, 4, 4),
+                    torch.ones(1, 4, 4, 4),
+                    torch.ones(1, 4, 4, 4),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.zeros(2, 2), torch.zeros(2, 2)),
+            ),
+            mock.patch.object(train, "graph_matcher_correspondence_loss", side_effect=fake_graph_loss),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                synthetic_loss_weight=0.0,
+                graph_matcher_loss_weight=1.0,
+                graph_matcher_warp_outlier_weight=0.08,
+                graph_matcher_warp_outlier_topk=5,
+                graph_matcher_warp_outlier_residual_threshold_px=4.5,
+                graph_matcher_warp_outlier_min_score=0.06,
+                graph_matcher_warp_outlier_margin=0.55,
+                graph_matcher_warp_outlier_accept_weight=0.03,
+                graph_matcher_warp_outlier_accept_topk=6,
+                graph_matcher_warp_outlier_accept_residual_threshold_px=5.5,
+                graph_matcher_warp_outlier_accept_min_score=0.07,
+                graph_matcher_warp_soft_boundary_weight=0.04,
+                graph_matcher_warp_soft_boundary_topk=7,
+                graph_matcher_warp_soft_boundary_lower_residual_px=5.0,
+                graph_matcher_warp_soft_boundary_upper_residual_px=8.0,
+                graph_matcher_warp_soft_boundary_min_score=0.02,
+            )
+
+        self.assertEqual(len(graph_calls), 1)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_weight"], 0.08)
+        self.assertEqual(graph_calls[0]["warp_outlier_topk"], 5)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_residual_threshold_px"], 4.5)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_min_score"], 0.06)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_margin"], 0.55)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_accept_weight"], 0.03)
+        self.assertEqual(graph_calls[0]["warp_outlier_accept_topk"], 6)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_accept_residual_threshold_px"], 5.5)
+        self.assertAlmostEqual(graph_calls[0]["warp_outlier_accept_min_score"], 0.07)
+        self.assertAlmostEqual(metrics["graph_matcher_warp_outlier_loss"], 0.25)
+        self.assertEqual(metrics["graph_matcher_warp_outlier_edges"], 3.0)
+        self.assertAlmostEqual(metrics["graph_matcher_warp_outlier_accept_loss"], 0.125)
+        self.assertEqual(metrics["graph_matcher_warp_outlier_accept_edges"], 4.0)
+        self.assertAlmostEqual(graph_calls[0]["warp_soft_boundary_weight"], 0.04)
+        self.assertEqual(graph_calls[0]["warp_soft_boundary_topk"], 7)
+        self.assertAlmostEqual(graph_calls[0]["warp_soft_boundary_lower_residual_px"], 5.0)
+        self.assertAlmostEqual(graph_calls[0]["warp_soft_boundary_upper_residual_px"], 8.0)
+        self.assertAlmostEqual(graph_calls[0]["warp_soft_boundary_min_score"], 0.02)
+        self.assertAlmostEqual(metrics["graph_matcher_warp_soft_boundary_loss"], 0.0625)
+        self.assertEqual(metrics["graph_matcher_warp_soft_boundary_edges"], 5.0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA autocast is required for this regression test")
     def test_matchability_supervision_loss_is_safe_under_cuda_autocast(self):
@@ -3268,6 +3867,36 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "0.03",
             "--graph-matcher-ransac-consistency-margin",
             "0.4",
+            "--graph-matcher-warp-outlier-weight",
+            "0.09",
+            "--graph-matcher-warp-outlier-topk",
+            "7",
+            "--graph-matcher-warp-outlier-residual-threshold-px",
+            "4.5",
+            "--graph-matcher-warp-outlier-min-score",
+            "0.06",
+            "--graph-matcher-warp-outlier-margin",
+            "0.55",
+            "--graph-matcher-warp-outlier-accept-weight",
+            "0.035",
+            "--graph-matcher-warp-outlier-accept-topk",
+            "9",
+            "--graph-matcher-warp-outlier-accept-residual-threshold-px",
+            "5.5",
+            "--graph-matcher-warp-outlier-accept-min-score",
+            "0.07",
+            "--graph-matcher-warp-soft-boundary-weight",
+            "0.045",
+            "--graph-matcher-warp-soft-boundary-topk",
+            "11",
+            "--graph-matcher-warp-soft-boundary-lower-residual-px",
+            "5.0",
+            "--graph-matcher-warp-soft-boundary-upper-residual-px",
+            "8.0",
+            "--graph-matcher-warp-soft-boundary-min-score",
+            "0.04",
+            "--graph-matcher-pair-acceptance-loss-weight",
+            "0.25",
             "--graph-matcher-depth-distillation-weight",
             "0.6",
             "--graph-matcher-depth-distillation-teacher-layers",
@@ -3294,6 +3923,12 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
             "18.0",
             "--graph-matcher-teacher-match-count-floor-margin",
             "0.5",
+            "--graph-matcher-teacher-match-count-ceiling-weight",
+            "0.04",
+            "--graph-matcher-teacher-match-count-ceiling-threshold",
+            "18.5",
+            "--graph-matcher-teacher-match-count-ceiling-margin",
+            "0.75",
             "--graph-matcher-teacher-distillation-weight",
             "0.35",
             "--graph-matcher-teacher-distillation-temperature",
@@ -3417,6 +4052,21 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_residual_threshold_px, 2.5)
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_min_score, 0.03)
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_margin, 0.4)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_weight, 0.09)
+        self.assertEqual(args.graph_matcher_warp_outlier_topk, 7)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_residual_threshold_px, 4.5)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_min_score, 0.06)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_margin, 0.55)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_weight, 0.035)
+        self.assertEqual(args.graph_matcher_warp_outlier_accept_topk, 9)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_residual_threshold_px, 5.5)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_min_score, 0.07)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_weight, 0.045)
+        self.assertEqual(args.graph_matcher_warp_soft_boundary_topk, 11)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_lower_residual_px, 5.0)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_upper_residual_px, 8.0)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_min_score, 0.04)
+        self.assertAlmostEqual(args.graph_matcher_pair_acceptance_loss_weight, 0.25)
         self.assertAlmostEqual(args.graph_matcher_depth_distillation_weight, 0.6)
         self.assertEqual(args.graph_matcher_depth_distillation_teacher_layers, 4)
         self.assertAlmostEqual(args.graph_matcher_depth_distillation_temperature, 1.5)
@@ -3430,6 +4080,9 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_weight, 0.03)
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_threshold, 18.0)
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_margin, 0.5)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_weight, 0.04)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_threshold, 18.5)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_margin, 0.75)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_weight, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_temperature, 1.75)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_guard_reject_threshold, 0.2)

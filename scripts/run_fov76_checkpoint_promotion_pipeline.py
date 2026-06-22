@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -19,13 +20,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GRAPH_SWEEP_SCRIPT = PROJECT_ROOT / "scripts" / "run_graph_filter_sweep.py"
 PROMOTION_SCRIPT = PROJECT_ROOT / "scripts" / "evaluate_checkpoint_promotion.py"
 DUAL_CHECKPOINT_SELECTOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_dual_checkpoint_rescue_eval.py"
+TRUE_GEOMETRY_SELECTOR_PIPELINE_SCRIPT = PROJECT_ROOT / "scripts" / "run_true_geometry_selector_pipeline.py"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
 )
 FOV76_RANSAC_MINMATCH16_DUAL_RESCUE_PROFILE = "fov76_ransac_minmatch16"
 FOV76_DUAL_CHECKPOINT_RESCUE_PROFILES = (
@@ -151,6 +155,16 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         return
     if profile not in FOV76_POST_FILTER_PROFILES:
         raise ValueError(f"unknown post-filter profile: {profile}")
+    if profile == TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE:
+        _set_profile_default(args, "geometry_filter", "none", "local")
+        _set_profile_default(args, "geometry_threshold_px", 5.0, 10.0)
+        _set_profile_default(args, "filtered_geometry_filter", "true_geometry", "magsac")
+        _set_profile_default(args, "filtered_min_matches", 0, 16)
+        _set_profile_default(args, "true_geometry_min_valid_fraction", 0.10, 0.0)
+        _set_profile_default(args, "true_geometry_selector_pipeline", True, False)
+        _set_profile_default(args, "formal_target_variants", "extreme_02,extreme_03", "")
+        _set_profile_default(args, "formal_protected_variants", "mid_01,mid_02,extreme_01,nadir", "")
+        return
     if profile == FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE:
         _set_profile_default(args, "geometry_threshold_px", 5.0, 10.0)
         _set_profile_default(args, "baseline_adaptive_geometry_rescue_variants", "extreme_02,extreme_03", "")
@@ -308,6 +322,8 @@ def _add_common_sweep_options(
     model: EvalModel,
     candidate_pairs: int,
 ) -> None:
+    geometry_filter = str(getattr(args, "geometry_filter", "local"))
+    filtered_geometry_filter = str(getattr(args, "filtered_geometry_filter", "magsac"))
     command.extend(
         [
             "--pair-mode",
@@ -341,7 +357,7 @@ def _add_common_sweep_options(
             "--threshold-px",
             "5.0",
             "--geometry-filter",
-            "local",
+            geometry_filter,
             "--geometry-threshold-px",
             str(args.geometry_threshold_px),
             "--geometry-threshold-px-values",
@@ -369,7 +385,7 @@ def _add_common_sweep_options(
             "--graph-early-stop-min-confidence",
             "-1.0",
             "--filtered-geometry-filter",
-            "magsac",
+            filtered_geometry_filter,
             "--filtered-min-margin",
             "0.0",
             "--filtered-max-matches",
@@ -380,6 +396,8 @@ def _add_common_sweep_options(
             str(args.filtered_min_matches),
             "--filtered-min-matches-values",
             str(args.filtered_min_matches),
+            "--true-geometry-min-valid-fraction",
+            str(getattr(args, "true_geometry_min_valid_fraction", 0.0)),
         ]
     )
     for value in _filtered_min_matches_by_variant(args, model=model):
@@ -482,7 +500,7 @@ def _add_common_sweep_options(
             "31",
         ]
     )
-    if getattr(args, "write_match_details", False):
+    if getattr(args, "write_match_details", False) or true_geometry_selector_enabled(args):
         command.append("--write-match-details")
 
 
@@ -639,6 +657,12 @@ def required_input_paths(args: argparse.Namespace) -> list[Path]:
     for set_name in _guard_set_names(args):
         for split in args.splits:
             paths.append(args.guard_root / f"{set_name}_{split}.csv")
+    if true_geometry_selector_enabled(args):
+        for split in args.splits:
+            paths.append(true_geometry_lightglue_metrics_path(args, split=split))
+        manifest_validation_json = getattr(args, "true_geometry_manifest_validation_json", None)
+        if manifest_validation_json is not None:
+            paths.append(manifest_validation_json)
     return paths
 
 
@@ -1036,6 +1060,11 @@ def _dual_selector_config_from_args(args: argparse.Namespace) -> dual_rescue_mod
         ),
         min_rescue_score_mean=args.dual_checkpoint_rescue_min_score_mean,
         require_rescue_score_mean_not_lower=not args.dual_checkpoint_rescue_allow_score_mean_drop,
+        max_valid_fraction=getattr(args, "dual_checkpoint_rescue_max_valid_fraction", None),
+        min_rescue_score_mean_delta=getattr(args, "dual_checkpoint_rescue_min_score_mean_delta", None),
+        rescue_gate_target_variants=dual_rescue_mod.parse_variant_list(
+            getattr(args, "dual_checkpoint_rescue_gate_target_variants", "")
+        ),
     )
 
 
@@ -1062,10 +1091,144 @@ def _dual_selector_metadata(args: argparse.Namespace) -> dict[str, object]:
                 "max_rescue_homography_p90_delta_px": config.max_rescue_homography_p90_delta_px,
                 "min_rescue_score_mean": config.min_rescue_score_mean,
                 "require_rescue_score_mean_not_lower": config.require_rescue_score_mean_not_lower,
+                "max_valid_fraction": config.max_valid_fraction,
+                "min_rescue_score_mean_delta": config.min_rescue_score_mean_delta,
+                "rescue_gate_target_variants": list(config.rescue_gate_target_variants),
             },
         }
     )
     return metadata
+
+
+def true_geometry_selector_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "true_geometry_selector_pipeline", False)) or (
+        getattr(args, "post_filter_profile", "") == TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE
+    )
+
+
+def true_geometry_lightglue_metrics_path(args: argparse.Namespace, *, split: str) -> Path:
+    template = str(
+        getattr(
+            args,
+            "true_geometry_lightglue_metrics_template",
+            "{pair_root}/{split}/lightglue/lightglue_sift_metrics.csv",
+        )
+    )
+    return Path(
+        template.format(
+            pair_root=args.pair_root,
+            guard_root=args.guard_root,
+            output_dir=args.output_dir,
+            split=split,
+        )
+    )
+
+
+def _true_geometry_selector_staging_root(args: argparse.Namespace) -> Path:
+    return args.output_dir / "true_geometry_selector_inputs"
+
+
+def _true_geometry_selector_output_root(args: argparse.Namespace) -> Path:
+    return args.output_dir / "true_geometry_selector_pipeline"
+
+
+def _true_geometry_selector_eval_subdir(args: argparse.Namespace) -> str:
+    return str(getattr(args, "true_geometry_selector_eval_subdir", "pfm_true_geometry_eval"))
+
+
+def _first_report_dir_from_sweep(sweep_dir: Path) -> Path:
+    rows = read_csv_rows(sweep_dir / "graph_filter_sweep_summary.csv")
+    if not rows:
+        raise ValueError(f"empty graph filter sweep summary: {sweep_dir / 'graph_filter_sweep_summary.csv'}")
+    report_dir = Path(rows[0].get("report_dir") or "")
+    if not report_dir.is_absolute():
+        report_dir = sweep_dir / report_dir
+    if not (report_dir / "all_filtered_summary.csv").exists():
+        raise FileNotFoundError(f"missing true-geometry selector all_filtered_summary: {report_dir}")
+    if not (report_dir / "all_filtered_match_details.csv").exists():
+        raise FileNotFoundError(f"missing true-geometry selector all_filtered_match_details: {report_dir}")
+    return report_dir
+
+
+def stage_true_geometry_selector_reports(args: argparse.Namespace) -> None:
+    eval_subdir = _true_geometry_selector_eval_subdir(args)
+    for label in (args.baseline_label, args.candidate_label):
+        for split in args.splits:
+            sweep_dir = args.output_dir / "formal" / f"{label}_{split}_geo10_minmatch16"
+            report_dir = _first_report_dir_from_sweep(sweep_dir)
+            staged_dir = _true_geometry_selector_staging_root(args) / label / split / eval_subdir
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("all_filtered_summary.csv", "all_filtered_match_details.csv"):
+                shutil.copy2(report_dir / name, staged_dir / name)
+
+
+def build_true_geometry_selector_pipeline_command(args: argparse.Namespace) -> list[str]:
+    output_root = _true_geometry_selector_output_root(args)
+    command = [
+        str(args.python_executable),
+        str(TRUE_GEOMETRY_SELECTOR_PIPELINE_SCRIPT),
+    ]
+    for split in args.splits:
+        command.extend(
+            [
+                "--source",
+                ",".join(
+                    [
+                        split,
+                        str(args.pair_root / f"overlap_edges_{split}.csv"),
+                        str(true_geometry_lightglue_metrics_path(args, split=split)),
+                    ]
+                ),
+            ]
+        )
+    eval_subdir = _true_geometry_selector_eval_subdir(args)
+    for label in (args.baseline_label, args.candidate_label):
+        command.extend(
+            [
+                "--candidate",
+                ",".join([label, str(_true_geometry_selector_staging_root(args) / label), eval_subdir]),
+            ]
+        )
+    command.extend(
+        [
+            "--output-root",
+            str(output_root),
+            "--validation-output-json",
+            str(output_root / "true_geometry_selector_validation.json"),
+            "--validation-output-html",
+            str(output_root / "true_geometry_selector_validation.html"),
+            "--selection-rank-profile",
+            str(getattr(args, "true_geometry_selector_rank_profile", "inference_safe")),
+        ]
+    )
+    for variant in _split_variant_csv(str(getattr(args, "true_geometry_selector_required_variants", ""))):
+        command.extend(["--required-variant", variant])
+    manifest_validation_json = getattr(args, "true_geometry_manifest_validation_json", None)
+    if manifest_validation_json is not None:
+        command.extend(["--manifest-validation-json", str(manifest_validation_json)])
+    else:
+        command.append("--no-require-base-disjoint")
+    return command
+
+
+def _true_geometry_selector_metadata(args: argparse.Namespace) -> dict[str, object]:
+    enabled = true_geometry_selector_enabled(args)
+    output_root = _true_geometry_selector_output_root(args)
+    return {
+        "enabled": enabled,
+        "post_filter_profile": getattr(args, "post_filter_profile", ""),
+        "selection_rank_profile": getattr(args, "true_geometry_selector_rank_profile", "inference_safe"),
+        "required_variants": _split_variant_csv(str(getattr(args, "true_geometry_selector_required_variants", ""))),
+        "eval_subdir": _true_geometry_selector_eval_subdir(args),
+        "staging_root": str(_true_geometry_selector_staging_root(args)),
+        "output_root": str(output_root),
+        "validation_json": str(output_root / "true_geometry_selector_validation.json"),
+        "lightglue_metrics_template": getattr(
+            args,
+            "true_geometry_lightglue_metrics_template",
+            "{pair_root}/{split}/lightglue/lightglue_sift_metrics.csv",
+        ),
+    }
 
 
 def write_pipeline_metadata(args: argparse.Namespace, commands: list[list[str]]) -> None:
@@ -1084,6 +1247,7 @@ def write_pipeline_metadata(args: argparse.Namespace, commands: list[list[str]])
         },
         "planned_command_count": len(commands),
         "dual_checkpoint_rescue": _dual_selector_metadata(args),
+        "true_geometry_selector": _true_geometry_selector_metadata(args),
     }
     (args.output_dir / "promotion_pipeline_metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
@@ -1160,6 +1324,9 @@ def run_dual_checkpoint_selector(args: argparse.Namespace) -> Path:
             "max_rescue_homography_p90_delta_px": config.max_rescue_homography_p90_delta_px,
             "min_rescue_score_mean": config.min_rescue_score_mean,
             "require_rescue_score_mean_not_lower": config.require_rescue_score_mean_not_lower,
+            "max_valid_fraction": config.max_valid_fraction,
+            "min_rescue_score_mean_delta": config.min_rescue_score_mean_delta,
+            "rescue_gate_target_variants": list(config.rescue_gate_target_variants),
         },
         "sources": [
             {
@@ -1491,6 +1658,8 @@ def planned_commands(args: argparse.Namespace) -> list[list[str]]:
         formal_summary = selector_output_dir / "promotion_formal_summary.csv"
         formal_variant_summary = selector_output_dir / "promotion_formal_variant_summary.csv"
         guard_summary = selector_output_dir / "promotion_guard_summary.csv"
+    if true_geometry_selector_enabled(args):
+        commands.append(build_true_geometry_selector_pipeline_command(args))
     commands.append(
         build_promotion_command(
             promotion_args,
@@ -1517,7 +1686,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
         for command in commands:
             print(" ".join(command))
         return 0
-    for command in commands[:-1]:
+    for command in commands:
+        if len(command) < 2 or Path(command[1]).name != GRAPH_SWEEP_SCRIPT.name:
+            continue
         print(" ".join(command), flush=True)
         _run_sweep_command(command)
     formal_summary, formal_variant_summary = combine_formal_summaries(args.output_dir)
@@ -1539,6 +1710,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
         formal_variant_summary = selector_inputs.formal_variant_summary
         guard_summary = selector_inputs.guard_summary
         promotion_args = _dual_selector_promotion_args(args)
+    if true_geometry_selector_enabled(args) and not has_sweep_failures:
+        stage_true_geometry_selector_reports(args)
+        selector_command = build_true_geometry_selector_pipeline_command(args)
+        print(" ".join(selector_command), flush=True)
+        selector_result = subprocess.run(selector_command, check=False)
+        if selector_result.returncode != 0:
+            return int(selector_result.returncode)
     promotion_command = build_promotion_command(
         promotion_args,
         formal_summary=formal_summary,
@@ -1600,6 +1778,17 @@ def parse_args() -> argparse.Namespace:
         help="Apply a named post-filter/promotion profile before building sweep commands.",
     )
     parser.add_argument("--geometry-threshold-px", type=float, default=10.0)
+    parser.add_argument(
+        "--geometry-filter",
+        choices=["none", "affine", "local", "ransac", "magsac", "true_geometry"],
+        default="local",
+    )
+    parser.add_argument(
+        "--filtered-geometry-filter",
+        choices=["none", "affine", "local", "ransac", "magsac", "true_geometry"],
+        default="magsac",
+    )
+    parser.add_argument("--true-geometry-min-valid-fraction", type=float, default=0.0)
     parser.add_argument("--filtered-min-matches", type=int, default=16)
     parser.add_argument("--filtered-min-matches-by-variant", action="append", default=[])
     parser.add_argument("--baseline-filtered-min-matches-by-variant", action="append", default=[])
@@ -1705,7 +1894,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dual-checkpoint-rescue-max-homography-p90-delta-px", type=float, default=-1.0)
     parser.add_argument("--dual-checkpoint-rescue-min-score-mean", type=float, default=16.0)
     parser.add_argument("--dual-checkpoint-rescue-allow-score-mean-drop", action="store_true")
+    parser.add_argument("--dual-checkpoint-rescue-max-valid-fraction", type=float, default=None)
+    parser.add_argument("--dual-checkpoint-rescue-min-score-mean-delta", type=float, default=None)
+    parser.add_argument("--dual-checkpoint-rescue-gate-target-variants", default="")
     parser.add_argument("--write-match-details", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--true-geometry-selector-pipeline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="After formal sweeps, stage true-geometry reports and run run_true_geometry_selector_pipeline.py.",
+    )
+    parser.add_argument(
+        "--true-geometry-selector-rank-profile",
+        choices=["inference_safe", "diagnostic_wrong_tiebreak"],
+        default="inference_safe",
+    )
+    parser.add_argument("--true-geometry-selector-eval-subdir", default="pfm_true_geometry_eval")
+    parser.add_argument(
+        "--true-geometry-selector-required-variants",
+        default="extreme_01,extreme_02,extreme_03",
+        help=(
+            "Comma-separated target variants that true-geometry selector validation must check. "
+            "Use an empty string to disable variant-level validation."
+        ),
+    )
+    parser.add_argument(
+        "--true-geometry-lightglue-metrics-template",
+        default="{pair_root}/{split}/lightglue/lightglue_sift_metrics.csv",
+        help="Format string for LightGlue metrics; available keys: pair_root, guard_root, output_dir, split.",
+    )
+    parser.add_argument("--true-geometry-manifest-validation-json", type=Path, default=None)
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
     args._explicit_cli_options = _collect_explicit_cli_options(sys.argv[1:])

@@ -79,6 +79,12 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_true_match_margin_loss",
     "graph_matcher_true_match_margin_violations",
     "graph_matcher_true_match_margin_mean",
+    "graph_matcher_true_geometry_match_count_floor_loss",
+    "graph_matcher_true_geometry_match_count_floor_target_count",
+    "graph_matcher_true_geometry_match_count_floor_student_count",
+    "graph_matcher_true_geometry_match_count_floor_count_deficit",
+    "graph_matcher_true_geometry_match_count_floor_topk_score_mean",
+    "graph_matcher_true_geometry_match_count_floor_violations",
     "graph_matcher_final_false_match_loss",
     "graph_matcher_final_false_match_edges",
     "graph_matcher_final_false_match_score_mean",
@@ -98,6 +104,25 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_ransac_consistency_score_mean",
     "graph_matcher_ransac_consistency_residual_mean_px",
     "graph_matcher_ransac_consistency_accept_mean",
+    "graph_matcher_warp_outlier_loss",
+    "graph_matcher_warp_outlier_edges",
+    "graph_matcher_warp_outlier_residual_mean_px",
+    "graph_matcher_warp_outlier_accept_mean",
+    "graph_matcher_warp_outlier_accept_loss",
+    "graph_matcher_warp_outlier_accept_edges",
+    "graph_matcher_warp_outlier_accept_score_mean",
+    "graph_matcher_warp_outlier_accept_residual_mean_px",
+    "graph_matcher_warp_outlier_accept_probability_mean",
+    "graph_matcher_warp_soft_boundary_loss",
+    "graph_matcher_warp_soft_boundary_edges",
+    "graph_matcher_warp_soft_boundary_residual_mean_px",
+    "graph_matcher_warp_soft_boundary_target_mean",
+    "graph_matcher_warp_soft_boundary_score_probability_mean",
+    "graph_matcher_warp_soft_boundary_accept_probability_mean",
+    "graph_matcher_pair_acceptance_loss",
+    "graph_matcher_pair_acceptance_target",
+    "graph_matcher_pair_acceptance_weight",
+    "graph_matcher_pair_acceptance_probability",
     "graph_matcher_deep_supervision_loss",
     "graph_matcher_depth_distillation_loss",
     "graph_matcher_depth_distillation_teacher_layers",
@@ -116,6 +141,11 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_teacher_match_count_floor_student_count",
     "graph_matcher_teacher_match_count_floor_count_deficit",
     "graph_matcher_teacher_match_count_floor_topk_score_mean",
+    "graph_matcher_teacher_match_count_ceiling_loss",
+    "graph_matcher_teacher_match_count_ceiling_teacher_count",
+    "graph_matcher_teacher_match_count_ceiling_student_count",
+    "graph_matcher_teacher_match_count_ceiling_count_excess",
+    "graph_matcher_teacher_match_count_ceiling_excess_score_mean",
     "graph_matcher_executed_attention_layers",
     "graph_matcher_attention_work_fraction",
     "graph_matcher_positive_pairs",
@@ -172,6 +202,7 @@ class PseudoLabelMatches:
 class TrainingSparseMaps:
     descriptors: torch.Tensor
     heatmap: torch.Tensor
+    keypoint_offsets: torch.Tensor
     matchability: torch.Tensor
     descriptor_uncertainty: torch.Tensor
     no_match_prior: torch.Tensor
@@ -934,6 +965,237 @@ def _descriptor_keypoints_for_online_false_mining(
     return keypoints.index_select(0, selected).contiguous(), selected.to(torch.long).contiguous()
 
 
+def _feature_points_in_bounds(points_xy: torch.Tensor, *, feature_height: int, feature_width: int) -> torch.Tensor:
+    if points_xy.numel() == 0:
+        return torch.empty(0, dtype=torch.bool, device=points_xy.device)
+    return (
+        torch.isfinite(points_xy).all(dim=1)
+        & (points_xy[:, 0] >= 0.0)
+        & (points_xy[:, 0] <= float(max(0, feature_width - 1)))
+        & (points_xy[:, 1] >= 0.0)
+        & (points_xy[:, 1] <= float(max(0, feature_height - 1)))
+    )
+
+
+def _warp_feature_points_a_to_b(
+    pair: SyntheticPair,
+    points_a_feature: torch.Tensor,
+    *,
+    feature_height_a: int,
+    feature_width_a: int,
+    feature_height_b: int,
+    feature_width_b: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if points_a_feature.numel() == 0:
+        empty = points_a_feature.new_empty((0, 2))
+        return empty, empty
+    _, image_height_a, image_width_a = pair.view_a.shape
+    _, image_height_b, image_width_b = pair.view_b.shape
+    points_a_image = _scale_feature_to_image_grid(
+        points_a_feature,
+        feature_height=feature_height_a,
+        feature_width=feature_width_a,
+        image_height=image_height_a,
+        image_width=image_width_a,
+    )
+    points_b_image = _sample_warp_points(pair.warp_a_to_b, points_a_image)
+    valid_source = _valid_source_mask(pair.valid_mask, points_a_image).to(points_a_feature.device)
+    valid_target_image = (
+        torch.isfinite(points_b_image).all(dim=1).to(points_a_feature.device)
+        & (points_b_image[:, 0].to(points_a_feature.device) >= 0.0)
+        & (points_b_image[:, 0].to(points_a_feature.device) <= float(max(0, image_width_b - 1)))
+        & (points_b_image[:, 1].to(points_a_feature.device) >= 0.0)
+        & (points_b_image[:, 1].to(points_a_feature.device) <= float(max(0, image_height_b - 1)))
+    )
+    valid = valid_source & valid_target_image
+    if not bool(valid.any()):
+        empty = points_a_feature.new_empty((0, 2))
+        return empty, empty
+    selected_a = points_a_feature.index_select(0, torch.nonzero(valid, as_tuple=False).reshape(-1))
+    selected_b_image = points_b_image.to(points_a_feature.device).index_select(
+        0,
+        torch.nonzero(valid, as_tuple=False).reshape(-1),
+    )
+    selected_b = _scale_points_to_feature_grid(
+        selected_b_image,
+        image_height=image_height_b,
+        image_width=image_width_b,
+        feature_height=feature_height_b,
+        feature_width=feature_width_b,
+    )
+    in_bounds = _feature_points_in_bounds(
+        selected_b,
+        feature_height=feature_height_b,
+        feature_width=feature_width_b,
+    )
+    if not bool(in_bounds.any()):
+        empty = points_a_feature.new_empty((0, 2))
+        return empty, empty
+    keep = torch.nonzero(in_bounds, as_tuple=False).reshape(-1)
+    return selected_a.index_select(0, keep).contiguous(), selected_b.index_select(0, keep).contiguous()
+
+
+def _subcell_feature_grid(
+    *,
+    feature_height: int,
+    feature_width: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    max_candidates: int,
+) -> torch.Tensor:
+    yy, xx = torch.meshgrid(
+        torch.arange(feature_height, device=device, dtype=dtype),
+        torch.arange(feature_width, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    base = torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1)
+    offsets = torch.tensor(
+        [
+            [0.0, 0.0],
+            [-0.25, 0.0],
+            [0.25, 0.0],
+            [0.0, -0.25],
+            [0.0, 0.25],
+            [-0.25, -0.25],
+            [-0.25, 0.25],
+            [0.25, -0.25],
+            [0.25, 0.25],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    candidates = (base[:, None, :] + offsets[None, :, :]).reshape(-1, 2)
+    candidates[:, 0].clamp_(0.0, float(max(0, feature_width - 1)))
+    candidates[:, 1].clamp_(0.0, float(max(0, feature_height - 1)))
+    if max_candidates > 0 and candidates.size(0) > max_candidates:
+        order = torch.linspace(0, candidates.size(0) - 1, steps=max_candidates, device=device)
+        candidates = candidates.index_select(0, order.round().to(torch.long).unique(sorted=True))
+    return candidates.contiguous()
+
+
+def _selected_keypoint_forward_targets(
+    pair: SyntheticPair,
+    sparse_maps_a: TrainingSparseMaps,
+    sparse_maps_b: TrainingSparseMaps,
+    *,
+    max_points: int,
+    min_intensity: float,
+) -> torch.Tensor:
+    keypoints_a, _ = _descriptor_keypoints_for_online_false_mining(
+        pair.view_a,
+        sparse_maps_a.descriptors,
+        max_keypoints=max(1, int(max_points)),
+        min_intensity=min_intensity,
+        keypoint_scores=sparse_maps_a.heatmap,
+    )
+    _, targets_b = _warp_feature_points_a_to_b(
+        pair,
+        keypoints_a,
+        feature_height_a=sparse_maps_a.keypoint_offsets.size(2),
+        feature_width_a=sparse_maps_a.keypoint_offsets.size(3),
+        feature_height_b=sparse_maps_b.keypoint_offsets.size(2),
+        feature_width_b=sparse_maps_b.keypoint_offsets.size(3),
+    )
+    return targets_b
+
+
+def _selected_keypoint_reverse_targets(
+    pair: SyntheticPair,
+    sparse_maps_a: TrainingSparseMaps,
+    sparse_maps_b: TrainingSparseMaps,
+    *,
+    max_points: int,
+    min_intensity: float,
+    inverse_radius_px: float,
+) -> torch.Tensor:
+    keypoints_b, _ = _descriptor_keypoints_for_online_false_mining(
+        pair.view_b,
+        sparse_maps_b.descriptors,
+        max_keypoints=max(1, int(max_points)),
+        min_intensity=min_intensity,
+        keypoint_scores=sparse_maps_b.heatmap,
+    )
+    if keypoints_b.numel() == 0:
+        return sparse_maps_a.keypoint_offsets.new_empty((0, 2))
+    max_candidates = max(4096, max(1, int(max_points)) * 256)
+    candidate_a = _subcell_feature_grid(
+        feature_height=sparse_maps_a.keypoint_offsets.size(2),
+        feature_width=sparse_maps_a.keypoint_offsets.size(3),
+        device=sparse_maps_a.keypoint_offsets.device,
+        dtype=torch.float32,
+        max_candidates=max_candidates,
+    )
+    candidate_a, candidate_b = _warp_feature_points_a_to_b(
+        pair,
+        candidate_a,
+        feature_height_a=sparse_maps_a.keypoint_offsets.size(2),
+        feature_width_a=sparse_maps_a.keypoint_offsets.size(3),
+        feature_height_b=sparse_maps_b.keypoint_offsets.size(2),
+        feature_width_b=sparse_maps_b.keypoint_offsets.size(3),
+    )
+    if candidate_a.numel() == 0 or candidate_b.numel() == 0:
+        return sparse_maps_a.keypoint_offsets.new_empty((0, 2))
+    distances = torch.cdist(keypoints_b.to(candidate_b.device, torch.float32), candidate_b.to(torch.float32))
+    nearest_distance, nearest_index = distances.min(dim=1)
+    keep = nearest_distance <= float(inverse_radius_px)
+    if not bool(keep.any()):
+        return sparse_maps_a.keypoint_offsets.new_empty((0, 2))
+    selected_indices = nearest_index.index_select(0, torch.nonzero(keep, as_tuple=False).reshape(-1))
+    return candidate_a.index_select(0, selected_indices).contiguous()
+
+
+def selected_keypoint_offset_supervision_loss(
+    pair: SyntheticPair,
+    sparse_maps_a: TrainingSparseMaps,
+    sparse_maps_b: TrainingSparseMaps,
+    *,
+    max_points: int,
+    min_intensity: float,
+    inverse_radius_px: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if max_points < 0:
+        raise ValueError("max_points must be nonnegative")
+    if inverse_radius_px < 0.0:
+        raise ValueError("inverse_radius_px must be nonnegative")
+    zero = sparse_maps_a.keypoint_offsets.sum() * 0.0 + sparse_maps_b.keypoint_offsets.sum() * 0.0
+    if max_points == 0:
+        return zero, {
+            "loss": zero.detach(),
+            "points": zero.detach(),
+            "forward_points": zero.detach(),
+            "reverse_points": zero.detach(),
+        }
+    forward_targets_b = _selected_keypoint_forward_targets(
+        pair,
+        sparse_maps_a,
+        sparse_maps_b,
+        max_points=max_points,
+        min_intensity=min_intensity,
+    )
+    reverse_targets_a = _selected_keypoint_reverse_targets(
+        pair,
+        sparse_maps_a,
+        sparse_maps_b,
+        max_points=max_points,
+        min_intensity=min_intensity,
+        inverse_radius_px=inverse_radius_px,
+    )
+    terms: list[torch.Tensor] = []
+    if forward_targets_b.numel() > 0:
+        terms.append(keypoint_offset_supervision_loss(sparse_maps_b.keypoint_offsets, forward_targets_b))
+    if reverse_targets_a.numel() > 0:
+        terms.append(keypoint_offset_supervision_loss(sparse_maps_a.keypoint_offsets, reverse_targets_a))
+    loss = torch.stack(terms).mean() if terms else zero
+    forward_points = sparse_maps_a.keypoint_offsets.new_tensor(float(forward_targets_b.size(0)))
+    reverse_points = sparse_maps_a.keypoint_offsets.new_tensor(float(reverse_targets_a.size(0)))
+    return loss, {
+        "loss": loss.detach(),
+        "points": (forward_points + reverse_points).detach(),
+        "forward_points": forward_points.detach(),
+        "reverse_points": reverse_points.detach(),
+    }
+
+
 def online_false_match_feature_correspondences(
     pair: SyntheticPair,
     descriptors_a: torch.Tensor,
@@ -1522,6 +1784,10 @@ def graph_matcher_correspondence_loss(
     positive_dustbin_margin: float = 0.0,
     true_match_margin_weight: float = 0.0,
     true_match_margin: float = 0.0,
+    true_geometry_match_count_floor_weight: float = 0.0,
+    true_geometry_match_count_floor_target_count: float | None = None,
+    true_geometry_match_count_floor_threshold: float = 0.0,
+    true_geometry_match_count_floor_margin: float = 0.0,
     final_false_match_weight: float = 0.0,
     mined_false_match_weight: float = 0.0,
     mined_false_match_loss_cap: float = 0.0,
@@ -1540,6 +1806,23 @@ def graph_matcher_correspondence_loss(
     ransac_consistency_residual_threshold_px: float = 3.0,
     ransac_consistency_min_score: float = 0.0,
     ransac_consistency_margin: float = 0.25,
+    warp_outlier_weight: float = 0.0,
+    warp_outlier_topk: int = 8,
+    warp_outlier_residual_threshold_px: float = 3.0,
+    warp_outlier_min_score: float = 0.0,
+    warp_outlier_margin: float = 0.25,
+    warp_outlier_accept_weight: float = 0.0,
+    warp_outlier_accept_topk: int = 8,
+    warp_outlier_accept_residual_threshold_px: float = 3.0,
+    warp_outlier_accept_min_score: float = 0.0,
+    warp_soft_boundary_weight: float = 0.0,
+    warp_soft_boundary_topk: int = 8,
+    warp_soft_boundary_lower_residual_px: float = 5.0,
+    warp_soft_boundary_upper_residual_px: float = 8.0,
+    warp_soft_boundary_min_score: float = 0.0,
+    pair_acceptance_target: float | None = None,
+    pair_acceptance_weight: float = 1.0,
+    pair_acceptance_loss_weight: float = 0.0,
     train_candidate_topk: int = 0,
     semi_dense_no_match_points: int = 0,
     semi_dense_min_score: float = 0.0,
@@ -1567,6 +1850,9 @@ def graph_matcher_correspondence_loss(
     teacher_match_count_floor_weight: float = 0.0,
     teacher_match_count_floor_threshold: float = 0.0,
     teacher_match_count_floor_margin: float = 0.0,
+    teacher_match_count_ceiling_weight: float = 0.0,
+    teacher_match_count_ceiling_threshold: float = 0.0,
+    teacher_match_count_ceiling_margin: float = 0.0,
     teacher_distillation_weight: float = 0.0,
     teacher_distillation_temperature: float = 1.0,
     positive_dustbin_guard_reject_threshold: float = 1.1,
@@ -1594,6 +1880,8 @@ def graph_matcher_correspondence_loss(
         true_match_margin_loss: torch.Tensor,
         true_match_margin_violations: torch.Tensor | None,
         true_match_margin_mean: torch.Tensor | None,
+        true_geometry_match_count_floor_loss: torch.Tensor | None,
+        true_geometry_match_count_floor_metrics: dict[str, torch.Tensor] | None,
         final_false_loss: torch.Tensor | None,
         final_false_edges: torch.Tensor | None,
         final_false_score_mean: torch.Tensor | None,
@@ -1628,8 +1916,18 @@ def graph_matcher_correspondence_loss(
         teacher_score_floor_metrics: dict[str, torch.Tensor] | None = None,
         teacher_match_count_floor_loss: torch.Tensor | None = None,
         teacher_match_count_floor_metrics: dict[str, torch.Tensor] | None = None,
+        teacher_match_count_ceiling_loss: torch.Tensor | None = None,
+        teacher_match_count_ceiling_metrics: dict[str, torch.Tensor] | None = None,
         ransac_consistency_loss: torch.Tensor | None = None,
         ransac_consistency_metrics: dict[str, torch.Tensor] | None = None,
+        warp_outlier_loss: torch.Tensor | None = None,
+        warp_outlier_metrics: dict[str, torch.Tensor] | None = None,
+        warp_outlier_accept_loss: torch.Tensor | None = None,
+        warp_outlier_accept_metrics: dict[str, torch.Tensor] | None = None,
+        warp_soft_boundary_loss: torch.Tensor | None = None,
+        warp_soft_boundary_metrics: dict[str, torch.Tensor] | None = None,
+        pair_acceptance_loss: torch.Tensor | None = None,
+        pair_acceptance_metrics: dict[str, float] | None = None,
     ) -> dict[str, torch.Tensor]:
         result = {
             "graph_matcher_total_loss": total_loss,
@@ -1648,6 +1946,36 @@ def graph_matcher_correspondence_loss(
             ),
             "graph_matcher_true_match_margin_mean": (
                 total_loss.new_zeros(()) if true_match_margin_mean is None else true_match_margin_mean
+            ),
+            "graph_matcher_true_geometry_match_count_floor_loss": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_loss is None
+                else true_geometry_match_count_floor_loss
+            ),
+            "graph_matcher_true_geometry_match_count_floor_target_count": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_metrics is None
+                else true_geometry_match_count_floor_metrics["target_count"]
+            ),
+            "graph_matcher_true_geometry_match_count_floor_student_count": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_metrics is None
+                else true_geometry_match_count_floor_metrics["student_count"]
+            ),
+            "graph_matcher_true_geometry_match_count_floor_count_deficit": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_metrics is None
+                else true_geometry_match_count_floor_metrics["count_deficit"]
+            ),
+            "graph_matcher_true_geometry_match_count_floor_topk_score_mean": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_metrics is None
+                else true_geometry_match_count_floor_metrics["topk_score_mean"]
+            ),
+            "graph_matcher_true_geometry_match_count_floor_violations": (
+                total_loss.new_zeros(())
+                if true_geometry_match_count_floor_metrics is None
+                else true_geometry_match_count_floor_metrics["violations"]
             ),
             "graph_matcher_final_false_match_loss": (
                 total_loss.new_zeros(()) if final_false_loss is None else final_false_loss
@@ -1715,6 +2043,87 @@ def graph_matcher_correspondence_loss(
                 total_loss.new_zeros(())
                 if ransac_consistency_metrics is None
                 else ransac_consistency_metrics["accept_mean"]
+            ),
+            "graph_matcher_warp_outlier_loss": (
+                total_loss.new_zeros(()) if warp_outlier_loss is None else warp_outlier_loss
+            ),
+            "graph_matcher_warp_outlier_edges": (
+                total_loss.new_zeros(())
+                if warp_outlier_metrics is None
+                else warp_outlier_metrics["edges"]
+            ),
+            "graph_matcher_warp_outlier_residual_mean_px": (
+                total_loss.new_zeros(())
+                if warp_outlier_metrics is None
+                else warp_outlier_metrics["residual_mean_px"]
+            ),
+            "graph_matcher_warp_outlier_accept_mean": (
+                total_loss.new_zeros(())
+                if warp_outlier_metrics is None
+                else warp_outlier_metrics["accept_mean"]
+            ),
+            "graph_matcher_warp_outlier_accept_loss": (
+                total_loss.new_zeros(()) if warp_outlier_accept_loss is None else warp_outlier_accept_loss
+            ),
+            "graph_matcher_warp_outlier_accept_edges": (
+                total_loss.new_zeros(())
+                if warp_outlier_accept_metrics is None
+                else warp_outlier_accept_metrics["edges"]
+            ),
+            "graph_matcher_warp_outlier_accept_score_mean": (
+                total_loss.new_zeros(())
+                if warp_outlier_accept_metrics is None
+                else warp_outlier_accept_metrics["score_mean"]
+            ),
+            "graph_matcher_warp_outlier_accept_residual_mean_px": (
+                total_loss.new_zeros(())
+                if warp_outlier_accept_metrics is None
+                else warp_outlier_accept_metrics["residual_mean_px"]
+            ),
+            "graph_matcher_warp_outlier_accept_probability_mean": (
+                total_loss.new_zeros(())
+                if warp_outlier_accept_metrics is None
+                else warp_outlier_accept_metrics["probability_mean"]
+            ),
+            "graph_matcher_warp_soft_boundary_loss": (
+                total_loss.new_zeros(()) if warp_soft_boundary_loss is None else warp_soft_boundary_loss
+            ),
+            "graph_matcher_warp_soft_boundary_edges": (
+                total_loss.new_zeros(())
+                if warp_soft_boundary_metrics is None
+                else warp_soft_boundary_metrics["edges"]
+            ),
+            "graph_matcher_warp_soft_boundary_residual_mean_px": (
+                total_loss.new_zeros(())
+                if warp_soft_boundary_metrics is None
+                else warp_soft_boundary_metrics["residual_mean_px"]
+            ),
+            "graph_matcher_warp_soft_boundary_target_mean": (
+                total_loss.new_zeros(())
+                if warp_soft_boundary_metrics is None
+                else warp_soft_boundary_metrics["target_mean"]
+            ),
+            "graph_matcher_warp_soft_boundary_score_probability_mean": (
+                total_loss.new_zeros(())
+                if warp_soft_boundary_metrics is None
+                else warp_soft_boundary_metrics["score_probability_mean"]
+            ),
+            "graph_matcher_warp_soft_boundary_accept_probability_mean": (
+                total_loss.new_zeros(())
+                if warp_soft_boundary_metrics is None
+                else warp_soft_boundary_metrics["accept_probability_mean"]
+            ),
+            "graph_matcher_pair_acceptance_loss": (
+                total_loss.new_zeros(()) if pair_acceptance_loss is None else pair_acceptance_loss
+            ),
+            "graph_matcher_pair_acceptance_target": total_loss.new_tensor(
+                float((pair_acceptance_metrics or {}).get("target", 0.0))
+            ),
+            "graph_matcher_pair_acceptance_weight": total_loss.new_tensor(
+                float((pair_acceptance_metrics or {}).get("weight", 0.0))
+            ),
+            "graph_matcher_pair_acceptance_probability": total_loss.new_tensor(
+                float((pair_acceptance_metrics or {}).get("probability", 0.0))
             ),
             "graph_matcher_deep_supervision_loss": deep_supervision_loss,
             "graph_matcher_depth_distillation_loss": (
@@ -1796,6 +2205,31 @@ def graph_matcher_correspondence_loss(
                 if teacher_match_count_floor_metrics is None
                 else teacher_match_count_floor_metrics["topk_score_mean"]
             ),
+            "graph_matcher_teacher_match_count_ceiling_loss": (
+                total_loss.new_zeros(())
+                if teacher_match_count_ceiling_loss is None
+                else teacher_match_count_ceiling_loss
+            ),
+            "graph_matcher_teacher_match_count_ceiling_teacher_count": (
+                total_loss.new_zeros(())
+                if teacher_match_count_ceiling_metrics is None
+                else teacher_match_count_ceiling_metrics["teacher_count"]
+            ),
+            "graph_matcher_teacher_match_count_ceiling_student_count": (
+                total_loss.new_zeros(())
+                if teacher_match_count_ceiling_metrics is None
+                else teacher_match_count_ceiling_metrics["student_count"]
+            ),
+            "graph_matcher_teacher_match_count_ceiling_count_excess": (
+                total_loss.new_zeros(())
+                if teacher_match_count_ceiling_metrics is None
+                else teacher_match_count_ceiling_metrics["count_excess"]
+            ),
+            "graph_matcher_teacher_match_count_ceiling_excess_score_mean": (
+                total_loss.new_zeros(())
+                if teacher_match_count_ceiling_metrics is None
+                else teacher_match_count_ceiling_metrics["excess_score_mean"]
+            ),
             "graph_matcher_executed_attention_layers": executed_attention_layers,
             "graph_matcher_attention_work_fraction": attention_work_fraction,
             "graph_matcher_positive_pairs": positive_pairs,
@@ -1858,6 +2292,8 @@ def graph_matcher_correspondence_loss(
         raise ValueError("teacher_score_floor_weight must be nonnegative")
     if teacher_match_count_floor_weight < 0.0:
         raise ValueError("teacher_match_count_floor_weight must be nonnegative")
+    if teacher_match_count_ceiling_weight < 0.0:
+        raise ValueError("teacher_match_count_ceiling_weight must be nonnegative")
     if teacher_distillation_weight < 0.0:
         raise ValueError("teacher_distillation_weight must be nonnegative")
     if not math.isfinite(float(teacher_distillation_temperature)) or teacher_distillation_temperature <= 0.0:
@@ -1874,6 +2310,10 @@ def graph_matcher_correspondence_loss(
         raise ValueError("teacher_match_count_floor_threshold must be finite")
     if teacher_match_count_floor_margin < 0.0:
         raise ValueError("teacher_match_count_floor_margin must be nonnegative")
+    if not math.isfinite(float(teacher_match_count_ceiling_threshold)):
+        raise ValueError("teacher_match_count_ceiling_threshold must be finite")
+    if teacher_match_count_ceiling_margin < 0.0:
+        raise ValueError("teacher_match_count_ceiling_margin must be nonnegative")
     if (
         teacher_guard_model is not None
         and teacher_guard_model.config.graph_keypoint_meta_dim != model.config.graph_keypoint_meta_dim
@@ -1887,6 +2327,17 @@ def graph_matcher_correspondence_loss(
         raise ValueError("true_match_margin_weight must be nonnegative")
     if true_match_margin < 0.0:
         raise ValueError("true_match_margin must be nonnegative")
+    if true_geometry_match_count_floor_weight < 0.0:
+        raise ValueError("true_geometry_match_count_floor_weight must be nonnegative")
+    if true_geometry_match_count_floor_target_count is not None and (
+        not math.isfinite(float(true_geometry_match_count_floor_target_count))
+        or true_geometry_match_count_floor_target_count < 0.0
+    ):
+        raise ValueError("true_geometry_match_count_floor_target_count must be finite and nonnegative")
+    if not math.isfinite(float(true_geometry_match_count_floor_threshold)):
+        raise ValueError("true_geometry_match_count_floor_threshold must be finite")
+    if true_geometry_match_count_floor_margin < 0.0:
+        raise ValueError("true_geometry_match_count_floor_margin must be nonnegative")
     if final_false_match_weight < 0.0:
         raise ValueError("final_false_match_weight must be nonnegative")
     if mined_false_match_weight < 0.0:
@@ -1926,6 +2377,46 @@ def graph_matcher_correspondence_loss(
         raise ValueError("ransac_consistency_min_score must be nonnegative")
     if ransac_consistency_margin < 0.0:
         raise ValueError("ransac_consistency_margin must be nonnegative")
+    if warp_outlier_weight < 0.0:
+        raise ValueError("warp_outlier_weight must be nonnegative")
+    if warp_outlier_topk < 0:
+        raise ValueError("warp_outlier_topk must be nonnegative")
+    if warp_outlier_residual_threshold_px < 0.0:
+        raise ValueError("warp_outlier_residual_threshold_px must be nonnegative")
+    if warp_outlier_min_score < 0.0:
+        raise ValueError("warp_outlier_min_score must be nonnegative")
+    if warp_outlier_margin < 0.0:
+        raise ValueError("warp_outlier_margin must be nonnegative")
+    if warp_outlier_accept_weight < 0.0:
+        raise ValueError("warp_outlier_accept_weight must be nonnegative")
+    if warp_outlier_accept_topk < 0:
+        raise ValueError("warp_outlier_accept_topk must be nonnegative")
+    if warp_outlier_accept_residual_threshold_px < 0.0:
+        raise ValueError("warp_outlier_accept_residual_threshold_px must be nonnegative")
+    if warp_outlier_accept_min_score < 0.0:
+        raise ValueError("warp_outlier_accept_min_score must be nonnegative")
+    if warp_soft_boundary_weight < 0.0:
+        raise ValueError("warp_soft_boundary_weight must be nonnegative")
+    if warp_soft_boundary_topk < 0:
+        raise ValueError("warp_soft_boundary_topk must be nonnegative")
+    if (
+        not math.isfinite(float(warp_soft_boundary_lower_residual_px))
+        or warp_soft_boundary_lower_residual_px < 0.0
+    ):
+        raise ValueError("warp_soft_boundary_lower_residual_px must be finite and nonnegative")
+    if (
+        not math.isfinite(float(warp_soft_boundary_upper_residual_px))
+        or warp_soft_boundary_upper_residual_px <= warp_soft_boundary_lower_residual_px
+    ):
+        raise ValueError("warp_soft_boundary_upper_residual_px must be finite and greater than lower")
+    if warp_soft_boundary_min_score < 0.0:
+        raise ValueError("warp_soft_boundary_min_score must be nonnegative")
+    if pair_acceptance_weight <= 0.0 or not math.isfinite(float(pair_acceptance_weight)):
+        raise ValueError("pair_acceptance_weight must be positive and finite")
+    if pair_acceptance_loss_weight < 0.0 or not math.isfinite(float(pair_acceptance_loss_weight)):
+        raise ValueError("pair_acceptance_loss_weight must be nonnegative and finite")
+    if pair_acceptance_target is not None and float(pair_acceptance_target) not in (0.0, 1.0):
+        raise ValueError("pair_acceptance_target must be 0, 1, or None")
     if train_candidate_topk < 0:
         raise ValueError("train_candidate_topk must be nonnegative")
     supervision_depths = [int(depth) for depth in (deep_supervision_depths or [])]
@@ -2206,12 +2697,14 @@ def graph_matcher_correspondence_loss(
         teacher_guard_weight > 0.0
         or teacher_score_floor_weight > 0.0
         or teacher_match_count_floor_weight > 0.0
+        or teacher_match_count_ceiling_weight > 0.0
         or teacher_distillation_weight > 0.0
     ) and resolved_teacher_guard_output is None:
         resolved_teacher_guard_output = run_teacher_guard_matcher(attention_layer_budget)
     teacher_guard_loss = output.logits.new_zeros(())
     teacher_score_floor_loss = output.logits.new_zeros(())
     teacher_match_count_floor_loss = output.logits.new_zeros(())
+    teacher_match_count_ceiling_loss = output.logits.new_zeros(())
     teacher_distillation_loss = output.logits.new_zeros(())
     teacher_guard_metrics = {
         "positive_margin_loss": output.logits.new_zeros(()),
@@ -2229,6 +2722,13 @@ def graph_matcher_correspondence_loss(
         "student_count": output.logits.new_zeros(()),
         "count_deficit": output.logits.new_zeros(()),
         "topk_score_mean": output.logits.new_zeros(()),
+        "violations": output.logits.new_zeros(()),
+    }
+    teacher_match_count_ceiling_metrics = {
+        "teacher_count": output.logits.new_zeros(()),
+        "student_count": output.logits.new_zeros(()),
+        "count_excess": output.logits.new_zeros(()),
+        "excess_score_mean": output.logits.new_zeros(()),
         "violations": output.logits.new_zeros(()),
     }
     dustbin_diagnostics = graph_matcher_dustbin_diagnostics(output, positive_count=count)
@@ -2254,6 +2754,14 @@ def graph_matcher_correspondence_loss(
     true_match_margin_metrics = {
         "violations": output.logits.new_zeros(()),
         "margin_mean": output.logits.new_zeros(()),
+    }
+    true_geometry_match_count_floor_loss = output.logits.new_zeros(())
+    true_geometry_match_count_floor_metrics = {
+        "target_count": output.logits.new_zeros(()),
+        "student_count": output.logits.new_zeros(()),
+        "count_deficit": output.logits.new_zeros(()),
+        "topk_score_mean": output.logits.new_zeros(()),
+        "violations": output.logits.new_zeros(()),
     }
     final_false_loss = output.logits.new_zeros(())
     final_false_metrics = {
@@ -2281,6 +2789,34 @@ def graph_matcher_correspondence_loss(
         "score_mean": output.logits.new_zeros(()),
         "residual_mean_px": output.logits.new_zeros(()),
         "accept_mean": output.logits.new_zeros(()),
+    }
+    warp_outlier_loss = output.logits.new_zeros(())
+    warp_outlier_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "residual_mean_px": output.logits.new_zeros(()),
+        "accept_mean": output.logits.new_zeros(()),
+    }
+    warp_outlier_accept_loss = output.logits.new_zeros(())
+    warp_outlier_accept_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "score_mean": output.logits.new_zeros(()),
+        "residual_mean_px": output.logits.new_zeros(()),
+        "probability_mean": output.logits.new_zeros(()),
+    }
+    warp_soft_boundary_loss = output.logits.new_zeros(())
+    warp_soft_boundary_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "residual_mean_px": output.logits.new_zeros(()),
+        "target_mean": output.logits.new_zeros(()),
+        "score_probability_mean": output.logits.new_zeros(()),
+        "accept_probability_mean": output.logits.new_zeros(()),
+    }
+    pair_acceptance_loss = output.logits.new_zeros(())
+    pair_acceptance_metrics = {
+        "target": 0.0,
+        "weight": 0.0,
+        "probability": 0.0,
+        "raw_loss": 0.0,
     }
     loss = match_ce_loss
     if deep_supervision_weight > 0.0:
@@ -2323,6 +2859,18 @@ def graph_matcher_correspondence_loss(
             margin=teacher_match_count_floor_margin,
         )
         loss = loss + float(teacher_match_count_floor_weight) * teacher_match_count_floor_loss
+    if teacher_match_count_ceiling_weight > 0.0 and resolved_teacher_guard_output is not None:
+        (
+            teacher_match_count_ceiling_loss,
+            teacher_match_count_ceiling_metrics,
+        ) = graph_matcher_teacher_match_count_ceiling_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            score_threshold=teacher_match_count_ceiling_threshold,
+            margin=teacher_match_count_ceiling_margin,
+        )
+        loss = loss + float(teacher_match_count_ceiling_weight) * teacher_match_count_ceiling_loss
     if teacher_distillation_weight > 0.0 and resolved_teacher_guard_output is not None:
         teacher_distillation_loss = graph_matcher_depth_distillation_loss(
             output,
@@ -2422,6 +2970,18 @@ def graph_matcher_correspondence_loss(
             margin=true_match_margin,
         )
         loss = loss + float(true_match_margin_weight) * true_match_margin_loss
+    if true_geometry_match_count_floor_weight > 0.0 and true_geometry_match_count_floor_target_count is not None:
+        (
+            true_geometry_match_count_floor_loss,
+            true_geometry_match_count_floor_metrics,
+        ) = graph_matcher_true_geometry_match_count_floor_loss(
+            output,
+            positive_count=count,
+            target_count=float(true_geometry_match_count_floor_target_count),
+            score_threshold=true_geometry_match_count_floor_threshold,
+            margin=true_geometry_match_count_floor_margin,
+        )
+        loss = loss + float(true_geometry_match_count_floor_weight) * true_geometry_match_count_floor_loss
     if final_false_match_weight > 0.0 and not dustbin_guard_enabled:
         final_false_loss, final_false_metrics = graph_matcher_final_false_match_loss(
             output,
@@ -2479,6 +3039,45 @@ def graph_matcher_correspondence_loss(
             margin=ransac_consistency_margin,
         )
         loss = loss + float(ransac_consistency_weight) * ransac_consistency_loss
+    if warp_outlier_weight > 0.0:
+        warp_outlier_loss, warp_outlier_metrics = graph_matcher_warp_outlier_loss(
+            output,
+            positive_count=count,
+            points_b_xy=positive_points_b_xy,
+            topk=warp_outlier_topk,
+            residual_threshold_px=warp_outlier_residual_threshold_px,
+            min_score=warp_outlier_min_score,
+            margin=warp_outlier_margin,
+        )
+        loss = loss + float(warp_outlier_weight) * warp_outlier_loss
+    if warp_outlier_accept_weight > 0.0:
+        warp_outlier_accept_loss, warp_outlier_accept_metrics = graph_matcher_warp_outlier_accept_loss(
+            output,
+            positive_count=count,
+            points_b_xy=positive_points_b_xy,
+            topk=warp_outlier_accept_topk,
+            residual_threshold_px=warp_outlier_accept_residual_threshold_px,
+            min_score=warp_outlier_accept_min_score,
+        )
+        loss = loss + float(warp_outlier_accept_weight) * warp_outlier_accept_loss
+    if warp_soft_boundary_weight > 0.0:
+        warp_soft_boundary_loss, warp_soft_boundary_metrics = graph_matcher_warp_soft_boundary_loss(
+            output,
+            positive_count=count,
+            points_b_xy=positive_points_b_xy,
+            topk=warp_soft_boundary_topk,
+            lower_residual_px=warp_soft_boundary_lower_residual_px,
+            upper_residual_px=warp_soft_boundary_upper_residual_px,
+            min_score=warp_soft_boundary_min_score,
+        )
+        loss = loss + float(warp_soft_boundary_weight) * warp_soft_boundary_loss
+    if pair_acceptance_loss_weight > 0.0 and pair_acceptance_target is not None:
+        pair_acceptance_loss, pair_acceptance_metrics = graph_matcher_pair_acceptance_loss(
+            output,
+            target=float(pair_acceptance_target),
+            weight=float(pair_acceptance_weight),
+        )
+        loss = loss + float(pair_acceptance_loss_weight) * pair_acceptance_loss
     if return_components:
         executed_attention_layers = output.logits.new_tensor(float(model.graph_matcher.last_executed_attention_layers))
         attention_work_fraction = output.logits.new_tensor(float(getattr(output, "attention_work_fraction", 0.0)))
@@ -2499,6 +3098,8 @@ def graph_matcher_correspondence_loss(
             true_match_margin_loss,
             true_match_margin_metrics["violations"],
             true_match_margin_metrics["margin_mean"],
+            true_geometry_match_count_floor_loss,
+            true_geometry_match_count_floor_metrics,
             final_false_loss,
             final_false_metrics["edges"],
             final_false_metrics["score_mean"],
@@ -2533,8 +3134,18 @@ def graph_matcher_correspondence_loss(
             teacher_score_floor_metrics=teacher_score_floor_metrics,
             teacher_match_count_floor_loss=teacher_match_count_floor_loss,
             teacher_match_count_floor_metrics=teacher_match_count_floor_metrics,
+            teacher_match_count_ceiling_loss=teacher_match_count_ceiling_loss,
+            teacher_match_count_ceiling_metrics=teacher_match_count_ceiling_metrics,
             ransac_consistency_loss=ransac_consistency_loss,
             ransac_consistency_metrics=ransac_consistency_metrics,
+            warp_outlier_loss=warp_outlier_loss,
+            warp_outlier_metrics=warp_outlier_metrics,
+            warp_outlier_accept_loss=warp_outlier_accept_loss,
+            warp_outlier_accept_metrics=warp_outlier_accept_metrics,
+            warp_soft_boundary_loss=warp_soft_boundary_loss,
+            warp_soft_boundary_metrics=warp_soft_boundary_metrics,
+            pair_acceptance_loss=pair_acceptance_loss,
+            pair_acceptance_metrics=pair_acceptance_metrics,
         )
     return loss
 
@@ -2652,6 +3263,61 @@ def graph_matcher_true_match_margin_loss(
         "margin_mean": true_margin.detach().mean(),
     }
     return terms[active].pow(2).mean(), metrics
+
+
+def graph_matcher_true_geometry_match_count_floor_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    target_count: float,
+    score_threshold: float = 0.0,
+    margin: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Require enough true-geometry positive pairs to clear the final acceptance score."""
+
+    if not math.isfinite(float(target_count)) or target_count < 0.0:
+        raise ValueError("target_count must be finite and nonnegative")
+    if not math.isfinite(float(score_threshold)):
+        raise ValueError("score_threshold must be finite")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    logits = output.logits
+    count = min(int(positive_count), logits.size(0) - 1, logits.size(1) - 1)
+    zero = logits.new_zeros(())
+    metrics = {
+        "target_count": zero,
+        "student_count": zero,
+        "count_deficit": zero,
+        "topk_score_mean": zero,
+        "violations": zero,
+    }
+    if count <= 0:
+        return zero, metrics
+
+    required_count = min(count, int(math.ceil(float(target_count))))
+    if required_count <= 0:
+        return zero, metrics
+
+    device = logits.device
+    indices = torch.arange(count, device=device)
+    true_logits = logits[:count, :count][indices, indices]
+    row_dustbin = logits[:count, logits.size(1) - 1]
+    col_dustbin = logits[logits.size(0) - 1, :count]
+    true_scores = true_logits - row_dustbin - col_dustbin
+    required_score = float(score_threshold) + float(margin)
+    student_count_tensor = true_scores.ge(required_score).to(logits.dtype).sum()
+    target_count_tensor = logits.new_tensor(float(required_count))
+    selected_scores = torch.topk(true_scores, k=required_count).values
+    deficit = (required_score - selected_scores).clamp_min(0.0)
+    count_deficit = (target_count_tensor - student_count_tensor).clamp_min(0.0)
+    metrics = {
+        "target_count": target_count_tensor.detach(),
+        "student_count": student_count_tensor.detach(),
+        "count_deficit": count_deficit.detach(),
+        "topk_score_mean": selected_scores.detach().mean(),
+        "violations": deficit.gt(0.0).to(logits.dtype).sum().detach(),
+    }
+    return deficit.pow(2).mean(), metrics
 
 
 def graph_matcher_final_false_match_loss(
@@ -2821,6 +3487,241 @@ def graph_matcher_ransac_consistency_loss(
         "score_mean": selected_scores.detach().mean(),
         "residual_mean_px": residuals[rows, cols].detach().mean(),
         "accept_mean": accept_mean,
+    }
+    return loss, metrics
+
+
+def graph_matcher_warp_outlier_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    points_b_xy: torch.Tensor,
+    topk: int = 8,
+    residual_threshold_px: float = 3.0,
+    min_score: float = 0.0,
+    margin: float = 0.25,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize high-scoring edges whose target is far from the exact warped point."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if residual_threshold_px < 0.0:
+        raise ValueError("residual_threshold_px must be nonnegative")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "residual_mean_px": zero,
+        "accept_mean": zero,
+    }
+    count = min(
+        int(positive_count),
+        logits.size(0) - 1,
+        logits.size(1) - 1,
+        points_b_xy.size(0),
+    )
+    if count <= 1 or topk <= 0:
+        return zero, metrics
+
+    target_points = points_b_xy[:count].to(device=logits.device, dtype=logits.dtype)
+    residuals = torch.cdist(target_points.detach(), target_points.detach(), p=2.0)
+    pair_logits = logits[:count, :count]
+    row_dustbin = logits[:count, logits.size(1) - 1].detach().unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].detach().unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    candidate_mask = ~torch.eye(count, dtype=torch.bool, device=logits.device)
+    candidate_mask &= residuals > float(residual_threshold_px)
+    candidate_mask &= final_scores.detach() >= float(min_score)
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = final_scores[candidate_mask]
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.detach().topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    wrong_scores = final_scores[rows, cols]
+    row_true_scores = final_scores[rows, rows]
+    col_true_scores = final_scores[cols, cols]
+    true_reference_scores = torch.minimum(row_true_scores, col_true_scores)
+    ranking_loss = (float(margin) - (true_reference_scores - wrong_scores)).clamp_min(0.0).pow(2).mean()
+    terms = [ranking_loss]
+    accept_mean = zero
+    if output.accept_logits is not None:
+        accept_logits = output.accept_logits
+        if accept_logits.size(0) >= count and accept_logits.size(1) >= count:
+            selected_accept_logits = accept_logits[rows, cols]
+            terms.append(
+                F.binary_cross_entropy_with_logits(
+                    selected_accept_logits,
+                    torch.zeros_like(selected_accept_logits),
+                )
+            )
+            accept_mean = torch.sigmoid(selected_accept_logits.detach()).mean()
+    loss = torch.stack(terms).mean()
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "residual_mean_px": residuals[rows, cols].detach().mean(),
+        "accept_mean": accept_mean,
+    }
+    return loss, metrics
+
+
+def graph_matcher_warp_outlier_accept_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    points_b_xy: torch.Tensor,
+    topk: int = 8,
+    residual_threshold_px: float = 3.0,
+    min_score: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Train the accept head to reject high-scoring exact-warp outlier edges."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if residual_threshold_px < 0.0:
+        raise ValueError("residual_threshold_px must be nonnegative")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "score_mean": zero,
+        "residual_mean_px": zero,
+        "probability_mean": zero,
+    }
+    accept_logits = output.accept_logits
+    if accept_logits is None:
+        return zero, metrics
+    count = min(
+        int(positive_count),
+        logits.size(0) - 1,
+        logits.size(1) - 1,
+        accept_logits.size(0),
+        accept_logits.size(1),
+        points_b_xy.size(0),
+    )
+    if count <= 1 or topk <= 0:
+        return zero, metrics
+
+    target_points = points_b_xy[:count].to(device=logits.device, dtype=logits.dtype)
+    residuals = torch.cdist(target_points.detach(), target_points.detach(), p=2.0)
+    pair_logits = logits[:count, :count].detach()
+    row_dustbin = logits[:count, logits.size(1) - 1].detach().unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].detach().unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    candidate_mask = ~torch.eye(count, dtype=torch.bool, device=logits.device)
+    candidate_mask &= residuals > float(residual_threshold_px)
+    candidate_mask &= final_scores >= float(min_score)
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = final_scores[candidate_mask]
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    selected_accept_logits = accept_logits[rows, cols]
+    loss = F.binary_cross_entropy_with_logits(
+        selected_accept_logits,
+        torch.zeros_like(selected_accept_logits),
+    )
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "score_mean": candidate_scores.index_select(0, selected_order).mean(),
+        "residual_mean_px": residuals[rows, cols].detach().mean(),
+        "probability_mean": torch.sigmoid(selected_accept_logits.detach()).mean(),
+    }
+    return loss, metrics
+
+
+def graph_matcher_warp_soft_boundary_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    points_b_xy: torch.Tensor,
+    topk: int = 8,
+    lower_residual_px: float = 5.0,
+    upper_residual_px: float = 8.0,
+    min_score: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Apply soft accept targets to near-boundary exact-warp residual edges."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if not math.isfinite(float(lower_residual_px)) or lower_residual_px < 0.0:
+        raise ValueError("lower_residual_px must be finite and nonnegative")
+    if not math.isfinite(float(upper_residual_px)) or upper_residual_px <= lower_residual_px:
+        raise ValueError("upper_residual_px must be finite and greater than lower_residual_px")
+    if min_score < 0.0:
+        raise ValueError("min_score must be nonnegative")
+    logits = output.logits
+    zero = logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "residual_mean_px": zero,
+        "target_mean": zero,
+        "score_probability_mean": zero,
+        "accept_probability_mean": zero,
+    }
+    count = min(
+        int(positive_count),
+        logits.size(0) - 1,
+        logits.size(1) - 1,
+        points_b_xy.size(0),
+    )
+    if count <= 1 or topk <= 0:
+        return zero, metrics
+
+    target_points = points_b_xy[:count].to(device=logits.device, dtype=logits.dtype)
+    residuals = torch.cdist(target_points.detach(), target_points.detach(), p=2.0)
+    pair_logits = logits[:count, :count]
+    row_dustbin = logits[:count, logits.size(1) - 1].detach().unsqueeze(1)
+    col_dustbin = logits[logits.size(0) - 1, :count].detach().unsqueeze(0)
+    final_scores = pair_logits - row_dustbin - col_dustbin
+    candidate_mask = ~torch.eye(count, dtype=torch.bool, device=logits.device)
+    candidate_mask &= residuals > float(lower_residual_px)
+    candidate_mask &= residuals <= float(upper_residual_px)
+    candidate_mask &= final_scores.detach() >= float(min_score)
+    if not bool(candidate_mask.any()):
+        return zero, metrics
+
+    candidate_indices = candidate_mask.nonzero(as_tuple=False)
+    candidate_scores = final_scores[candidate_mask]
+    keep_count = min(int(topk), int(candidate_scores.numel()))
+    selected_order = candidate_scores.detach().topk(keep_count).indices
+    selected = candidate_indices.index_select(0, selected_order)
+    rows = selected[:, 0]
+    cols = selected[:, 1]
+    selected_scores = final_scores[rows, cols]
+    selected_residuals = residuals[rows, cols]
+    span = float(upper_residual_px) - float(lower_residual_px)
+    soft_targets = ((float(upper_residual_px) - selected_residuals) / span).clamp(0.0, 1.0)
+    terms = [F.binary_cross_entropy_with_logits(selected_scores, soft_targets)]
+    accept_probability_mean = zero
+    if output.accept_logits is not None:
+        accept_logits = output.accept_logits
+        if accept_logits.size(0) >= count and accept_logits.size(1) >= count:
+            selected_accept_logits = accept_logits[rows, cols]
+            terms.append(F.binary_cross_entropy_with_logits(selected_accept_logits, soft_targets))
+            accept_probability_mean = torch.sigmoid(selected_accept_logits.detach()).mean()
+    loss = torch.stack(terms).mean()
+    metrics = {
+        "edges": logits.new_tensor(float(keep_count)),
+        "residual_mean_px": selected_residuals.detach().mean(),
+        "target_mean": soft_targets.detach().mean(),
+        "score_probability_mean": torch.sigmoid(selected_scores.detach()).mean(),
+        "accept_probability_mean": accept_probability_mean,
     }
     return loss, metrics
 
@@ -3191,6 +4092,80 @@ def graph_matcher_teacher_match_count_floor_loss(
     return loss, metrics
 
 
+def graph_matcher_teacher_match_count_ceiling_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    score_threshold: float = 0.0,
+    margin: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Prevent the student from accepting more aligned high-confidence pairs than the teacher."""
+
+    if not math.isfinite(float(score_threshold)):
+        raise ValueError("score_threshold must be finite")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    zero = student.logits.new_zeros(())
+    metrics = {
+        "teacher_count": zero,
+        "student_count": zero,
+        "count_excess": zero,
+        "excess_score_mean": zero,
+        "violations": zero,
+    }
+    if count <= 0:
+        return zero, metrics
+
+    device = student.logits.device
+    indices = torch.arange(count, device=device)
+    student_logits = student.logits
+    teacher_logits = teacher.logits.detach().to(device=device, dtype=student_logits.dtype)
+
+    def true_final_scores(logits: torch.Tensor) -> torch.Tensor:
+        true_logits = logits[:count, :count][indices, indices]
+        row_dustbin = logits[:count, logits.size(1) - 1]
+        col_dustbin = logits[logits.size(0) - 1, :count]
+        return true_logits - row_dustbin - col_dustbin
+
+    teacher_scores = true_final_scores(teacher_logits)
+    teacher_count_tensor = teacher_scores.ge(float(score_threshold)).to(student_logits.dtype).sum()
+    teacher_count = int(teacher_count_tensor.detach().cpu().item())
+    student_scores = true_final_scores(student_logits)
+    ceiling_score = float(score_threshold) + float(margin)
+    student_count_tensor = student_scores.ge(ceiling_score).to(student_logits.dtype).sum()
+    count_excess = (student_count_tensor - teacher_count_tensor).clamp_min(0.0)
+    if teacher_count >= student_scores.numel():
+        return zero, {
+            "teacher_count": teacher_count_tensor.detach(),
+            "student_count": student_count_tensor.detach(),
+            "count_excess": count_excess.detach(),
+            "excess_score_mean": zero,
+            "violations": zero,
+        }
+
+    sorted_student = student_scores.sort(descending=True).values
+    excess_scores = sorted_student[teacher_count:]
+    excess = (excess_scores - ceiling_score).clamp_min(0.0)
+    loss = excess.pow(2).mean() if excess.numel() else zero
+    violating_scores = excess_scores[excess.gt(0.0)]
+    metrics = {
+        "teacher_count": teacher_count_tensor.detach(),
+        "student_count": student_count_tensor.detach(),
+        "count_excess": count_excess.detach(),
+        "excess_score_mean": violating_scores.detach().mean() if violating_scores.numel() else zero,
+        "violations": excess.gt(0.0).to(student_logits.dtype).sum().detach(),
+    }
+    return loss, metrics
+
+
 def should_apply_positive_dustbin_guard(
     diagnostics: dict[str, float],
     *,
@@ -3244,6 +4219,30 @@ def graph_matcher_acceptance_loss(
         if no_match_ba.numel() > 0:
             terms.append(F.binary_cross_entropy_with_logits(no_match_ba, torch.zeros_like(no_match_ba)))
     return torch.stack(terms).mean()
+
+
+def graph_matcher_pair_acceptance_loss(
+    output: pfm_model.GraphMatcherOutput,
+    *,
+    target: float,
+    weight: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    if output.pair_accept_logit is None:
+        raise ValueError("pair acceptance loss requires output.pair_accept_logit")
+    if float(target) not in (0.0, 1.0):
+        raise ValueError("target must be 0 or 1")
+    if not math.isfinite(float(weight)) or weight < 0.0:
+        raise ValueError("weight must be finite and nonnegative")
+    target_tensor = output.pair_accept_logit.new_tensor(float(target))
+    loss = F.binary_cross_entropy_with_logits(output.pair_accept_logit, target_tensor)
+    weighted = float(weight) * loss
+    probability = float(torch.sigmoid(output.pair_accept_logit.detach()).cpu())
+    return weighted, {
+        "target": float(target),
+        "weight": float(weight),
+        "probability": probability,
+        "raw_loss": float(loss.detach().cpu()),
+    }
 
 
 def graph_matcher_prune_ranking_loss(
@@ -3615,6 +4614,24 @@ def heatmap_point_loss(
     return positive_loss + float(negative_weight) * heatmap.to(torch.float32).mean()
 
 
+def keypoint_offset_supervision_loss(keypoint_offsets: torch.Tensor, points_xy: torch.Tensor) -> torch.Tensor:
+    if keypoint_offsets.dim() != 4 or keypoint_offsets.size(0) != 1 or keypoint_offsets.size(1) != 2:
+        raise ValueError("keypoint_offsets must have shape 1x2xHxW")
+    if points_xy.dim() != 2 or points_xy.size(1) != 2:
+        raise ValueError("points_xy must have shape Nx2")
+    if points_xy.numel() == 0:
+        return keypoint_offsets.sum() * 0.0
+    height, width = keypoint_offsets.shape[-2:]
+    rounded = points_xy.round().to(device=keypoint_offsets.device, dtype=torch.long)
+    x = rounded[:, 0].clamp(0, width - 1)
+    y = rounded[:, 1].clamp(0, height - 1)
+    centers = torch.stack([x, y], dim=1).to(device=keypoint_offsets.device, dtype=torch.float32)
+    targets = points_xy.to(device=keypoint_offsets.device, dtype=torch.float32) - centers
+    targets = targets.clamp(-0.5, 0.5)
+    predictions = keypoint_offsets[0].permute(1, 2, 0)[y, x].to(torch.float32)
+    return F.smooth_l1_loss(predictions, targets)
+
+
 def _binary_cross_entropy_from_probabilities(probabilities: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     probabilities_f32 = probabilities.to(torch.float32).clamp(1.0e-6, 1.0 - 1.0e-6)
     targets_f32 = targets.to(device=probabilities_f32.device, dtype=torch.float32)
@@ -3900,6 +4917,7 @@ def learned_training_sparse_maps_single(
     return TrainingSparseMaps(
         descriptors=descriptors,
         heatmap=heatmap,
+        keypoint_offsets=sparse.keypoint_offsets,
         matchability=sparse.matchability,
         descriptor_uncertainty=sparse.descriptor_uncertainty,
         no_match_prior=sparse.no_match_prior,
@@ -4039,6 +5057,7 @@ def descriptor_parameters(
     train_descriptor_head: bool = True,
     train_sparse_context: bool = False,
     train_keypoint_head: bool = False,
+    train_keypoint_offset_head: bool = False,
     train_geometry_head: bool = False,
     train_texture_adapter: bool = False,
     train_descriptor_fusion: bool = False,
@@ -4046,17 +5065,24 @@ def descriptor_parameters(
     train_reliability_head: bool = False,
     train_graph_matcher: bool = False,
     train_graph_calibration_only: bool = False,
+    train_pair_accept_head_only: bool = False,
 ) -> list[torch.nn.Parameter]:
     selected: list[torch.nn.Parameter] = []
 
     def graph_matcher_trainable(name: str) -> bool:
         if not name.startswith("graph_matcher."):
             return False
+        if train_pair_accept_head_only:
+            return name.startswith("graph_matcher.pair_accept_head.") or name.startswith(
+                "graph_matcher.pair_accept_context_head."
+            )
         if not train_graph_calibration_only:
             return True
         return (
             name.startswith("graph_matcher.geometry_bias.")
             or name.startswith("graph_matcher.accept_head.")
+            or name.startswith("graph_matcher.pair_accept_head.")
+            or name.startswith("graph_matcher.pair_accept_context_head.")
             or name
             in {
                 "graph_matcher.logit_scale",
@@ -4090,6 +5116,9 @@ def descriptor_parameters(
             )
         )
         trainable = trainable or (
+            train_keypoint_offset_head and name.startswith("sparse_head.keypoint_offsets")
+        )
+        trainable = trainable or (
             train_geometry_head
             and (
                 name.startswith("sparse_head.scale")
@@ -4109,13 +5138,39 @@ def descriptor_parameters(
                 or name.startswith("sparse_head.no_match_prior")
             )
         )
-        trainable = trainable or (train_graph_matcher and graph_matcher_trainable(name))
+        trainable = trainable or ((train_graph_matcher or train_pair_accept_head_only) and graph_matcher_trainable(name))
         if trainable:
             parameter.requires_grad_(True)
             selected.append(parameter)
         else:
             parameter.requires_grad_(False)
     return selected
+
+
+def freeze_non_trainable_batch_norm_statistics(model: torch.nn.Module) -> None:
+    """Keep BatchNorm running statistics fixed for modules whose affine parameters are frozen."""
+
+    batch_norm_types = (
+        torch.nn.BatchNorm1d,
+        torch.nn.BatchNorm2d,
+        torch.nn.BatchNorm3d,
+        torch.nn.SyncBatchNorm,
+    )
+    for module in model.modules():
+        if not isinstance(module, batch_norm_types):
+            continue
+        parameters = list(module.parameters(recurse=False))
+        if not parameters or not any(parameter.requires_grad for parameter in parameters):
+            module.eval()
+
+
+def should_freeze_non_trainable_batch_norm_statistics(args: argparse.Namespace) -> bool:
+    """Return whether head-only training should keep frozen BatchNorm statistics fixed."""
+
+    return bool(
+        getattr(args, "train_keypoint_offset_head_only", False)
+        or getattr(args, "train_pair_accept_head_only", False)
+    )
 
 
 def apply_extractor_freeze_warmup(
@@ -4328,6 +5383,10 @@ def train_step(
     pose_metadata: pose_pair_metadata.PoseMetadataIndex | None = None,
     pose_balanced_sampling: bool = False,
     pose_difficulty_loss_weight: float = 0.0,
+    keypoint_offset_weight: float = 0.0,
+    selected_keypoint_offset_weight: float = 0.0,
+    selected_keypoint_offset_max_points: int = 256,
+    selected_keypoint_offset_inverse_radius_px: float = 1.5,
     graph_matcher_loss_weight: float = 0.0,
     graph_matcher_metadata_mode: str = "calibrated",
     graph_matcher_no_match_points: int = 0,
@@ -4353,6 +5412,9 @@ def train_step(
     graph_matcher_positive_dustbin_margin: float = 0.0,
     graph_matcher_true_match_margin_weight: float = 0.0,
     graph_matcher_true_match_margin: float = 0.25,
+    graph_matcher_true_geometry_match_count_floor_weight: float = 0.0,
+    graph_matcher_true_geometry_match_count_floor_threshold: float = 0.0,
+    graph_matcher_true_geometry_match_count_floor_margin: float = 0.0,
     graph_matcher_final_false_match_weight: float = 0.0,
     graph_matcher_mined_false_match_weight: float = 0.0,
     graph_matcher_mined_false_match_loss_cap: float = 0.0,
@@ -4371,6 +5433,21 @@ def train_step(
     graph_matcher_ransac_consistency_residual_threshold_px: float = 3.0,
     graph_matcher_ransac_consistency_min_score: float = 0.0,
     graph_matcher_ransac_consistency_margin: float = 0.25,
+    graph_matcher_warp_outlier_weight: float = 0.0,
+    graph_matcher_warp_outlier_topk: int = 8,
+    graph_matcher_warp_outlier_residual_threshold_px: float = 3.0,
+    graph_matcher_warp_outlier_min_score: float = 0.0,
+    graph_matcher_warp_outlier_margin: float = 0.25,
+    graph_matcher_warp_outlier_accept_weight: float = 0.0,
+    graph_matcher_warp_outlier_accept_topk: int = 8,
+    graph_matcher_warp_outlier_accept_residual_threshold_px: float = 3.0,
+    graph_matcher_warp_outlier_accept_min_score: float = 0.0,
+    graph_matcher_warp_soft_boundary_weight: float = 0.0,
+    graph_matcher_warp_soft_boundary_topk: int = 8,
+    graph_matcher_warp_soft_boundary_lower_residual_px: float = 5.0,
+    graph_matcher_warp_soft_boundary_upper_residual_px: float = 8.0,
+    graph_matcher_warp_soft_boundary_min_score: float = 0.0,
+    graph_matcher_pair_acceptance_loss_weight: float = 0.0,
     graph_matcher_train_candidate_topk: int = 0,
     graph_matcher_semi_dense_no_match_points: int = 0,
     graph_matcher_semi_dense_min_score: float = 0.0,
@@ -4394,6 +5471,9 @@ def train_step(
     graph_matcher_teacher_match_count_floor_weight: float = 0.0,
     graph_matcher_teacher_match_count_floor_threshold: float = 0.0,
     graph_matcher_teacher_match_count_floor_margin: float = 0.0,
+    graph_matcher_teacher_match_count_ceiling_weight: float = 0.0,
+    graph_matcher_teacher_match_count_ceiling_threshold: float = 0.0,
+    graph_matcher_teacher_match_count_ceiling_margin: float = 0.0,
     graph_matcher_teacher_distillation_weight: float = 0.0,
     graph_matcher_teacher_distillation_temperature: float = 1.0,
     graph_matcher_positive_dustbin_guard_reject_threshold: float = 1.1,
@@ -4418,18 +5498,25 @@ def train_step(
     training_max_image_size: int = 0,
     forced_pair_paths: list[Path] | None = None,
     prefetched_pairs: dict[Path, SyntheticPair] | None = None,
+    pair_acceptance_targets: dict[Path, tuple[float, float]] | None = None,
+    true_geometry_match_count_targets: dict[Path, tuple[float, float]] | None = None,
     pair_cache: PairArchiveCache | None = None,
     training_step: int = 0,
     freeze_extractor_warmup_active: bool = False,
 ) -> dict[str, float]:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
+    if selected_keypoint_offset_max_points < 0:
+        raise ValueError("selected_keypoint_offset_max_points must be nonnegative")
     for name, value in (
         ("matchability_weight", matchability_weight),
         ("descriptor_uncertainty_weight", descriptor_uncertainty_weight),
         ("no_match_prior_weight", no_match_prior_weight),
         ("keypoint_weight", keypoint_weight),
         ("keypoint_negative_weight", keypoint_negative_weight),
+        ("keypoint_offset_weight", keypoint_offset_weight),
+        ("selected_keypoint_offset_weight", selected_keypoint_offset_weight),
+        ("selected_keypoint_offset_inverse_radius_px", selected_keypoint_offset_inverse_radius_px),
         ("rotation_descriptor_consistency_weight", rotation_descriptor_consistency_weight),
         ("orientation_consistency_weight", orientation_consistency_weight),
         ("scale_consistency_weight", scale_consistency_weight),
@@ -4439,14 +5526,23 @@ def train_step(
         ("graph_matcher_depth_distillation_weight", graph_matcher_depth_distillation_weight),
         ("graph_matcher_positive_dustbin_margin_weight", graph_matcher_positive_dustbin_margin_weight),
         ("graph_matcher_true_match_margin_weight", graph_matcher_true_match_margin_weight),
+        (
+            "graph_matcher_true_geometry_match_count_floor_weight",
+            graph_matcher_true_geometry_match_count_floor_weight,
+        ),
         ("graph_matcher_final_false_match_weight", graph_matcher_final_false_match_weight),
         ("graph_matcher_mined_false_match_weight", graph_matcher_mined_false_match_weight),
         ("graph_matcher_mined_false_match_loss_cap", graph_matcher_mined_false_match_loss_cap),
         ("graph_matcher_raw_false_match_weight", graph_matcher_raw_false_match_weight),
         ("graph_matcher_ransac_consistency_weight", graph_matcher_ransac_consistency_weight),
+        ("graph_matcher_warp_outlier_weight", graph_matcher_warp_outlier_weight),
+        ("graph_matcher_warp_outlier_accept_weight", graph_matcher_warp_outlier_accept_weight),
+        ("graph_matcher_warp_soft_boundary_weight", graph_matcher_warp_soft_boundary_weight),
+        ("graph_matcher_pair_acceptance_loss_weight", graph_matcher_pair_acceptance_loss_weight),
         ("graph_matcher_teacher_guard_weight", graph_matcher_teacher_guard_weight),
         ("graph_matcher_teacher_score_floor_weight", graph_matcher_teacher_score_floor_weight),
         ("graph_matcher_teacher_match_count_floor_weight", graph_matcher_teacher_match_count_floor_weight),
+        ("graph_matcher_teacher_match_count_ceiling_weight", graph_matcher_teacher_match_count_ceiling_weight),
         ("graph_matcher_teacher_distillation_weight", graph_matcher_teacher_distillation_weight),
         (
             "graph_matcher_teacher_guard_positive_margin_tolerance",
@@ -4464,6 +5560,10 @@ def train_step(
             "graph_matcher_teacher_match_count_floor_margin",
             graph_matcher_teacher_match_count_floor_margin,
         ),
+        (
+            "graph_matcher_teacher_match_count_ceiling_margin",
+            graph_matcher_teacher_match_count_ceiling_margin,
+        ),
     ):
         if value < 0.0:
             raise ValueError(f"{name} must be nonnegative")
@@ -4471,6 +5571,8 @@ def train_step(
         raise ValueError("graph_matcher_teacher_score_floor_min_score must be finite")
     if not math.isfinite(float(graph_matcher_teacher_match_count_floor_threshold)):
         raise ValueError("graph_matcher_teacher_match_count_floor_threshold must be finite")
+    if not math.isfinite(float(graph_matcher_teacher_match_count_ceiling_threshold)):
+        raise ValueError("graph_matcher_teacher_match_count_ceiling_threshold must be finite")
     if (
         not math.isfinite(float(graph_matcher_mined_false_match_reference_margin))
         or graph_matcher_mined_false_match_reference_margin < -1.0
@@ -4478,6 +5580,10 @@ def train_step(
         raise ValueError("graph_matcher_mined_false_match_reference_margin must be finite and >= -1")
     if graph_matcher_true_match_margin < 0.0:
         raise ValueError("graph_matcher_true_match_margin must be nonnegative")
+    if not math.isfinite(float(graph_matcher_true_geometry_match_count_floor_threshold)):
+        raise ValueError("graph_matcher_true_geometry_match_count_floor_threshold must be finite")
+    if graph_matcher_true_geometry_match_count_floor_margin < 0.0:
+        raise ValueError("graph_matcher_true_geometry_match_count_floor_margin must be nonnegative")
     if graph_matcher_final_false_match_topk < 0:
         raise ValueError("graph_matcher_final_false_match_topk must be nonnegative")
     if graph_matcher_final_false_match_min_score < 0.0:
@@ -4502,6 +5608,37 @@ def train_step(
         raise ValueError("graph_matcher_ransac_consistency_min_score must be nonnegative")
     if graph_matcher_ransac_consistency_margin < 0.0:
         raise ValueError("graph_matcher_ransac_consistency_margin must be nonnegative")
+    if graph_matcher_warp_outlier_topk < 0:
+        raise ValueError("graph_matcher_warp_outlier_topk must be nonnegative")
+    if graph_matcher_warp_outlier_residual_threshold_px < 0.0:
+        raise ValueError("graph_matcher_warp_outlier_residual_threshold_px must be nonnegative")
+    if graph_matcher_warp_outlier_min_score < 0.0:
+        raise ValueError("graph_matcher_warp_outlier_min_score must be nonnegative")
+    if graph_matcher_warp_outlier_margin < 0.0:
+        raise ValueError("graph_matcher_warp_outlier_margin must be nonnegative")
+    if graph_matcher_warp_outlier_accept_topk < 0:
+        raise ValueError("graph_matcher_warp_outlier_accept_topk must be nonnegative")
+    if graph_matcher_warp_outlier_accept_residual_threshold_px < 0.0:
+        raise ValueError("graph_matcher_warp_outlier_accept_residual_threshold_px must be nonnegative")
+    if graph_matcher_warp_outlier_accept_min_score < 0.0:
+        raise ValueError("graph_matcher_warp_outlier_accept_min_score must be nonnegative")
+    if graph_matcher_warp_soft_boundary_topk < 0:
+        raise ValueError("graph_matcher_warp_soft_boundary_topk must be nonnegative")
+    if (
+        not math.isfinite(float(graph_matcher_warp_soft_boundary_lower_residual_px))
+        or graph_matcher_warp_soft_boundary_lower_residual_px < 0.0
+    ):
+        raise ValueError("graph_matcher_warp_soft_boundary_lower_residual_px must be finite and nonnegative")
+    if (
+        not math.isfinite(float(graph_matcher_warp_soft_boundary_upper_residual_px))
+        or graph_matcher_warp_soft_boundary_upper_residual_px
+        <= graph_matcher_warp_soft_boundary_lower_residual_px
+    ):
+        raise ValueError(
+            "graph_matcher_warp_soft_boundary_upper_residual_px must be finite and greater than lower"
+        )
+    if graph_matcher_warp_soft_boundary_min_score < 0.0:
+        raise ValueError("graph_matcher_warp_soft_boundary_min_score must be nonnegative")
     if graph_matcher_depth_distillation_teacher_layers < 0:
         raise ValueError("graph_matcher_depth_distillation_teacher_layers must be nonnegative")
     if (
@@ -4549,6 +5686,14 @@ def train_step(
     keypoint_loss_sum = 0.0
     keypoint_loss_count = 0
     keypoint_points = 0
+    keypoint_offset_loss_sum = 0.0
+    keypoint_offset_loss_count = 0
+    keypoint_offset_points = 0
+    selected_keypoint_offset_loss_sum = 0.0
+    selected_keypoint_offset_loss_count = 0
+    selected_keypoint_offset_points = 0.0
+    selected_keypoint_offset_forward_points = 0.0
+    selected_keypoint_offset_reverse_points = 0.0
     false_match_points = 0
     false_match_pairs = 0
     online_false_match_points = 0
@@ -4598,6 +5743,9 @@ def train_step(
     affine_regularization_enabled = affine_regularization_weight > 0.0
     sparse_maps_required = reliability_loss_enabled or rotation_loss_enabled or affine_regularization_enabled
     keypoint_loss_enabled = keypoint_weight > 0.0
+    keypoint_offset_loss_enabled = keypoint_offset_weight > 0.0
+    selected_keypoint_offset_loss_enabled = selected_keypoint_offset_weight > 0.0
+    sparse_maps_required = sparse_maps_required or keypoint_offset_loss_enabled or selected_keypoint_offset_loss_enabled
     use_amp = bool(amp_enabled)
     use_grad_scaler = use_amp and grad_scaler is not None
     use_activation_checkpointing = bool(activation_checkpointing)
@@ -4624,6 +5772,13 @@ def train_step(
             "rotation_consistency_pairs": float(rotation_consistency_pairs_used),
             "keypoint_loss": keypoint_loss_sum / float(max(1, keypoint_loss_count)),
             "keypoint_points": float(keypoint_points),
+            "keypoint_offset_loss": keypoint_offset_loss_sum / float(max(1, keypoint_offset_loss_count)),
+            "keypoint_offset_points": float(keypoint_offset_points),
+            "selected_keypoint_offset_loss": selected_keypoint_offset_loss_sum
+            / float(max(1, selected_keypoint_offset_loss_count)),
+            "selected_keypoint_offset_points": float(selected_keypoint_offset_points),
+            "selected_keypoint_offset_forward_points": float(selected_keypoint_offset_forward_points),
+            "selected_keypoint_offset_reverse_points": float(selected_keypoint_offset_reverse_points),
             "amp_enabled": 1.0 if use_amp else 0.0,
             "amp_scale": grad_scaler_scale(grad_scaler) if use_grad_scaler else 0.0,
             "activation_checkpointing": 1.0 if use_activation_checkpointing else 0.0,
@@ -4652,6 +5807,12 @@ def train_step(
             losses = []
             for pair_path in selected:
                 pair_key = pair_path.resolve(strict=False)
+                pair_acceptance = None if pair_acceptance_targets is None else pair_acceptance_targets.get(pair_key)
+                true_geometry_match_count = (
+                    None
+                    if true_geometry_match_count_targets is None
+                    else true_geometry_match_count_targets.get(pair_key)
+                )
                 if prefetched_pairs is not None and pair_key in prefetched_pairs:
                     pair = move_pair_to_device(prefetched_pairs[pair_key], device=device)
                 else:
@@ -4774,6 +5935,8 @@ def train_step(
                     or reliability_loss_enabled
                     or rotation_loss_enabled
                     or keypoint_loss_enabled
+                    or keypoint_offset_loss_enabled
+                    or selected_keypoint_offset_loss_enabled
                 ):
                     pose_multiplier = pose_difficulty_loss_multiplier(
                         pose_metadata,
@@ -4910,8 +6073,48 @@ def train_step(
                         keypoint_loss_sum += float(keypoint_loss.detach().cpu())
                         keypoint_loss_count += 1
                         keypoint_points += int(points_a.size(0) + points_b.size(0))
+                    if keypoint_offset_loss_enabled and sparse_maps_a is not None and sparse_maps_b is not None:
+                        keypoint_offset_loss = 0.5 * (
+                            keypoint_offset_supervision_loss(sparse_maps_a.keypoint_offsets, points_a)
+                            + keypoint_offset_supervision_loss(sparse_maps_b.keypoint_offsets, points_b)
+                        )
+                        pair_losses.append(float(keypoint_offset_weight) * keypoint_offset_loss)
+                        keypoint_offset_loss_sum += float(keypoint_offset_loss.detach().cpu())
+                        keypoint_offset_loss_count += 1
+                        keypoint_offset_points += int(points_a.size(0) + points_b.size(0))
+                    if (
+                        selected_keypoint_offset_loss_enabled
+                        and sparse_maps_a is not None
+                        and sparse_maps_b is not None
+                    ):
+                        selected_offset_loss, selected_offset_metrics = selected_keypoint_offset_supervision_loss(
+                            pair,
+                            sparse_maps_a,
+                            sparse_maps_b,
+                            max_points=selected_keypoint_offset_max_points,
+                            min_intensity=min_intensity,
+                            inverse_radius_px=selected_keypoint_offset_inverse_radius_px,
+                        )
+                        pair_losses.append(float(selected_keypoint_offset_weight) * selected_offset_loss)
+                        selected_keypoint_offset_loss_sum += float(selected_offset_loss.detach().cpu())
+                        selected_keypoint_offset_loss_count += 1
+                        selected_keypoint_offset_points += float(selected_offset_metrics["points"].detach().cpu())
+                        selected_keypoint_offset_forward_points += float(
+                            selected_offset_metrics["forward_points"].detach().cpu()
+                        )
+                        selected_keypoint_offset_reverse_points += float(
+                            selected_offset_metrics["reverse_points"].detach().cpu()
+                        )
                     if graph_matcher_loss_weight > 0.0:
                         graph_online_false_enabled = graph_online_false_can_train and online_false_a.size(0) > 0
+                        true_geometry_floor_target_count = None
+                        true_geometry_floor_weight = 0.0
+                        if true_geometry_match_count is not None:
+                            true_geometry_floor_target_count, true_geometry_floor_pair_weight = true_geometry_match_count
+                            true_geometry_floor_weight = (
+                                float(graph_matcher_true_geometry_match_count_floor_weight)
+                                * float(true_geometry_floor_pair_weight)
+                            )
                         with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
                             graph_loss, graph_components = graph_matcher_correspondence_loss(
                                 model,
@@ -4943,6 +6146,14 @@ def train_step(
                                 positive_dustbin_margin=graph_matcher_positive_dustbin_margin,
                                 true_match_margin_weight=graph_matcher_true_match_margin_weight,
                                 true_match_margin=graph_matcher_true_match_margin,
+                                true_geometry_match_count_floor_weight=true_geometry_floor_weight,
+                                true_geometry_match_count_floor_target_count=true_geometry_floor_target_count,
+                                true_geometry_match_count_floor_threshold=(
+                                    graph_matcher_true_geometry_match_count_floor_threshold
+                                ),
+                                true_geometry_match_count_floor_margin=(
+                                    graph_matcher_true_geometry_match_count_floor_margin
+                                ),
                                 final_false_match_weight=graph_matcher_final_false_match_weight,
                                 mined_false_match_weight=graph_matcher_mined_false_match_weight,
                                 mined_false_match_loss_cap=graph_matcher_mined_false_match_loss_cap,
@@ -4967,6 +6178,31 @@ def train_step(
                                 ),
                                 ransac_consistency_min_score=graph_matcher_ransac_consistency_min_score,
                                 ransac_consistency_margin=graph_matcher_ransac_consistency_margin,
+                                warp_outlier_weight=graph_matcher_warp_outlier_weight,
+                                warp_outlier_topk=graph_matcher_warp_outlier_topk,
+                                warp_outlier_residual_threshold_px=(
+                                    graph_matcher_warp_outlier_residual_threshold_px
+                                ),
+                                warp_outlier_min_score=graph_matcher_warp_outlier_min_score,
+                                warp_outlier_margin=graph_matcher_warp_outlier_margin,
+                                warp_outlier_accept_weight=graph_matcher_warp_outlier_accept_weight,
+                                warp_outlier_accept_topk=graph_matcher_warp_outlier_accept_topk,
+                                warp_outlier_accept_residual_threshold_px=(
+                                    graph_matcher_warp_outlier_accept_residual_threshold_px
+                                ),
+                                warp_outlier_accept_min_score=graph_matcher_warp_outlier_accept_min_score,
+                                warp_soft_boundary_weight=graph_matcher_warp_soft_boundary_weight,
+                                warp_soft_boundary_topk=graph_matcher_warp_soft_boundary_topk,
+                                warp_soft_boundary_lower_residual_px=(
+                                    graph_matcher_warp_soft_boundary_lower_residual_px
+                                ),
+                                warp_soft_boundary_upper_residual_px=(
+                                    graph_matcher_warp_soft_boundary_upper_residual_px
+                                ),
+                                warp_soft_boundary_min_score=graph_matcher_warp_soft_boundary_min_score,
+                                pair_acceptance_target=None if pair_acceptance is None else pair_acceptance[0],
+                                pair_acceptance_weight=1.0 if pair_acceptance is None else pair_acceptance[1],
+                                pair_acceptance_loss_weight=graph_matcher_pair_acceptance_loss_weight,
                                 train_candidate_topk=graph_matcher_train_candidate_topk,
                                 semi_dense_no_match_points=graph_matcher_semi_dense_no_match_points,
                                 semi_dense_min_score=graph_matcher_semi_dense_min_score,
@@ -5003,6 +6239,15 @@ def train_step(
                                     graph_matcher_teacher_match_count_floor_threshold
                                 ),
                                 teacher_match_count_floor_margin=graph_matcher_teacher_match_count_floor_margin,
+                                teacher_match_count_ceiling_weight=(
+                                    graph_matcher_teacher_match_count_ceiling_weight
+                                ),
+                                teacher_match_count_ceiling_threshold=(
+                                    graph_matcher_teacher_match_count_ceiling_threshold
+                                ),
+                                teacher_match_count_ceiling_margin=(
+                                    graph_matcher_teacher_match_count_ceiling_margin
+                                ),
                                 teacher_distillation_weight=graph_matcher_teacher_distillation_weight,
                                 teacher_distillation_temperature=(
                                     graph_matcher_teacher_distillation_temperature
@@ -6093,6 +7338,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pseudo-label-curriculum-warmup-steps", type=int, default=100)
     parser.add_argument("--keypoint-weight", type=float, default=0.0)
     parser.add_argument("--keypoint-negative-weight", type=float, default=0.01)
+    parser.add_argument("--keypoint-offset-weight", type=float, default=0.0)
+    parser.add_argument("--selected-keypoint-offset-weight", type=float, default=0.0)
+    parser.add_argument("--selected-keypoint-offset-max-points", type=int, default=256)
+    parser.add_argument("--selected-keypoint-offset-inverse-radius-px", type=float, default=1.5)
+    parser.add_argument("--train-keypoint-offset-head-only", action="store_true")
     parser.add_argument("--false-match-csv", action="append", type=Path, default=[])
     parser.add_argument("--false-match-weight", type=float, default=0.0)
     parser.add_argument("--false-match-max-points", type=int, default=128)
@@ -6110,6 +7360,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-reliability-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
     parser.add_argument("--train-graph-calibration-only", action="store_true")
+    parser.add_argument("--train-pair-accept-head-only", action="store_true")
     parser.add_argument("--descriptor-geometry-mode", choices=pfm_model.DESCRIPTOR_GEOMETRY_MODES, default="full")
     parser.add_argument("--descriptor-geometry-blend-weight", type=float, default=1.0)
     parser.add_argument("--descriptor-scale-log-clamp-min", type=float, default=-2.0)
@@ -6181,6 +7432,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-positive-dustbin-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-true-match-margin-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-true-match-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-final-false-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-mined-false-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-mined-false-match-loss-cap", type=float, default=0.0)
@@ -6199,6 +7453,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-ransac-consistency-residual-threshold-px", type=float, default=3.0)
     parser.add_argument("--graph-matcher-ransac-consistency-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-ransac-consistency-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-warp-outlier-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-outlier-residual-threshold-px", type=float, default=3.0)
+    parser.add_argument("--graph-matcher-warp-outlier-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-residual-threshold-px", type=float, default=3.0)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-lower-residual-px", type=float, default=5.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-upper-residual-px", type=float, default=8.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-pair-acceptance-loss-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-depth-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-depth-distillation-teacher-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-depth-distillation-temperature", type=float, default=1.0)
@@ -6212,6 +7481,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-temperature", type=float, default=1.0)
     parser.add_argument("--graph-matcher-positive-dustbin-guard-reject-threshold", type=float, default=1.1)
@@ -6311,6 +7583,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--keypoint-weight must be nonnegative")
     if args.keypoint_negative_weight < 0.0:
         parser.error("--keypoint-negative-weight must be nonnegative")
+    if args.keypoint_offset_weight < 0.0:
+        parser.error("--keypoint-offset-weight must be nonnegative")
+    if args.selected_keypoint_offset_weight < 0.0:
+        parser.error("--selected-keypoint-offset-weight must be nonnegative")
+    if args.selected_keypoint_offset_max_points < 0:
+        parser.error("--selected-keypoint-offset-max-points must be nonnegative")
+    if args.selected_keypoint_offset_inverse_radius_px < 0.0:
+        parser.error("--selected-keypoint-offset-inverse-radius-px must be nonnegative")
+    if args.train_keypoint_offset_head_only and (
+        args.pseudo_keypoint_weight > 0.0 or args.keypoint_weight > 0.0
+    ):
+        parser.error("--train-keypoint-offset-head-only conflicts with keypoint heatmap supervision")
     if args.pseudo_label_max_points < 0:
         parser.error("--pseudo-label-max-points must be nonnegative")
     if args.pseudo_label_curriculum_max_probability < 0.0:
@@ -6405,6 +7689,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-true-match-margin-weight must be nonnegative")
     if args.graph_matcher_true_match_margin < 0.0:
         parser.error("--graph-matcher-true-match-margin must be nonnegative")
+    if args.graph_matcher_true_geometry_match_count_floor_weight < 0.0:
+        parser.error("--graph-matcher-true-geometry-match-count-floor-weight must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_true_geometry_match_count_floor_threshold)):
+        parser.error("--graph-matcher-true-geometry-match-count-floor-threshold must be finite")
+    if args.graph_matcher_true_geometry_match_count_floor_margin < 0.0:
+        parser.error("--graph-matcher-true-geometry-match-count-floor-margin must be nonnegative")
     if args.graph_matcher_final_false_match_weight < 0.0:
         parser.error("--graph-matcher-final-false-match-weight must be nonnegative")
     if args.graph_matcher_mined_false_match_weight < 0.0:
@@ -6444,6 +7734,45 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-ransac-consistency-min-score must be nonnegative")
     if args.graph_matcher_ransac_consistency_margin < 0.0:
         parser.error("--graph-matcher-ransac-consistency-margin must be nonnegative")
+    if args.graph_matcher_warp_outlier_weight < 0.0:
+        parser.error("--graph-matcher-warp-outlier-weight must be nonnegative")
+    if args.graph_matcher_warp_outlier_topk < 0:
+        parser.error("--graph-matcher-warp-outlier-topk must be nonnegative")
+    if args.graph_matcher_warp_outlier_residual_threshold_px < 0.0:
+        parser.error("--graph-matcher-warp-outlier-residual-threshold-px must be nonnegative")
+    if args.graph_matcher_warp_outlier_min_score < 0.0:
+        parser.error("--graph-matcher-warp-outlier-min-score must be nonnegative")
+    if args.graph_matcher_warp_outlier_margin < 0.0:
+        parser.error("--graph-matcher-warp-outlier-margin must be nonnegative")
+    if args.graph_matcher_warp_outlier_accept_weight < 0.0:
+        parser.error("--graph-matcher-warp-outlier-accept-weight must be nonnegative")
+    if args.graph_matcher_warp_outlier_accept_topk < 0:
+        parser.error("--graph-matcher-warp-outlier-accept-topk must be nonnegative")
+    if args.graph_matcher_warp_outlier_accept_residual_threshold_px < 0.0:
+        parser.error("--graph-matcher-warp-outlier-accept-residual-threshold-px must be nonnegative")
+    if args.graph_matcher_warp_outlier_accept_min_score < 0.0:
+        parser.error("--graph-matcher-warp-outlier-accept-min-score must be nonnegative")
+    if args.graph_matcher_warp_soft_boundary_weight < 0.0:
+        parser.error("--graph-matcher-warp-soft-boundary-weight must be nonnegative")
+    if args.graph_matcher_warp_soft_boundary_topk < 0:
+        parser.error("--graph-matcher-warp-soft-boundary-topk must be nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_warp_soft_boundary_lower_residual_px))
+        or args.graph_matcher_warp_soft_boundary_lower_residual_px < 0.0
+    ):
+        parser.error("--graph-matcher-warp-soft-boundary-lower-residual-px must be finite and nonnegative")
+    if (
+        not math.isfinite(float(args.graph_matcher_warp_soft_boundary_upper_residual_px))
+        or args.graph_matcher_warp_soft_boundary_upper_residual_px
+        <= args.graph_matcher_warp_soft_boundary_lower_residual_px
+    ):
+        parser.error(
+            "--graph-matcher-warp-soft-boundary-upper-residual-px must be finite and greater than lower"
+        )
+    if args.graph_matcher_warp_soft_boundary_min_score < 0.0:
+        parser.error("--graph-matcher-warp-soft-boundary-min-score must be nonnegative")
+    if args.graph_matcher_pair_acceptance_loss_weight < 0.0:
+        parser.error("--graph-matcher-pair-acceptance-loss-weight must be nonnegative")
     if args.graph_matcher_depth_distillation_weight < 0.0:
         parser.error("--graph-matcher-depth-distillation-weight must be nonnegative")
     if args.graph_matcher_depth_distillation_teacher_layers < 0:
@@ -6471,6 +7800,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-match-count-floor-threshold must be finite")
     if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
         parser.error("--graph-matcher-teacher-match-count-floor-margin must be nonnegative")
+    if args.graph_matcher_teacher_match_count_ceiling_weight < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-ceiling-weight must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_ceiling_threshold)):
+        parser.error("--graph-matcher-teacher-match-count-ceiling-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_ceiling_margin < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-ceiling-margin must be nonnegative")
     if args.graph_matcher_teacher_distillation_weight < 0.0:
         parser.error("--graph-matcher-teacher-distillation-weight must be nonnegative")
     if (
@@ -6482,10 +7817,11 @@ def parse_args() -> argparse.Namespace:
         args.graph_matcher_teacher_guard_weight > 0.0
         or args.graph_matcher_teacher_score_floor_weight > 0.0
         or args.graph_matcher_teacher_match_count_floor_weight > 0.0
+        or args.graph_matcher_teacher_match_count_ceiling_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, match-count ceiling, or distillation weight is positive"
         )
     if not math.isfinite(float(args.graph_matcher_positive_dustbin_guard_reject_threshold)):
         parser.error("--graph-matcher-positive-dustbin-guard-reject-threshold must be finite")
@@ -6725,6 +8061,22 @@ def save_pytorch_training_state(
             "amp_dtype": str(args.amp_dtype),
             "activation_checkpointing": bool(args.activation_checkpointing),
             "descriptor_geometry_safety_schedule": str(args.descriptor_geometry_safety_schedule),
+            "keypoint_offset_weight": float(getattr(args, "keypoint_offset_weight", 0.0)),
+            "selected_keypoint_offset_weight": float(getattr(args, "selected_keypoint_offset_weight", 0.0)),
+            "selected_keypoint_offset_max_points": int(getattr(args, "selected_keypoint_offset_max_points", 0)),
+            "selected_keypoint_offset_inverse_radius_px": float(
+                getattr(args, "selected_keypoint_offset_inverse_radius_px", 0.0)
+            ),
+            "train_keypoint_offset_head_only": bool(getattr(args, "train_keypoint_offset_head_only", False)),
+            "graph_matcher_true_geometry_match_count_floor_weight": float(
+                getattr(args, "graph_matcher_true_geometry_match_count_floor_weight", 0.0)
+            ),
+            "graph_matcher_true_geometry_match_count_floor_threshold": float(
+                getattr(args, "graph_matcher_true_geometry_match_count_floor_threshold", 0.0)
+            ),
+            "graph_matcher_true_geometry_match_count_floor_margin": float(
+                getattr(args, "graph_matcher_true_geometry_match_count_floor_margin", 0.0)
+            ),
             "graph_matcher_teacher_guard_state": (
                 str(args.graph_matcher_teacher_guard_state)
                 if getattr(args, "graph_matcher_teacher_guard_state", None) is not None
@@ -6751,11 +8103,65 @@ def save_pytorch_training_state(
             "graph_matcher_teacher_match_count_floor_margin": float(
                 getattr(args, "graph_matcher_teacher_match_count_floor_margin", 0.0)
             ),
+            "graph_matcher_teacher_match_count_ceiling_weight": float(
+                getattr(args, "graph_matcher_teacher_match_count_ceiling_weight", 0.0)
+            ),
+            "graph_matcher_teacher_match_count_ceiling_threshold": float(
+                getattr(args, "graph_matcher_teacher_match_count_ceiling_threshold", 0.0)
+            ),
+            "graph_matcher_teacher_match_count_ceiling_margin": float(
+                getattr(args, "graph_matcher_teacher_match_count_ceiling_margin", 0.0)
+            ),
             "graph_matcher_teacher_distillation_weight": float(
                 getattr(args, "graph_matcher_teacher_distillation_weight", 0.0)
             ),
             "graph_matcher_teacher_distillation_temperature": float(
                 getattr(args, "graph_matcher_teacher_distillation_temperature", 1.0)
+            ),
+            "graph_matcher_warp_outlier_weight": float(
+                getattr(args, "graph_matcher_warp_outlier_weight", 0.0)
+            ),
+            "graph_matcher_warp_outlier_topk": int(
+                getattr(args, "graph_matcher_warp_outlier_topk", 0)
+            ),
+            "graph_matcher_warp_outlier_residual_threshold_px": float(
+                getattr(args, "graph_matcher_warp_outlier_residual_threshold_px", 0.0)
+            ),
+            "graph_matcher_warp_outlier_min_score": float(
+                getattr(args, "graph_matcher_warp_outlier_min_score", 0.0)
+            ),
+            "graph_matcher_warp_outlier_margin": float(
+                getattr(args, "graph_matcher_warp_outlier_margin", 0.0)
+            ),
+            "graph_matcher_warp_outlier_accept_weight": float(
+                getattr(args, "graph_matcher_warp_outlier_accept_weight", 0.0)
+            ),
+            "graph_matcher_warp_outlier_accept_topk": int(
+                getattr(args, "graph_matcher_warp_outlier_accept_topk", 0)
+            ),
+            "graph_matcher_warp_outlier_accept_residual_threshold_px": float(
+                getattr(args, "graph_matcher_warp_outlier_accept_residual_threshold_px", 0.0)
+            ),
+            "graph_matcher_warp_outlier_accept_min_score": float(
+                getattr(args, "graph_matcher_warp_outlier_accept_min_score", 0.0)
+            ),
+            "graph_matcher_warp_soft_boundary_weight": float(
+                getattr(args, "graph_matcher_warp_soft_boundary_weight", 0.0)
+            ),
+            "graph_matcher_warp_soft_boundary_topk": int(
+                getattr(args, "graph_matcher_warp_soft_boundary_topk", 0)
+            ),
+            "graph_matcher_warp_soft_boundary_lower_residual_px": float(
+                getattr(args, "graph_matcher_warp_soft_boundary_lower_residual_px", 0.0)
+            ),
+            "graph_matcher_warp_soft_boundary_upper_residual_px": float(
+                getattr(args, "graph_matcher_warp_soft_boundary_upper_residual_px", 0.0)
+            ),
+            "graph_matcher_warp_soft_boundary_min_score": float(
+                getattr(args, "graph_matcher_warp_soft_boundary_min_score", 0.0)
+            ),
+            "graph_matcher_pair_acceptance_loss_weight": float(
+                getattr(args, "graph_matcher_pair_acceptance_loss_weight", 0.0)
             ),
         },
         path,
@@ -6800,7 +8206,10 @@ def main() -> int:
             f"score_floor_min_score={args.graph_matcher_teacher_score_floor_min_score:.3f} "
             f"match_count_floor_weight={args.graph_matcher_teacher_match_count_floor_weight:.3f} "
             f"match_count_floor_threshold={args.graph_matcher_teacher_match_count_floor_threshold:.3f} "
-            f"match_count_floor_margin={args.graph_matcher_teacher_match_count_floor_margin:.3f}",
+            f"match_count_floor_margin={args.graph_matcher_teacher_match_count_floor_margin:.3f} "
+            f"match_count_ceiling_weight={args.graph_matcher_teacher_match_count_ceiling_weight:.3f} "
+            f"match_count_ceiling_threshold={args.graph_matcher_teacher_match_count_ceiling_threshold:.3f} "
+            f"match_count_ceiling_margin={args.graph_matcher_teacher_match_count_ceiling_margin:.3f}",
             flush=True,
         )
     trainable = descriptor_parameters(
@@ -6809,7 +8218,13 @@ def main() -> int:
         train_dual_fpn=args.train_dual_fpn,
         train_descriptor_head=not args.freeze_descriptor_head,
         train_sparse_context=args.train_sparse_context,
-        train_keypoint_head=args.pseudo_keypoint_weight > 0.0 or args.keypoint_weight > 0.0,
+        train_keypoint_head=(
+            args.pseudo_keypoint_weight > 0.0
+            or args.keypoint_weight > 0.0
+            or (args.keypoint_offset_weight > 0.0 and not args.train_keypoint_offset_head_only)
+            or (args.selected_keypoint_offset_weight > 0.0 and not args.train_keypoint_offset_head_only)
+        ),
+        train_keypoint_offset_head=args.train_keypoint_offset_head_only,
         train_geometry_head=(
             args.train_geometry_head
             or args.orientation_consistency_weight > 0.0
@@ -6828,11 +8243,14 @@ def main() -> int:
         ),
         train_graph_matcher=args.train_graph_matcher,
         train_graph_calibration_only=args.train_graph_calibration_only,
+        train_pair_accept_head_only=args.train_pair_accept_head_only,
     )
     if not trainable:
         raise RuntimeError("no trainable parameters selected")
     if not trainable:
         raise RuntimeError("no descriptor parameters selected")
+    if should_freeze_non_trainable_batch_norm_statistics(args):
+        freeze_non_trainable_batch_norm_statistics(model)
     original_requires_grad = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=1.0e-4)
     pair_paths, eval_paths = resolve_training_and_eval_pair_paths(
@@ -7003,6 +8421,14 @@ def main() -> int:
                 "keypoint_weight",
                 "keypoint_loss",
                 "keypoint_points",
+                "keypoint_offset_weight",
+                "keypoint_offset_loss",
+                "keypoint_offset_points",
+                "selected_keypoint_offset_weight",
+                "selected_keypoint_offset_loss",
+                "selected_keypoint_offset_points",
+                "selected_keypoint_offset_forward_points",
+                "selected_keypoint_offset_reverse_points",
                 "hard_negative_weight",
                 "diversity_weight",
                 "abstention_weight",
@@ -7030,6 +8456,9 @@ def main() -> int:
                 "graph_matcher_teacher_match_count_floor_weight",
                 "graph_matcher_teacher_match_count_floor_threshold",
                 "graph_matcher_teacher_match_count_floor_margin",
+                "graph_matcher_teacher_match_count_ceiling_weight",
+                "graph_matcher_teacher_match_count_ceiling_threshold",
+                "graph_matcher_teacher_match_count_ceiling_margin",
                 "graph_matcher_teacher_distillation_weight",
                 "graph_matcher_teacher_distillation_temperature",
                 "graph_matcher_positive_dustbin_guard_reject_threshold",
@@ -7052,6 +8481,9 @@ def main() -> int:
                 "graph_matcher_positive_dustbin_margin",
                 "graph_matcher_true_match_margin_weight",
                 "graph_matcher_true_match_margin",
+                "graph_matcher_true_geometry_match_count_floor_weight",
+                "graph_matcher_true_geometry_match_count_floor_threshold",
+                "graph_matcher_true_geometry_match_count_floor_margin",
                 "graph_matcher_final_false_match_weight",
                 "graph_matcher_mined_false_match_weight",
                 "graph_matcher_mined_false_match_loss_cap",
@@ -7062,6 +8494,21 @@ def main() -> int:
                 "graph_matcher_ransac_consistency_residual_threshold_px",
                 "graph_matcher_ransac_consistency_min_score",
                 "graph_matcher_ransac_consistency_margin",
+                "graph_matcher_warp_outlier_weight",
+                "graph_matcher_warp_outlier_topk",
+                "graph_matcher_warp_outlier_residual_threshold_px",
+                "graph_matcher_warp_outlier_min_score",
+                "graph_matcher_warp_outlier_margin",
+                "graph_matcher_warp_outlier_accept_weight",
+                "graph_matcher_warp_outlier_accept_topk",
+                "graph_matcher_warp_outlier_accept_residual_threshold_px",
+                "graph_matcher_warp_outlier_accept_min_score",
+                "graph_matcher_warp_soft_boundary_weight",
+                "graph_matcher_warp_soft_boundary_topk",
+                "graph_matcher_warp_soft_boundary_lower_residual_px",
+                "graph_matcher_warp_soft_boundary_upper_residual_px",
+                "graph_matcher_warp_soft_boundary_min_score",
+                "graph_matcher_pair_acceptance_loss_weight",
                 "matchability_weight",
                 "descriptor_uncertainty_weight",
                 "no_match_prior_weight",
@@ -7089,6 +8536,12 @@ def main() -> int:
                 "graph_matcher_true_match_margin_loss",
                 "graph_matcher_true_match_margin_violations",
                 "graph_matcher_true_match_margin_mean",
+                "graph_matcher_true_geometry_match_count_floor_loss",
+                "graph_matcher_true_geometry_match_count_floor_target_count",
+                "graph_matcher_true_geometry_match_count_floor_student_count",
+                "graph_matcher_true_geometry_match_count_floor_count_deficit",
+                "graph_matcher_true_geometry_match_count_floor_topk_score_mean",
+                "graph_matcher_true_geometry_match_count_floor_violations",
                 "graph_matcher_final_false_match_loss",
                 "graph_matcher_final_false_match_edges",
                 "graph_matcher_final_false_match_score_mean",
@@ -7108,6 +8561,25 @@ def main() -> int:
                 "graph_matcher_ransac_consistency_score_mean",
                 "graph_matcher_ransac_consistency_residual_mean_px",
                 "graph_matcher_ransac_consistency_accept_mean",
+                "graph_matcher_warp_outlier_loss",
+                "graph_matcher_warp_outlier_edges",
+                "graph_matcher_warp_outlier_residual_mean_px",
+                "graph_matcher_warp_outlier_accept_mean",
+                "graph_matcher_warp_outlier_accept_loss",
+                "graph_matcher_warp_outlier_accept_edges",
+                "graph_matcher_warp_outlier_accept_score_mean",
+                "graph_matcher_warp_outlier_accept_residual_mean_px",
+                "graph_matcher_warp_outlier_accept_probability_mean",
+                "graph_matcher_warp_soft_boundary_loss",
+                "graph_matcher_warp_soft_boundary_edges",
+                "graph_matcher_warp_soft_boundary_residual_mean_px",
+                "graph_matcher_warp_soft_boundary_target_mean",
+                "graph_matcher_warp_soft_boundary_score_probability_mean",
+                "graph_matcher_warp_soft_boundary_accept_probability_mean",
+                "graph_matcher_pair_acceptance_loss",
+                "graph_matcher_pair_acceptance_target",
+                "graph_matcher_pair_acceptance_weight",
+                "graph_matcher_pair_acceptance_probability",
                 "graph_matcher_deep_supervision_loss",
                 "graph_matcher_depth_distillation_loss",
                 "graph_matcher_depth_distillation_teacher_layers",
@@ -7126,6 +8598,11 @@ def main() -> int:
                 "graph_matcher_teacher_match_count_floor_student_count",
                 "graph_matcher_teacher_match_count_floor_count_deficit",
                 "graph_matcher_teacher_match_count_floor_topk_score_mean",
+                "graph_matcher_teacher_match_count_ceiling_loss",
+                "graph_matcher_teacher_match_count_ceiling_teacher_count",
+                "graph_matcher_teacher_match_count_ceiling_student_count",
+                "graph_matcher_teacher_match_count_ceiling_count_excess",
+                "graph_matcher_teacher_match_count_ceiling_excess_score_mean",
                 "graph_matcher_executed_attention_layers",
                 "graph_matcher_attention_work_fraction",
                 "graph_matcher_positive_pairs",
@@ -7278,6 +8755,10 @@ def main() -> int:
                 ),
                 keypoint_weight=args.keypoint_weight,
                 keypoint_negative_weight=args.keypoint_negative_weight,
+                keypoint_offset_weight=args.keypoint_offset_weight,
+                selected_keypoint_offset_weight=args.selected_keypoint_offset_weight,
+                selected_keypoint_offset_max_points=args.selected_keypoint_offset_max_points,
+                selected_keypoint_offset_inverse_radius_px=args.selected_keypoint_offset_inverse_radius_px,
                 false_matches=false_matches,
                 false_match_weight=args.false_match_weight,
                 false_match_max_points=args.false_match_max_points,
@@ -7318,6 +8799,15 @@ def main() -> int:
                 graph_matcher_positive_dustbin_margin=args.graph_matcher_positive_dustbin_margin,
                 graph_matcher_true_match_margin_weight=args.graph_matcher_true_match_margin_weight,
                 graph_matcher_true_match_margin=args.graph_matcher_true_match_margin,
+                graph_matcher_true_geometry_match_count_floor_weight=(
+                    args.graph_matcher_true_geometry_match_count_floor_weight
+                ),
+                graph_matcher_true_geometry_match_count_floor_threshold=(
+                    args.graph_matcher_true_geometry_match_count_floor_threshold
+                ),
+                graph_matcher_true_geometry_match_count_floor_margin=(
+                    args.graph_matcher_true_geometry_match_count_floor_margin
+                ),
                 graph_matcher_final_false_match_weight=args.graph_matcher_final_false_match_weight,
                 graph_matcher_mined_false_match_weight=args.graph_matcher_mined_false_match_weight,
                 graph_matcher_mined_false_match_loss_cap=args.graph_matcher_mined_false_match_loss_cap,
@@ -7344,6 +8834,29 @@ def main() -> int:
                 ),
                 graph_matcher_ransac_consistency_min_score=args.graph_matcher_ransac_consistency_min_score,
                 graph_matcher_ransac_consistency_margin=args.graph_matcher_ransac_consistency_margin,
+                graph_matcher_warp_outlier_weight=args.graph_matcher_warp_outlier_weight,
+                graph_matcher_warp_outlier_topk=args.graph_matcher_warp_outlier_topk,
+                graph_matcher_warp_outlier_residual_threshold_px=(
+                    args.graph_matcher_warp_outlier_residual_threshold_px
+                ),
+                graph_matcher_warp_outlier_min_score=args.graph_matcher_warp_outlier_min_score,
+                graph_matcher_warp_outlier_margin=args.graph_matcher_warp_outlier_margin,
+                graph_matcher_warp_outlier_accept_weight=args.graph_matcher_warp_outlier_accept_weight,
+                graph_matcher_warp_outlier_accept_topk=args.graph_matcher_warp_outlier_accept_topk,
+                graph_matcher_warp_outlier_accept_residual_threshold_px=(
+                    args.graph_matcher_warp_outlier_accept_residual_threshold_px
+                ),
+                graph_matcher_warp_outlier_accept_min_score=args.graph_matcher_warp_outlier_accept_min_score,
+                graph_matcher_warp_soft_boundary_weight=args.graph_matcher_warp_soft_boundary_weight,
+                graph_matcher_warp_soft_boundary_topk=args.graph_matcher_warp_soft_boundary_topk,
+                graph_matcher_warp_soft_boundary_lower_residual_px=(
+                    args.graph_matcher_warp_soft_boundary_lower_residual_px
+                ),
+                graph_matcher_warp_soft_boundary_upper_residual_px=(
+                    args.graph_matcher_warp_soft_boundary_upper_residual_px
+                ),
+                graph_matcher_warp_soft_boundary_min_score=args.graph_matcher_warp_soft_boundary_min_score,
+                graph_matcher_pair_acceptance_loss_weight=args.graph_matcher_pair_acceptance_loss_weight,
                 graph_matcher_train_candidate_topk=args.graph_matcher_train_candidate_topk,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
@@ -7375,6 +8888,15 @@ def main() -> int:
                     args.graph_matcher_teacher_match_count_floor_threshold
                 ),
                 graph_matcher_teacher_match_count_floor_margin=args.graph_matcher_teacher_match_count_floor_margin,
+                graph_matcher_teacher_match_count_ceiling_weight=(
+                    args.graph_matcher_teacher_match_count_ceiling_weight
+                ),
+                graph_matcher_teacher_match_count_ceiling_threshold=(
+                    args.graph_matcher_teacher_match_count_ceiling_threshold
+                ),
+                graph_matcher_teacher_match_count_ceiling_margin=(
+                    args.graph_matcher_teacher_match_count_ceiling_margin
+                ),
                 graph_matcher_teacher_distillation_weight=args.graph_matcher_teacher_distillation_weight,
                 graph_matcher_teacher_distillation_temperature=(
                     args.graph_matcher_teacher_distillation_temperature
@@ -7425,6 +8947,8 @@ def main() -> int:
                     "teacher_weight": teacher_weight,
                     "synthetic_loss_weight": args.synthetic_loss_weight,
                     "keypoint_weight": args.keypoint_weight,
+                    "keypoint_offset_weight": args.keypoint_offset_weight,
+                    "selected_keypoint_offset_weight": args.selected_keypoint_offset_weight,
                     "hard_negative_weight": hard_negative_weight,
                     "diversity_weight": diversity_weight,
                     "abstention_weight": args.abstention_weight,
@@ -7502,6 +9026,15 @@ def main() -> int:
                     "graph_matcher_teacher_match_count_floor_margin": (
                         args.graph_matcher_teacher_match_count_floor_margin if args.train_graph_matcher else 0.0
                     ),
+                    "graph_matcher_teacher_match_count_ceiling_weight": (
+                        args.graph_matcher_teacher_match_count_ceiling_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_match_count_ceiling_threshold": (
+                        args.graph_matcher_teacher_match_count_ceiling_threshold if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_match_count_ceiling_margin": (
+                        args.graph_matcher_teacher_match_count_ceiling_margin if args.train_graph_matcher else 0.0
+                    ),
                     "graph_matcher_teacher_distillation_weight": (
                         args.graph_matcher_teacher_distillation_weight if args.train_graph_matcher else 0.0
                     ),
@@ -7552,6 +9085,21 @@ def main() -> int:
                     "graph_matcher_true_match_margin": (
                         args.graph_matcher_true_match_margin if args.train_graph_matcher else 0.0
                     ),
+                    "graph_matcher_true_geometry_match_count_floor_weight": (
+                        args.graph_matcher_true_geometry_match_count_floor_weight
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_true_geometry_match_count_floor_threshold": (
+                        args.graph_matcher_true_geometry_match_count_floor_threshold
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_true_geometry_match_count_floor_margin": (
+                        args.graph_matcher_true_geometry_match_count_floor_margin
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
                     "graph_matcher_final_false_match_weight": (
                         args.graph_matcher_final_false_match_weight if args.train_graph_matcher else 0.0
                     ),
@@ -7586,6 +9134,59 @@ def main() -> int:
                     "graph_matcher_ransac_consistency_margin": (
                         args.graph_matcher_ransac_consistency_margin if args.train_graph_matcher else 0.0
                     ),
+                    "graph_matcher_warp_outlier_weight": (
+                        args.graph_matcher_warp_outlier_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_topk": (
+                        args.graph_matcher_warp_outlier_topk if args.train_graph_matcher else 0
+                    ),
+                    "graph_matcher_warp_outlier_residual_threshold_px": (
+                        args.graph_matcher_warp_outlier_residual_threshold_px
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_min_score": (
+                        args.graph_matcher_warp_outlier_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_margin": (
+                        args.graph_matcher_warp_outlier_margin if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_accept_weight": (
+                        args.graph_matcher_warp_outlier_accept_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_accept_topk": (
+                        args.graph_matcher_warp_outlier_accept_topk if args.train_graph_matcher else 0
+                    ),
+                    "graph_matcher_warp_outlier_accept_residual_threshold_px": (
+                        args.graph_matcher_warp_outlier_accept_residual_threshold_px
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_warp_outlier_accept_min_score": (
+                        args.graph_matcher_warp_outlier_accept_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_soft_boundary_weight": (
+                        args.graph_matcher_warp_soft_boundary_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_warp_soft_boundary_topk": (
+                        args.graph_matcher_warp_soft_boundary_topk if args.train_graph_matcher else 0
+                    ),
+                    "graph_matcher_warp_soft_boundary_lower_residual_px": (
+                        args.graph_matcher_warp_soft_boundary_lower_residual_px
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_warp_soft_boundary_upper_residual_px": (
+                        args.graph_matcher_warp_soft_boundary_upper_residual_px
+                        if args.train_graph_matcher
+                        else 0.0
+                    ),
+                    "graph_matcher_warp_soft_boundary_min_score": (
+                        args.graph_matcher_warp_soft_boundary_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_pair_acceptance_loss_weight": (
+                        args.graph_matcher_pair_acceptance_loss_weight if args.train_graph_matcher else 0.0
+                    ),
                     "matchability_weight": args.matchability_weight,
                     "descriptor_uncertainty_weight": args.descriptor_uncertainty_weight,
                     "no_match_prior_weight": args.no_match_prior_weight,
@@ -7612,6 +9213,7 @@ def main() -> int:
                     f"hn={hard_negative_weight:.3f} div={diversity_weight:.3f} "
                     f"abst={args.abstention_weight:.3f} "
                     f"kploss={metrics.get('keypoint_loss', 0.0):.6f} "
+                    f"kpoff={metrics.get('keypoint_offset_loss', 0.0):.6f} "
                     f"gce={metrics.get('graph_matcher_ce_loss', 0.0):.6f} "
                     f"gassign={metrics.get('graph_matcher_assignment_loss', 0.0):.6f} "
                     f"gnomatch={metrics.get('graph_matcher_no_match_loss', 0.0):.6f} "

@@ -21,9 +21,11 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
 )
 
 
@@ -169,6 +171,16 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         return
     if profile not in FOV76_POST_FILTER_PROFILES:
         raise ValueError(f"unknown post-filter profile: {profile}")
+    if profile == TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE:
+        _set_profile_default(args, "geometry_filter", "none", "none")
+        _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)
+        _set_profile_default(args, "geometry_threshold_px_values", [5.0], None)
+        _set_profile_default(args, "filtered_geometry_filter", "true_geometry", "local")
+        _set_profile_default(args, "filtered_min_margin", 0.0, 0.02)
+        _set_profile_default(args, "filtered_min_matches", 0, 0)
+        _set_profile_default(args, "filtered_min_matches_values", [0], None)
+        _set_profile_default(args, "true_geometry_min_valid_fraction", 0.10, 0.0)
+        return
     _set_profile_default(args, "geometry_filter", "local", "none")
     _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)
     _set_profile_default(args, "geometry_threshold_px_values", [5.0], None)
@@ -282,6 +294,8 @@ def build_visual_command(args: argparse.Namespace, *, config: GraphFilterConfig,
         str(args.filtered_draw_matches),
         "--filtered-min-matches",
         str(config.filtered_min_matches),
+        "--true-geometry-min-valid-fraction",
+        str(getattr(args, "true_geometry_min_valid_fraction", 0.0)),
     ]
     if getattr(args, "post_filter_profile", ""):
         command.extend(["--post-filter-profile", args.post_filter_profile])
@@ -374,6 +388,7 @@ def build_visual_command(args: argparse.Namespace, *, config: GraphFilterConfig,
     command.append("--shuffle" if args.shuffle else "--no-shuffle")
     command.append("--filtered-report" if args.filtered_report else "--no-filtered-report")
     command.append("--filtered-mutual" if args.filtered_mutual else "--no-filtered-mutual")
+    command.append("--use-keypoint-offsets" if getattr(args, "use_keypoint_offsets", False) else "--no-use-keypoint-offsets")
     if args.write_all_summary:
         command.append("--write-all-summary")
     if args.write_match_details:
@@ -600,7 +615,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Apply a named post-filter profile after parsing default sweep options.",
     )
-    parser.add_argument("--geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="none")
+    parser.add_argument("--geometry-filter", choices=["none", "affine", "local", "ransac", "magsac", "true_geometry"], default="none")
     parser.add_argument("--geometry-threshold-px", type=float, default=0.0)
     parser.add_argument("--geometry-threshold-px-values", type=parse_float_list, default=None)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
@@ -617,7 +632,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-configs", type=int, default=64)
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="local")
+    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac", "true_geometry"], default="local")
+    parser.add_argument("--true-geometry-min-valid-fraction", type=float, default=0.0)
     parser.add_argument("--filtered-max-matches", type=int, default=0)
     parser.add_argument("--filtered-draw-matches", type=int, default=0)
     parser.add_argument("--filtered-min-matches", type=int, default=0)
@@ -639,6 +655,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filtered-min-margin", type=float, default=0.02)
     parser.add_argument("--write-all-summary", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--write-match-details", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-keypoint-offsets", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
     parser.add_argument("--input-local-contrast-kernel", type=int, default=31)

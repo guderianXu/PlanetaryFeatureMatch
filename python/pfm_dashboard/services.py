@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import shutil
@@ -65,6 +66,358 @@ def _number(value: Any) -> float | None:
     if isinstance(value, (float, int)):
         return float(value)
     return None
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _json_number(data: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = data.get(name)
+        if isinstance(value, (float, int)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return None
+
+
+def _json_int(data: dict[str, Any], *names: str) -> int:
+    value = _json_number(data, *names)
+    return int(round(value)) if value is not None else 0
+
+
+def _summary_json_from_pipeline(runs_root: Path, pipeline_path: Path, pipeline: dict[str, Any]) -> Path | None:
+    value = pipeline.get("hybrid_summary_json")
+    if not isinstance(value, str) or not value:
+        return pipeline_path.parent / "summary.json"
+    candidate = Path(value)
+    candidates = [candidate] if candidate.is_absolute() else [runs_root / candidate, pipeline_path.parent / candidate]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0] if candidates else None
+
+
+def _hybrid_gate_record(
+    *,
+    runs_root: Path,
+    run_dir: Path,
+    summary_path: Path,
+    pipeline_path: Path | None,
+) -> dict[str, Any] | None:
+    summary = _read_json_object(summary_path)
+    if summary is None or "hybrid_correct" not in summary or "hybrid_wrong" not in summary:
+        return None
+    pipeline = _read_json_object(pipeline_path) if pipeline_path is not None else None
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    try:
+        name = str(run_dir.relative_to(runs_root))
+    except ValueError:
+        name = run_dir.name
+    report_html = run_dir / "index.html"
+    validation_json = pipeline.get("validation_json")
+    audit_json = pipeline.get("optimization_audit_json")
+    return {
+        "name": name,
+        "path": run_dir,
+        "summary_json": summary_path,
+        "pipeline_summary_json": pipeline_path,
+        "report_html": report_html if report_html.exists() else None,
+        "validation_json": validation_json if isinstance(validation_json, str) else "",
+        "optimization_audit_json": audit_json if isinstance(audit_json, str) else "",
+        "valid": bool(pipeline.get("valid", True)),
+        "rows": _json_int(summary, "rows"),
+        "kept_pfm_rows": _json_int(summary, "kept_pfm_rows"),
+        "fallback_lightglue_rows": _json_int(summary, "fallback_lightglue_rows"),
+        "rejected_rows": _json_int(summary, "rejected_rows"),
+        "pfm_correct": _json_int(summary, "pfm_correct"),
+        "pfm_wrong": _json_int(summary, "pfm_wrong"),
+        "lightglue_correct": _json_int(summary, "lightglue_correct"),
+        "lightglue_wrong": _json_int(summary, "lightglue_wrong"),
+        "hybrid_correct": _json_int(summary, "hybrid_correct"),
+        "hybrid_wrong": _json_int(summary, "hybrid_wrong"),
+        "hybrid_precision": _json_number(summary, "hybrid_precision") or 0.0,
+        "correct_delta_vs_lightglue": (
+            _json_number(pipeline, "correct_delta_vs_lightglue")
+            if "correct_delta_vs_lightglue" in pipeline
+            else _json_number(summary, "hybrid_correct_delta_vs_lightglue")
+        )
+        or 0.0,
+        "wrong_delta_vs_lightglue": (
+            _json_number(pipeline, "wrong_delta_vs_lightglue")
+            if "wrong_delta_vs_lightglue" in pipeline
+            else _json_number(summary, "hybrid_wrong_delta_vs_lightglue")
+        )
+        or 0.0,
+        "precision_delta_vs_lightglue": (
+            _json_number(pipeline, "precision_delta_vs_lightglue")
+            if "precision_delta_vs_lightglue" in pipeline
+            else _json_number(summary, "hybrid_precision_delta_vs_lightglue", "precision_delta_vs_lightglue")
+        )
+        or 0.0,
+        "threshold": _json_number(summary, "threshold") or 0.0,
+        "reject_action": str(summary.get("reject_action", "lightglue")),
+        "updated_at": max(
+            summary_path.stat().st_mtime if summary_path.exists() else 0.0,
+            pipeline_path.stat().st_mtime if pipeline_path is not None and pipeline_path.exists() else 0.0,
+        ),
+    }
+
+
+def discover_hybrid_gate_runs(runs_root: Path) -> list[dict[str, Any]]:
+    """Discover hybrid/PFM-only gate summaries under a runs directory."""
+    if not runs_root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    pipeline_dirs: set[Path] = set()
+    for pipeline_path in runs_root.rglob("pipeline_summary.json"):
+        pipeline = _read_json_object(pipeline_path)
+        if pipeline is None:
+            continue
+        summary_path = _summary_json_from_pipeline(runs_root, pipeline_path, pipeline)
+        if summary_path is None:
+            continue
+        record = _hybrid_gate_record(
+            runs_root=runs_root,
+            run_dir=pipeline_path.parent,
+            summary_path=summary_path,
+            pipeline_path=pipeline_path,
+        )
+        if record is not None:
+            records.append(record)
+            pipeline_dirs.add(pipeline_path.parent.resolve())
+    for summary_path in runs_root.rglob("summary.json"):
+        try:
+            if summary_path.parent.resolve() in pipeline_dirs:
+                continue
+        except OSError:
+            pass
+        record = _hybrid_gate_record(
+            runs_root=runs_root,
+            run_dir=summary_path.parent,
+            summary_path=summary_path,
+            pipeline_path=None,
+        )
+        if record is not None:
+            records.append(record)
+    records.sort(key=lambda row: float(row.get("updated_at", 0.0)), reverse=True)
+    return records
+
+
+def _multiseed_selector_payload(summary: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    totals = summary.get("totals")
+    seed_results = summary.get("seed_results")
+    if not isinstance(totals, dict) or not isinstance(seed_results, list):
+        return {}, {}, {}
+    seed_rows = [row for row in seed_results if isinstance(row, dict)]
+    if not seed_rows or "selector_correct" not in totals or "correct_delta_vs_lightglue" not in totals:
+        return {}, {}, {}
+
+    selected_correct = _json_int(totals, "selector_correct")
+    selected_wrong = _json_int(totals, "selector_wrong")
+    lightglue_correct = _json_int(totals, "lightglue_correct")
+    lightglue_wrong = _json_int(totals, "lightglue_wrong")
+    selected_matches = _json_int(totals, "selector_matches", "selected_matches")
+    if selected_matches <= 0:
+        selected_matches = selected_correct + selected_wrong
+    lightglue_matches = _json_int(totals, "lightglue_matches")
+    if lightglue_matches <= 0:
+        lightglue_matches = lightglue_correct + lightglue_wrong
+    selector = {
+        "rows": _json_int(totals, "rows"),
+        "selected_matches": selected_matches,
+        "selected_correct": selected_correct,
+        "selected_wrong": selected_wrong,
+        "selected_precision": selected_correct / selected_matches if selected_matches else 0.0,
+        "lightglue_matches": lightglue_matches,
+        "lightglue_correct": lightglue_correct,
+        "lightglue_wrong": lightglue_wrong,
+        "lightglue_precision": lightglue_correct / lightglue_matches if lightglue_matches else 0.0,
+        "correct_delta_vs_lightglue": _json_int(totals, "correct_delta_vs_lightglue"),
+        "wrong_delta_vs_lightglue": _json_int(totals, "wrong_delta_vs_lightglue"),
+    }
+
+    by_split: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    base_disjoint = True
+    excluded_base_ids = 0
+    for row in seed_rows:
+        base_disjoint = base_disjoint and bool(row.get("base_disjoint"))
+        manifest_gate = row.get("manifest_gate")
+        manifest_gate = manifest_gate if isinstance(manifest_gate, dict) else {}
+        excluded_base_ids = max(excluded_base_ids, _json_int(manifest_gate, "excluded_base_ids"))
+        manifest_counts = row.get("manifest_counts")
+        if not isinstance(manifest_counts, dict):
+            manifest_counts = manifest_gate.get("counts")
+        manifest_counts = manifest_counts if isinstance(manifest_counts, dict) else {}
+        for split, value in manifest_counts.items():
+            counts[str(split)] = counts.get(str(split), 0) + _json_int({str(split): value}, str(split))
+        split_results = row.get("split_results")
+        split_results = split_results if isinstance(split_results, dict) else {}
+        for split, result in split_results.items():
+            result = result if isinstance(result, dict) else {}
+            aggregate = by_split.setdefault(
+                str(split),
+                {"rows": 0, "correct_delta_vs_lightglue": 0, "wrong_delta_vs_lightglue": 0},
+            )
+            aggregate["rows"] += _json_int(result, "rows")
+            aggregate["correct_delta_vs_lightglue"] += _json_int(result, "correct_delta_vs_lightglue")
+            aggregate["wrong_delta_vs_lightglue"] += _json_int(result, "wrong_delta_vs_lightglue")
+
+    manifest = {
+        "counts": counts,
+        "base_disjoint": base_disjoint,
+        "excluded_base_ids": excluded_base_ids,
+    }
+    return selector, by_split, manifest
+
+
+def _selector_payload(summary: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    multiseed_selector, multiseed_by_split, multiseed_manifest = _multiseed_selector_payload(summary)
+    if multiseed_selector:
+        return multiseed_selector, multiseed_by_split, multiseed_manifest
+
+    aggregate = summary.get("aggregate")
+    if isinstance(aggregate, dict):
+        if "selected_correct" in aggregate or "selected_matches" in aggregate:
+            by_split = summary.get("by_split")
+            return aggregate, by_split if isinstance(by_split, dict) else {}, {}
+        return {}, {}, {}
+
+    comparison = summary.get("comparison")
+    comparison = comparison if isinstance(comparison, dict) else {}
+    selector = comparison.get("selector")
+    if isinstance(selector, dict):
+        by_split = comparison.get("selector_by_split")
+        manifest = summary.get("manifest_validation")
+        return selector, by_split if isinstance(by_split, dict) else {}, manifest if isinstance(manifest, dict) else {}
+
+    selector = summary.get("selector")
+    if isinstance(selector, dict):
+        by_split = summary.get("selector_by_split")
+        manifest = summary.get("manifest_validation")
+        return selector, by_split if isinstance(by_split, dict) else {}, manifest if isinstance(manifest, dict) else {}
+
+    return {}, {}, {}
+
+
+def _true_geometry_audit_status(path: Path) -> tuple[str, str]:
+    if not path.exists():
+        return "", ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(data, list):
+        return "", ""
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("requirement_id") == "true_geometry.selector_fresh_validation":
+            return str(item.get("status", "")), str(item.get("risk", ""))
+    return "", ""
+
+
+def _true_geometry_validation_status(path: Path) -> tuple[str, str]:
+    data = _read_json_object(path)
+    if data is None:
+        return "", ""
+    errors = data.get("errors")
+    errors = errors if isinstance(errors, list) else []
+    if bool(data.get("valid")):
+        return "PASS", ""
+    return "FAIL", ",".join(str(error) for error in errors)
+
+
+def _true_geometry_selector_record(
+    *,
+    runs_root: Path,
+    run_dir: Path,
+    summary_path: Path,
+) -> dict[str, Any] | None:
+    summary = _read_json_object(summary_path)
+    if summary is None:
+        return None
+    selector, by_split, manifest = _selector_payload(summary)
+    if not selector or "lightglue_correct" not in selector or "correct_delta_vs_lightglue" not in selector:
+        return None
+
+    try:
+        name = str(run_dir.relative_to(runs_root))
+    except ValueError:
+        name = run_dir.name
+    counts = manifest.get("counts")
+    split_counts = counts if isinstance(counts, dict) else {}
+    audit_path = run_dir / "optimization_audit.json"
+    validation_path = run_dir / "true_geometry_selector_validation.json"
+    audit_status, audit_risk = _true_geometry_validation_status(validation_path)
+    if not audit_status:
+        audit_status, audit_risk = _true_geometry_audit_status(audit_path)
+    if not audit_status and isinstance(summary.get("seed_results"), list):
+        errors = summary.get("errors")
+        errors = errors if isinstance(errors, list) else []
+        audit_status = "PASS" if bool(summary.get("valid")) else "FAIL"
+        audit_risk = "" if audit_status == "PASS" else ",".join(str(error) for error in errors)
+    report_html = run_dir / "summary.html"
+    if not report_html.exists():
+        report_html = run_dir / "index.html"
+    mtimes = [
+        summary_path.stat().st_mtime if summary_path.exists() else 0.0,
+        audit_path.stat().st_mtime if audit_path.exists() else 0.0,
+        report_html.stat().st_mtime if report_html.exists() else 0.0,
+    ]
+    return {
+        "name": name,
+        "path": run_dir,
+        "summary_json": summary_path,
+        "validation_json": validation_path if validation_path.exists() else None,
+        "audit_json": audit_path if audit_path.exists() else None,
+        "audit_status": audit_status,
+        "audit_risk": audit_risk,
+        "report_html": report_html if report_html.exists() else None,
+        "rows": _json_int(selector, "rows"),
+        "selected_matches": _json_int(selector, "selected_matches", "pfm_matches"),
+        "selected_correct": _json_int(selector, "selected_correct", "pfm_correct"),
+        "selected_wrong": _json_int(selector, "selected_wrong", "pfm_wrong"),
+        "selected_precision": _json_number(selector, "selected_precision", "pfm_precision") or 0.0,
+        "lightglue_correct": _json_int(selector, "lightglue_correct"),
+        "lightglue_wrong": _json_int(selector, "lightglue_wrong"),
+        "lightglue_precision": _json_number(selector, "lightglue_precision") or 0.0,
+        "correct_delta_vs_lightglue": _json_int(selector, "correct_delta_vs_lightglue"),
+        "wrong_delta_vs_lightglue": _json_int(selector, "wrong_delta_vs_lightglue"),
+        "split_counts": {str(key): _json_int(split_counts, str(key)) for key in split_counts},
+        "by_split": by_split,
+        "base_disjoint": bool(manifest.get("base_disjoint")) if manifest else False,
+        "excluded_base_ids": _json_int(manifest, "excluded_base_ids") if manifest else 0,
+        "updated_at": max(mtimes),
+    }
+
+
+def discover_true_geometry_selector_runs(runs_root: Path) -> list[dict[str, Any]]:
+    """Discover true-geometry selector summaries under a runs directory."""
+    if not runs_root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for summary_path in runs_root.rglob("summary.json"):
+        record = _true_geometry_selector_record(
+            runs_root=runs_root,
+            run_dir=summary_path.parent,
+            summary_path=summary_path,
+        )
+        if record is not None:
+            records.append(record)
+    records.sort(key=lambda row: float(row.get("updated_at", 0.0)), reverse=True)
+    return records
 
 
 def _script_option(script_path: Path, *names: str) -> float | None:
@@ -287,19 +640,47 @@ def run_completed_at(run_path: Path, status: str, checkpoint_count: int) -> floa
     return None
 
 
+def _has_training_run_artifact(
+    run_path: Path,
+    *,
+    metrics_path: Path,
+    checkpoint_count: int,
+    active_external: bool,
+) -> bool:
+    if active_external or checkpoint_count > 0:
+        return True
+    candidates = [
+        metrics_path,
+        run_path / "train.log",
+        run_path / "train.pid",
+        run_path / "run.html",
+        run_path / "report",
+    ]
+    candidates.extend(_run_script_paths(run_path))
+    return any(path.exists() for path in candidates)
+
+
 def discover_runs(root: Path) -> list[RunSummary]:
     if not root.exists():
         return []
     active_output_dirs = _active_training_output_dirs()
     summaries: list[RunSummary] = []
     for run_path in sorted((path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")), key=lambda path: path.stat().st_mtime, reverse=True):
-        metrics = read_metrics_csv(run_metrics_path(run_path))
+        metrics_path = run_metrics_path(run_path)
+        metrics = read_metrics_csv(metrics_path)
         checkpoints = list(run_path.glob("*.pt")) + list((run_path / "checkpoints").glob("*.pt"))
         status = pid_status(run_path / "train.pid")
         try:
             active_external = run_path.resolve() in active_output_dirs
         except OSError:
             active_external = run_path.absolute() in active_output_dirs
+        if not _has_training_run_artifact(
+            run_path,
+            metrics_path=metrics_path,
+            checkpoint_count=len(checkpoints),
+            active_external=active_external,
+        ):
+            continue
         if status in {"missing", "invalid", "stopped"} and active_external:
             status = "running"
         if status == "missing" and (run_path / "train.log").exists():

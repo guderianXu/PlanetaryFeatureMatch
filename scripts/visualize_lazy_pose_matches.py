@@ -9,6 +9,7 @@ import csv
 import html
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -65,9 +66,19 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
+)
+GEOMETRY_FILTER_CHOICES = (
+    "none",
+    "affine",
+    "local",
+    "ransac",
+    "magsac",
+    "true_geometry",
 )
 
 
@@ -116,6 +127,10 @@ class LazyMatchVisual:
     raw_margins: np.ndarray | None = None
     accept_logits: np.ndarray | None = None
     accept_probabilities: np.ndarray | None = None
+    pair_accept_logit: float | None = None
+    pair_accept_probability: float | None = None
+    pair_accept_rejected: bool = False
+    filtered_reject_reason: str = ""
     image_name: str = ""
     crop_a: CropWindow | None = None
     crop_b: CropWindow | None = None
@@ -171,6 +186,16 @@ def tensor_diagnostics_to_numpy(
     if value is None:
         return None
     return value.detach().cpu().to(torch.float32).numpy()
+
+
+def tensor_diagnostics_to_float(
+    diagnostics: dict[str, torch.Tensor],
+    key: str,
+) -> float | None:
+    value = diagnostics.get(key)
+    if value is None or value.numel() == 0:
+        return None
+    return float(value.detach().cpu().to(torch.float32).reshape(-1)[0])
 
 
 def min_matches_for_visual(
@@ -265,6 +290,10 @@ def select_adaptive_geometry_rescue(
         raw_margins=optional_match_array_head(rescue.raw_margins, rescue.matches),
         accept_logits=optional_match_array_head(rescue.accept_logits, rescue.matches),
         accept_probabilities=optional_match_array_head(rescue.accept_probabilities, rescue.matches),
+        pair_accept_logit=rescue.pair_accept_logit,
+        pair_accept_probability=rescue.pair_accept_probability,
+        pair_accept_rejected=rescue.pair_accept_rejected,
+        filtered_reject_reason=rescue.filtered_reject_reason,
         image_name=rescue.image_name,
         crop_a=rescue.crop_a,
         crop_b=rescue.crop_b,
@@ -328,6 +357,14 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         return
     if profile not in FOV76_POST_FILTER_PROFILES:
         raise ValueError(f"unknown post-filter profile: {profile}")
+    if profile == TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE:
+        _set_profile_default(args, "geometry_filter", "none", "none")
+        _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)
+        _set_profile_default(args, "filtered_geometry_filter", "true_geometry", "local")
+        _set_profile_default(args, "filtered_min_margin", 0.0, 0.02)
+        _set_profile_default(args, "filtered_min_matches", 0, 0)
+        _set_profile_default(args, "true_geometry_min_valid_fraction", 0.10, 0.0)
+        return
     _set_profile_default(args, "geometry_filter", "local", "none")
     _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)
     _set_profile_default(args, "filtered_geometry_filter", "magsac", "local")
@@ -432,9 +469,11 @@ def compute_visual(
     mutual: bool,
     geometry_filter: str,
     geometry_threshold_px: float,
+    true_geometry_min_valid_fraction: float,
     input_local_contrast: bool,
     input_local_contrast_strength: float,
     input_local_contrast_kernel: int,
+    use_keypoint_offsets: bool,
     threshold_px: float,
 ) -> LazyMatchVisual:
     pair = move_pair_to_device(result.pair, device=device)
@@ -475,12 +514,42 @@ def compute_visual(
             keypoint_cell_cap=keypoint_cell_cap,
             keypoint_scores=score_b,
         )
-        rows_a = match_eval.gather_descriptor_rows(descriptors_a, selected_a)
-        rows_b = match_eval.gather_descriptor_rows(descriptors_b, selected_b)
+        base_keypoints_a = keypoints_a
+        base_keypoints_b = keypoints_b
+        keypoints_a = match_eval.refine_keypoints_with_offsets(
+            base_keypoints_a,
+            selected_a,
+            raw_a.keypoint_offsets if use_keypoint_offsets and raw_a is not None else None,
+        )
+        keypoints_b = match_eval.refine_keypoints_with_offsets(
+            base_keypoints_b,
+            selected_b,
+            raw_b.keypoint_offsets if use_keypoint_offsets and raw_b is not None else None,
+        )
+        rows_a = match_eval.descriptor_rows_for_selected_keypoints(
+            descriptors_a,
+            selected_a,
+            keypoints=base_keypoints_a,
+            keypoint_offsets=raw_a.keypoint_offsets if raw_a is not None else None,
+            use_keypoint_offsets=use_keypoint_offsets,
+        )
+        rows_b = match_eval.descriptor_rows_for_selected_keypoints(
+            descriptors_b,
+            selected_b,
+            keypoints=base_keypoints_b,
+            keypoint_offsets=raw_b.keypoint_offsets if raw_b is not None else None,
+            use_keypoint_offsets=use_keypoint_offsets,
+        )
         graph_diagnostics: dict[str, torch.Tensor] = {}
         if matcher_mode == "graph_matcher":
-            row_scores_a = match_eval.gather_score_rows(score_a, selected_a)
-            row_scores_b = match_eval.gather_score_rows(score_b, selected_b)
+            if use_keypoint_offsets:
+                sampled_scores_a = match_eval.sample_map_rows_at_keypoints(score_a, keypoints_a, width=1)
+                sampled_scores_b = match_eval.sample_map_rows_at_keypoints(score_b, keypoints_b, width=1)
+                row_scores_a = sampled_scores_a[:, 0] if sampled_scores_a is not None else None
+                row_scores_b = sampled_scores_b[:, 0] if sampled_scores_b is not None else None
+            else:
+                row_scores_a = match_eval.gather_score_rows(score_a, selected_a)
+                row_scores_b = match_eval.gather_score_rows(score_b, selected_b)
             meta_dim = getattr(getattr(model, "config", None), "graph_keypoint_meta_dim", 2)
             metadata_a = match_eval.graph_metadata_from_raw_features(
                 raw_a,
@@ -557,6 +626,11 @@ def compute_visual(
                 raw_margins=tensor_diagnostics_to_numpy(graph_diagnostics, "raw_margin"),
                 accept_logits=tensor_diagnostics_to_numpy(graph_diagnostics, "accept_logit"),
                 accept_probabilities=tensor_diagnostics_to_numpy(graph_diagnostics, "accept_probability"),
+                pair_accept_logit=tensor_diagnostics_to_float(graph_diagnostics, "pair_accept_logit"),
+                pair_accept_probability=tensor_diagnostics_to_float(
+                    graph_diagnostics,
+                    "pair_accept_probability",
+                ),
                 crop_a=result.crop_a,
                 crop_b=result.crop_b,
             )
@@ -600,6 +674,8 @@ def compute_visual(
             raw_margins=tensor_diagnostics_to_numpy(graph_diagnostics, "raw_margin"),
             accept_logits=tensor_diagnostics_to_numpy(graph_diagnostics, "accept_logit"),
             accept_probabilities=tensor_diagnostics_to_numpy(graph_diagnostics, "accept_probability"),
+            pair_accept_logit=tensor_diagnostics_to_float(graph_diagnostics, "pair_accept_logit"),
+            pair_accept_probability=tensor_diagnostics_to_float(graph_diagnostics, "pair_accept_probability"),
             crop_a=result.crop_a,
             crop_b=result.crop_b,
         )
@@ -609,6 +685,7 @@ def compute_visual(
                 visual,
                 geometry_filter=geometry_filter,
                 threshold_px=filter_threshold_px,
+                true_geometry_min_valid_fraction=true_geometry_min_valid_fraction,
                 label=label,
             )
         return visual
@@ -619,6 +696,7 @@ def filter_visual_matches(
     *,
     geometry_filter: str,
     threshold_px: float,
+    true_geometry_min_valid_fraction: float = 0.0,
     label: str | None = None,
 ) -> LazyMatchVisual:
     if geometry_filter == "none" or result.matches == 0:
@@ -643,6 +721,10 @@ def filter_visual_matches(
             raw_margins=optional_match_array_head(result.raw_margins, result.matches),
             accept_logits=optional_match_array_head(result.accept_logits, result.matches),
             accept_probabilities=optional_match_array_head(result.accept_probabilities, result.matches),
+            pair_accept_logit=result.pair_accept_logit,
+            pair_accept_probability=result.pair_accept_probability,
+            pair_accept_rejected=result.pair_accept_rejected,
+            filtered_reject_reason=result.filtered_reject_reason,
             image_name=result.image_name,
             crop_a=result.crop_a,
             crop_b=result.crop_b,
@@ -652,7 +734,16 @@ def filter_visual_matches(
     scores = torch.from_numpy(result.scores).to(torch.float32)
     local_indices = torch.arange(result.matches, dtype=torch.long)
     local_matches = torch.stack([local_indices, local_indices], dim=1)
-    if geometry_filter == "affine":
+    reject_reason = ""
+    if geometry_filter == "true_geometry":
+        if result.valid_fraction < float(true_geometry_min_valid_fraction):
+            keep = np.empty(0, dtype=np.int64)
+            reject_reason = "low_valid_fraction"
+        else:
+            keep = np.flatnonzero(result.errors <= float(threshold_px)).astype(np.int64, copy=False)
+            if keep.size == 0:
+                reject_reason = "true_geometry_error_px"
+    elif geometry_filter == "affine":
         kept, _ = match_eval.filter_affine_consistent_matches(
             points_a,
             points_b,
@@ -681,7 +772,8 @@ def filter_visual_matches(
         )
     else:
         raise ValueError(f"unsupported geometry filter: {geometry_filter}")
-    keep = kept[:, 0].detach().cpu().numpy().astype(np.int64, copy=False) if kept.numel() > 0 else np.empty(0, dtype=np.int64)
+    if geometry_filter != "true_geometry":
+        keep = kept[:, 0].detach().cpu().numpy().astype(np.int64, copy=False) if kept.numel() > 0 else np.empty(0, dtype=np.int64)
     return LazyMatchVisual(
         label=label or f"{result.label} / filtered",
         spec=result.spec,
@@ -700,6 +792,10 @@ def filter_visual_matches(
         raw_margins=optional_match_array(result.raw_margins, keep),
         accept_logits=optional_match_array(result.accept_logits, keep),
         accept_probabilities=optional_match_array(result.accept_probabilities, keep),
+        pair_accept_logit=result.pair_accept_logit,
+        pair_accept_probability=result.pair_accept_probability,
+        pair_accept_rejected=result.pair_accept_rejected,
+        filtered_reject_reason=reject_reason or result.filtered_reject_reason,
         image_name=result.image_name,
         crop_a=result.crop_a,
         crop_b=result.crop_b,
@@ -766,6 +862,49 @@ def apply_min_match_gate(
         raw_margins=optional_match_array_head(result.raw_margins, 0),
         accept_logits=optional_match_array_head(result.accept_logits, 0),
         accept_probabilities=optional_match_array_head(result.accept_probabilities, 0),
+        pair_accept_logit=result.pair_accept_logit,
+        pair_accept_probability=result.pair_accept_probability,
+        pair_accept_rejected=result.pair_accept_rejected,
+        filtered_reject_reason=result.filtered_reject_reason,
+        image_name=result.image_name,
+        crop_a=result.crop_a,
+        crop_b=result.crop_b,
+    )
+
+
+def apply_pair_acceptance_gate(
+    result: LazyMatchVisual,
+    *,
+    min_probability: float,
+) -> LazyMatchVisual:
+    if min_probability < 0.0:
+        return result
+    if result.pair_accept_probability is None:
+        return result
+    if result.pair_accept_probability >= float(min_probability):
+        return result
+    return LazyMatchVisual(
+        label=result.label,
+        spec=result.spec,
+        pair=result.pair,
+        valid_fraction=result.valid_fraction,
+        points_a=result.points_a[:0].copy(),
+        points_b=result.points_b[:0].copy(),
+        scores=result.scores[:0].copy(),
+        errors=result.errors[:0].copy(),
+        correct=result.correct[:0].copy(),
+        pair_logits=optional_match_array_head(result.pair_logits, 0),
+        row_dustbin_logits=optional_match_array_head(result.row_dustbin_logits, 0),
+        col_dustbin_logits=optional_match_array_head(result.col_dustbin_logits, 0),
+        positive_vs_dustbin_margins=optional_match_array_head(result.positive_vs_dustbin_margins, 0),
+        raw_similarities=optional_match_array_head(result.raw_similarities, 0),
+        raw_margins=optional_match_array_head(result.raw_margins, 0),
+        accept_logits=optional_match_array_head(result.accept_logits, 0),
+        accept_probabilities=optional_match_array_head(result.accept_probabilities, 0),
+        pair_accept_logit=result.pair_accept_logit,
+        pair_accept_probability=result.pair_accept_probability,
+        pair_accept_rejected=True,
+        filtered_reject_reason="pair_accept_probability",
         image_name=result.image_name,
         crop_a=result.crop_a,
         crop_b=result.crop_b,
@@ -900,6 +1039,10 @@ def choose_representatives(results: list[LazyMatchVisual], count: int) -> list[L
                     raw_margins=result.raw_margins,
                     accept_logits=result.accept_logits,
                     accept_probabilities=result.accept_probabilities,
+                    pair_accept_logit=result.pair_accept_logit,
+                    pair_accept_probability=result.pair_accept_probability,
+                    pair_accept_rejected=result.pair_accept_rejected,
+                    filtered_reject_reason=result.filtered_reject_reason,
                     crop_a=result.crop_a,
                     crop_b=result.crop_b,
                 )
@@ -1004,6 +1147,10 @@ def write_summary_csv(results: list[LazyMatchVisual], path: Path) -> None:
         "score_mean",
         "score_median",
         "score_max",
+        "pair_accept_logit",
+        "pair_accept_probability",
+        "pair_accept_rejected",
+        "filtered_reject_reason",
         "span_a_x_px",
         "span_a_y_px",
         "span_b_x_px",
@@ -1043,6 +1190,14 @@ def write_summary_csv(results: list[LazyMatchVisual], path: Path) -> None:
                     "score_mean": f"{score_mean:.6f}",
                     "score_median": f"{score_median:.6f}",
                     "score_max": f"{score_max:.6f}",
+                    "pair_accept_logit": (
+                        "" if result.pair_accept_logit is None else f"{result.pair_accept_logit:.6f}"
+                    ),
+                    "pair_accept_probability": (
+                        "" if result.pair_accept_probability is None else f"{result.pair_accept_probability:.6f}"
+                    ),
+                    "pair_accept_rejected": int(bool(result.pair_accept_rejected)),
+                    "filtered_reject_reason": result.filtered_reject_reason,
                     "span_a_x_px": f"{geometry.span_a_x_px:.3f}",
                     "span_a_y_px": f"{geometry.span_a_y_px:.3f}",
                     "span_b_x_px": f"{geometry.span_b_x_px:.3f}",
@@ -1062,6 +1217,7 @@ def write_summary_csv(results: list[LazyMatchVisual], path: Path) -> None:
 
 
 def write_match_detail_csv(results: list[LazyMatchVisual], path: Path) -> None:
+    progress_enabled = os.environ.get("PFM_VISUAL_DETAIL_PROGRESS") == "1"
     fields = [
         "label",
         "pair_index",
@@ -1090,7 +1246,17 @@ def write_match_detail_csv(results: list[LazyMatchVisual], path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for result in results:
+        for result_index, result in enumerate(results, 1):
+            if progress_enabled:
+                print(
+                    "write_match_detail_csv "
+                    f"path={path} result={result_index}/{len(results)} "
+                    f"pair_index={result.spec.pair_index} "
+                    f"base={result.spec.reference.base_id} "
+                    f"target={result.spec.target.variant} "
+                    f"matches={result.matches}",
+                    flush=True,
+                )
             for index in range(result.matches):
                 point_a = result.points_a[index]
                 point_b = result.points_b[index]
@@ -1124,6 +1290,105 @@ def write_match_detail_csv(results: list[LazyMatchVisual], path: Path) -> None:
                         "valid_fraction": f"{result.valid_fraction:.6f}",
                     }
                 )
+            if progress_enabled:
+                handle.flush()
+
+
+def _evenly_sample_indices(count: int, limit: int) -> list[int]:
+    if limit <= 0 or count <= limit:
+        return list(range(count))
+    if limit == 1:
+        return [0]
+    last_index = count - 1
+    sampled: list[int] = []
+    used: set[int] = set()
+    for item_index in range(limit):
+        source_index = round(item_index * last_index / (limit - 1))
+        while source_index in used and source_index < last_index:
+            source_index += 1
+        while source_index in used and source_index > 0:
+            source_index -= 1
+        used.add(source_index)
+        sampled.append(source_index)
+    return sorted(sampled)
+
+
+def sampled_match_detail_indices(result: LazyMatchVisual, max_matches_per_result: int) -> list[int]:
+    if max_matches_per_result <= 0 or result.matches <= max_matches_per_result:
+        return list(range(result.matches))
+    correct_indices = [index for index, value in enumerate(result.correct.tolist()) if bool(value)]
+    wrong_indices = [index for index, value in enumerate(result.correct.tolist()) if not bool(value)]
+    if not correct_indices or not wrong_indices:
+        return _evenly_sample_indices(result.matches, max_matches_per_result)
+
+    wrong_quota = min(len(wrong_indices), max(1, max_matches_per_result // 2))
+    correct_quota = min(len(correct_indices), max_matches_per_result - wrong_quota)
+    remaining = max_matches_per_result - wrong_quota - correct_quota
+    if remaining > 0:
+        extra_wrong = min(len(wrong_indices) - wrong_quota, remaining)
+        wrong_quota += extra_wrong
+        remaining -= extra_wrong
+    if remaining > 0:
+        correct_quota += min(len(correct_indices) - correct_quota, remaining)
+
+    selected = [
+        wrong_indices[index]
+        for index in _evenly_sample_indices(len(wrong_indices), wrong_quota)
+    ] + [
+        correct_indices[index]
+        for index in _evenly_sample_indices(len(correct_indices), correct_quota)
+    ]
+    return sorted(selected)
+
+
+def write_sampled_match_detail_csv(
+    results: list[LazyMatchVisual],
+    path: Path,
+    *,
+    max_results: int = 0,
+    max_matches_per_result: int = 0,
+) -> None:
+    selected_result_indices = _evenly_sample_indices(len(results), max_results)
+    sampled_results: list[LazyMatchVisual] = []
+    for result_index in selected_result_indices:
+        result = results[result_index]
+        match_indices = sampled_match_detail_indices(result, max_matches_per_result)
+        if len(match_indices) == result.matches:
+            sampled_results.append(result)
+            continue
+        keep = np.asarray(match_indices, dtype=np.int64)
+        sampled_results.append(
+            LazyMatchVisual(
+                label=result.label,
+                spec=result.spec,
+                pair=result.pair,
+                valid_fraction=result.valid_fraction,
+                points_a=result.points_a[keep].copy(),
+                points_b=result.points_b[keep].copy(),
+                scores=result.scores[keep].copy(),
+                errors=result.errors[keep].copy(),
+                correct=result.correct[keep].copy(),
+                pair_logits=optional_match_array(result.pair_logits, keep),
+                row_dustbin_logits=optional_match_array(result.row_dustbin_logits, keep),
+                col_dustbin_logits=optional_match_array(result.col_dustbin_logits, keep),
+                positive_vs_dustbin_margins=optional_match_array(
+                    result.positive_vs_dustbin_margins,
+                    keep,
+                ),
+                raw_similarities=optional_match_array(result.raw_similarities, keep),
+                raw_margins=optional_match_array(result.raw_margins, keep),
+                accept_logits=optional_match_array(result.accept_logits, keep),
+                accept_probabilities=optional_match_array(result.accept_probabilities, keep),
+                pair_accept_logit=result.pair_accept_logit,
+                pair_accept_probability=result.pair_accept_probability,
+                pair_accept_rejected=result.pair_accept_rejected,
+                filtered_reject_reason=result.filtered_reject_reason,
+                image_name=result.image_name,
+                crop_a=result.crop_a,
+                crop_b=result.crop_b,
+            )
+        )
+    write_match_detail_csv(sampled_results, path)
 
 
 def write_visual_summary_artifacts(
@@ -1135,9 +1400,14 @@ def write_visual_summary_artifacts(
     write_all_summary: bool,
     filtered_geometry_filter: str,
     filtered_threshold_px: float,
+    true_geometry_min_valid_fraction: float = 0.0,
     write_match_details: bool = False,
+    write_all_match_details: bool = True,
+    all_match_details_max_results: int = 0,
+    all_match_details_max_matches_per_result: int = 0,
     filtered_min_matches: int = 0,
     filtered_min_matches_by_variant: dict[str, int] | None = None,
+    pair_accept_min_probability: float = -1.0,
     adaptive_geometry_rescue_results: dict[tuple[object, ...], LazyMatchVisual] | None = None,
     adaptive_geometry_rescue_config: AdaptiveGeometryRescueConfig | None = None,
     low_match_geometry_guard_config: LowMatchGeometryGuardConfig | None = None,
@@ -1151,7 +1421,12 @@ def write_visual_summary_artifacts(
             result,
             geometry_filter=filtered_geometry_filter,
             threshold_px=threshold_px,
+            true_geometry_min_valid_fraction=true_geometry_min_valid_fraction,
             label=label,
+        )
+        filtered = apply_pair_acceptance_gate(
+            filtered,
+            min_probability=pair_accept_min_probability,
         )
         return apply_min_match_gate(
             filtered,
@@ -1166,6 +1441,10 @@ def write_visual_summary_artifacts(
     def adaptive_filtered_result(result: LazyMatchVisual, *, label: str) -> LazyMatchVisual:
         base = filter_and_gate(result, threshold_px=filtered_threshold_px, label=label)
         if not rescue_config.enabled:
+            return base
+        if base.spec.target.variant not in set(rescue_config.target_variants):
+            return base
+        if rescue_config.max_base_matches >= 0 and base.matches > rescue_config.max_base_matches:
             return base
         rescue_source = rescue_results.get(visual_identity(result))
         if rescue_source is None:
@@ -1184,7 +1463,10 @@ def write_visual_summary_artifacts(
         filtered_selected_with_gate = [
             select_adaptive_geometry_rescue(
                 apply_min_match_gate(
-                    result,
+                    apply_pair_acceptance_gate(
+                        result,
+                        min_probability=pair_accept_min_probability,
+                    ),
                     min_matches=min_matches_for_visual(
                         result,
                         default_min_matches=filtered_min_matches,
@@ -1209,8 +1491,13 @@ def write_visual_summary_artifacts(
     if not write_all_summary:
         return
     write_summary_csv(all_results, output_dir / "all_summary.csv")
-    if write_match_details:
-        write_match_detail_csv(all_results, output_dir / "all_match_details.csv")
+    if write_match_details and write_all_match_details:
+        write_sampled_match_detail_csv(
+            all_results,
+            output_dir / "all_match_details.csv",
+            max_results=all_match_details_max_results,
+            max_matches_per_result=all_match_details_max_matches_per_result,
+        )
     filtered_all = [
         adaptive_filtered_result(
             result,
@@ -1633,6 +1920,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weak-texture-fraction", type=float, default=0.05)
     parser.add_argument("--keypoint-spatial-bins", type=int, default=12)
     parser.add_argument("--keypoint-cell-cap", type=int, default=6)
+    parser.add_argument("--use-keypoint-offsets", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--input-local-contrast-strength", type=float, default=0.0)
     parser.add_argument("--input-local-contrast-kernel", type=int, default=31)
@@ -1646,12 +1934,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-min-raw-score", type=float, default=-1.0)
     parser.add_argument("--graph-min-raw-margin", type=float, default=0.0)
     parser.add_argument("--graph-min-accept-probability", type=float, default=-1.0)
+    parser.add_argument("--pair-accept-min-probability", type=float, default=-1.0)
     parser.add_argument("--graph-width-prune-min-score", type=float, default=-1.0)
     parser.add_argument("--graph-early-stop-min-confidence", type=float, default=-1.0)
     parser.add_argument("--graph-max-attention-layers", type=int, default=0)
     parser.add_argument("--graph-max-attention-work-fraction", type=float, default=1.0)
     parser.add_argument("--graph-width-prune-keep-ratio", type=float, default=1.0)
     parser.add_argument("--matcher-candidate-topk", type=int, default=-1)
+    parser.add_argument(
+        "--matcher-final-accept-score-mode",
+        choices=("", *pfm_model.MATCHER_FINAL_ACCEPT_SCORE_MODES),
+        default="",
+        help="Override GraphMatcher final accept-score fusion mode; empty keeps checkpoint config.",
+    )
+    parser.add_argument(
+        "--matcher-accept-assignment-mode",
+        choices=("", *pfm_model.MATCHER_ACCEPT_ASSIGNMENT_MODES),
+        default="",
+        help="Override GraphMatcher accept-logit assignment mode; empty keeps checkpoint config.",
+    )
+    parser.add_argument(
+        "--matcher-final-accept-score-alpha",
+        type=float,
+        default=-1.0,
+        help="Override add-mode final accept-score alpha; -1 keeps checkpoint config.",
+    )
     parser.add_argument("--mutual", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--post-filter-profile",
@@ -1659,13 +1966,17 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Apply a named post-filter profile after parsing default CLI options.",
     )
-    parser.add_argument("--geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="none")
+    parser.add_argument("--geometry-filter", choices=GEOMETRY_FILTER_CHOICES, default="none")
     parser.add_argument("--geometry-threshold-px", type=float, default=0.0)
+    parser.add_argument("--true-geometry-min-valid-fraction", type=float, default=0.0)
     parser.add_argument("--filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--filtered-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="local")
+    parser.add_argument("--filtered-geometry-filter", choices=GEOMETRY_FILTER_CHOICES, default="local")
     parser.add_argument("--write-all-summary", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--write-match-details", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--write-all-match-details", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--all-match-details-max-results", type=int, default=0)
+    parser.add_argument("--all-match-details-max-matches-per-result", type=int, default=0)
     parser.add_argument("--filtered-max-matches", type=int, default=0)
     parser.add_argument("--filtered-draw-matches", type=int, default=0)
     parser.add_argument("--filtered-min-score", type=float, default=-1.0)
@@ -1688,9 +1999,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-px", type=float, default=5.0)
     parser.add_argument("--illumination-stress", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--illumination-stress-limit", type=int, default=6)
+    parser.add_argument("--html-report", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     apply_post_filter_profile(args)
     return args
+
+
+def apply_matcher_calibration_overrides(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    args: argparse.Namespace,
+) -> pfm_model.CheckpointConfig:
+    candidate_topk = int(args.matcher_candidate_topk) if args.matcher_candidate_topk >= 0 else None
+    final_accept_score_mode = args.matcher_final_accept_score_mode or None
+    accept_assignment_mode = args.matcher_accept_assignment_mode or None
+    final_accept_score_alpha = (
+        float(args.matcher_final_accept_score_alpha)
+        if float(args.matcher_final_accept_score_alpha) >= 0.0
+        else None
+    )
+    if (
+        candidate_topk is None
+        and final_accept_score_mode is None
+        and accept_assignment_mode is None
+        and final_accept_score_alpha is None
+    ):
+        return model.config
+    model.set_matcher_calibration(
+        candidate_topk=candidate_topk,
+        final_accept_score_mode=final_accept_score_mode,
+        accept_assignment_mode=accept_assignment_mode,
+        final_accept_score_alpha=final_accept_score_alpha,
+    )
+    return model.config
 
 
 def main() -> int:
@@ -1703,6 +2043,10 @@ def main() -> int:
         raise ValueError("--filtered-max-matches must be nonnegative; use 0 to keep all matches")
     if args.filtered_draw_matches < 0:
         raise ValueError("--filtered-draw-matches must be nonnegative; use 0 to draw all matches")
+    if args.all_match_details_max_results < 0:
+        raise ValueError("--all-match-details-max-results must be nonnegative; use 0 to keep all results")
+    if args.all_match_details_max_matches_per_result < 0:
+        raise ValueError("--all-match-details-max-matches-per-result must be nonnegative; use 0 to keep all matches")
     if args.filtered_min_matches < 0:
         raise ValueError("--filtered-min-matches must be nonnegative; use 0 to disable this gate")
     for variant, min_matches in args.filtered_min_matches_by_variant.items():
@@ -1716,6 +2060,8 @@ def main() -> int:
         raise ValueError("--graph-min-raw-margin must be nonnegative")
     if args.graph_min_accept_probability < -1.0 or args.graph_min_accept_probability > 1.0:
         raise ValueError("--graph-min-accept-probability must be in [-1, 1]")
+    if args.pair_accept_min_probability < -1.0 or args.pair_accept_min_probability > 1.0:
+        raise ValueError("--pair-accept-min-probability must be in [-1, 1]")
     if args.graph_width_prune_min_score < -1.0:
         raise ValueError("--graph-width-prune-min-score must be at least -1.0; -1 disables pruning")
     if args.graph_early_stop_min_confidence < -1.0:
@@ -1728,8 +2074,14 @@ def main() -> int:
         raise ValueError("--graph-width-prune-keep-ratio must be in [0, 1]")
     if args.matcher_candidate_topk < -1:
         raise ValueError("--matcher-candidate-topk must be nonnegative, or -1 to keep checkpoint config")
+    if not math.isfinite(float(args.matcher_final_accept_score_alpha)):
+        raise ValueError("--matcher-final-accept-score-alpha must be finite")
+    if args.matcher_final_accept_score_alpha < 0.0 and args.matcher_final_accept_score_alpha != -1.0:
+        raise ValueError("--matcher-final-accept-score-alpha must be nonnegative, or -1 to keep checkpoint config")
     if args.geometry_threshold_px < 0.0:
         raise ValueError("--geometry-threshold-px must be nonnegative")
+    if args.true_geometry_min_valid_fraction < 0.0:
+        raise ValueError("--true-geometry-min-valid-fraction must be nonnegative")
     if args.adaptive_geometry_rescue_threshold_px < 0.0:
         raise ValueError("--adaptive-geometry-rescue-threshold-px must be nonnegative")
     if args.adaptive_geometry_rescue_min_match_gain < 0:
@@ -1768,9 +2120,7 @@ def main() -> int:
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     model, config = pfm_model.load_pytorch_state(args.pytorch_state, device=device, strict=True)
-    if args.matcher_candidate_topk >= 0:
-        model.set_matcher_calibration(candidate_topk=int(args.matcher_candidate_topk))
-        config = model.config
+    config = apply_matcher_calibration_overrides(model, args)
     model.eval()
     adaptive_rescue_config = adaptive_geometry_rescue_config_from_args(args)
     low_match_guard_config = low_match_geometry_guard_config_from_args(args)
@@ -1823,9 +2173,11 @@ def main() -> int:
                 mutual=args.mutual,
                 geometry_filter=args.geometry_filter,
                 geometry_threshold_px=args.geometry_threshold_px,
+                true_geometry_min_valid_fraction=args.true_geometry_min_valid_fraction,
                 input_local_contrast=args.input_local_contrast,
                 input_local_contrast_strength=args.input_local_contrast_strength,
                 input_local_contrast_kernel=args.input_local_contrast_kernel,
+                use_keypoint_offsets=args.use_keypoint_offsets,
                 threshold_px=args.threshold_px,
             )
             if adaptive_rescue_config.enabled and spec.target.variant in set(adaptive_rescue_config.target_variants):
@@ -1862,9 +2214,11 @@ def main() -> int:
                     mutual=args.mutual,
                     geometry_filter=args.geometry_filter,
                     geometry_threshold_px=adaptive_rescue_config.rescue_threshold_px,
+                    true_geometry_min_valid_fraction=args.true_geometry_min_valid_fraction,
                     input_local_contrast=args.input_local_contrast,
                     input_local_contrast_strength=args.input_local_contrast_strength,
                     input_local_contrast_kernel=args.input_local_contrast_kernel,
+                    use_keypoint_offsets=args.use_keypoint_offsets,
                     threshold_px=args.threshold_px,
                 )
                 adaptive_rescue_results[visual_identity(visual)] = rescue_visual
@@ -1930,10 +2284,16 @@ def main() -> int:
                 mutual=args.filtered_mutual,
                 geometry_filter=args.filtered_geometry_filter,
                 geometry_threshold_px=args.geometry_threshold_px,
+                true_geometry_min_valid_fraction=args.true_geometry_min_valid_fraction,
                 input_local_contrast=args.input_local_contrast,
                 input_local_contrast_strength=args.input_local_contrast_strength,
                 input_local_contrast_kernel=args.input_local_contrast_kernel,
+                use_keypoint_offsets=args.use_keypoint_offsets,
                 threshold_px=args.threshold_px,
+            )
+            filtered_visual = apply_pair_acceptance_gate(
+                filtered_visual,
+                min_probability=args.pair_accept_min_probability,
             )
             filtered_selected.append(
                 apply_min_match_gate(
@@ -1962,6 +2322,18 @@ def main() -> int:
             scores=result.scores,
             errors=result.errors,
             correct=result.correct,
+            pair_logits=result.pair_logits,
+            row_dustbin_logits=result.row_dustbin_logits,
+            col_dustbin_logits=result.col_dustbin_logits,
+            positive_vs_dustbin_margins=result.positive_vs_dustbin_margins,
+            raw_similarities=result.raw_similarities,
+            raw_margins=result.raw_margins,
+            accept_logits=result.accept_logits,
+            accept_probabilities=result.accept_probabilities,
+            pair_accept_logit=result.pair_accept_logit,
+            pair_accept_probability=result.pair_accept_probability,
+            pair_accept_rejected=result.pair_accept_rejected,
+            filtered_reject_reason=result.filtered_reject_reason,
             image_name=image_name,
             crop_a=result.crop_a,
             crop_b=result.crop_b,
@@ -1979,9 +2351,14 @@ def main() -> int:
         write_all_summary=bool(args.write_all_summary),
         filtered_geometry_filter=args.filtered_geometry_filter,
         filtered_threshold_px=summary_filter_threshold_px,
+        true_geometry_min_valid_fraction=args.true_geometry_min_valid_fraction,
         write_match_details=bool(args.write_match_details),
+        write_all_match_details=bool(args.write_all_match_details),
+        all_match_details_max_results=args.all_match_details_max_results,
+        all_match_details_max_matches_per_result=args.all_match_details_max_matches_per_result,
         filtered_min_matches=args.filtered_min_matches,
         filtered_min_matches_by_variant=args.filtered_min_matches_by_variant,
+        pair_accept_min_probability=args.pair_accept_min_probability,
         adaptive_geometry_rescue_results=adaptive_rescue_results,
         adaptive_geometry_rescue_config=adaptive_rescue_config,
         low_match_geometry_guard_config=low_match_guard_config,
@@ -2003,6 +2380,14 @@ def main() -> int:
         "pair_type_counts": pair_type_counts,
         "evaluated": len(all_results),
         "skipped": skipped,
+        "post_filter": {
+            "profile": str(args.post_filter_profile),
+            "geometry_filter": str(args.geometry_filter),
+            "filtered_geometry_filter": str(args.filtered_geometry_filter),
+            "geometry_threshold_px": float(args.geometry_threshold_px),
+            "true_geometry_min_valid_fraction": float(args.true_geometry_min_valid_fraction),
+            "filtered_min_matches": int(args.filtered_min_matches),
+        },
         "adaptive_geometry_rescue": {
             "enabled": adaptive_rescue_config.enabled,
             "target_variants": list(adaptive_rescue_config.target_variants),
@@ -2024,20 +2409,29 @@ def main() -> int:
             "min_score_mean": low_match_guard_config.min_score_mean,
         },
         "graph_inference": {
+            "use_keypoint_offsets": bool(args.use_keypoint_offsets),
             "graph_dustbin_delta": float(args.graph_dustbin_delta),
             "graph_acceptance_margin": float(args.graph_acceptance_margin),
             "graph_min_raw_score": float(args.graph_min_raw_score),
             "graph_min_raw_margin": float(args.graph_min_raw_margin),
             "graph_min_accept_probability": float(args.graph_min_accept_probability),
+            "pair_accept_min_probability": float(args.pair_accept_min_probability),
             "graph_width_prune_min_score": float(args.graph_width_prune_min_score),
             "graph_early_stop_min_confidence": float(args.graph_early_stop_min_confidence),
             "graph_max_attention_layers": int(args.graph_max_attention_layers),
             "graph_max_attention_work_fraction": float(args.graph_max_attention_work_fraction),
             "graph_width_prune_keep_ratio": float(args.graph_width_prune_keep_ratio),
             "matcher_candidate_topk": int(config.matcher_candidate_topk),
+            "matcher_final_accept_score_mode": str(config.matcher_final_accept_score_mode),
+            "matcher_accept_assignment_mode": str(config.matcher_accept_assignment_mode),
+            "matcher_final_accept_score_alpha": float(config.matcher_final_accept_score_alpha),
         },
     }
     (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not args.html_report:
+        print(f"report=disabled output_dir={args.output_dir}", flush=True)
+        return 0
+
     elapsed_s = time.perf_counter() - start
     artifact_paths: dict[str, Path] = {}
     metrics_path = args.metrics_csv
@@ -2090,9 +2484,11 @@ def main() -> int:
                         mutual=args.mutual,
                         geometry_filter=args.geometry_filter,
                         geometry_threshold_px=args.geometry_threshold_px,
+                        true_geometry_min_valid_fraction=args.true_geometry_min_valid_fraction,
                         input_local_contrast=args.input_local_contrast,
                         input_local_contrast_strength=args.input_local_contrast_strength,
                         input_local_contrast_kernel=args.input_local_contrast_kernel,
+                        use_keypoint_offsets=args.use_keypoint_offsets,
                         threshold_px=args.threshold_px,
                     )
                 )

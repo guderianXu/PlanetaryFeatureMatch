@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -112,10 +113,184 @@ def _audit_active_mainline_validation(path: Path | None) -> AuditItem:
     )
 
 
-def _float_value(row: dict[str, str], key: str, default: float = 0.0) -> float:
+def _audit_hybrid_lightglue_validation(path: Path | None) -> AuditItem:
+    data = _read_json_object(path)
+    if data is None:
+        return AuditItem(
+            requirement_id="hybrid.lightglue_gate_validation",
+            status="MISSING",
+            evidence="",
+            risk="no hybrid LightGlue validation JSON was provided or it could not be parsed",
+        )
+
+    errors = data.get("errors")
+    errors = errors if isinstance(errors, list) else []
+    correct_delta = _float_value(data, "correct_delta_vs_lightglue")
+    wrong_delta = _float_value(data, "wrong_delta_vs_lightglue")
+    precision_delta = _float_value(data, "precision_delta_vs_lightglue")
+
+    failures: list[str] = []
+    if not bool(data.get("valid")):
+        failures.append("validation_not_valid")
+    if errors:
+        failures.append("validation_errors_present")
+    if correct_delta <= 0:
+        failures.append("no_positive_correct_delta")
+    if wrong_delta > 0:
+        failures.append("wrong_delta_positive")
+    if precision_delta < 0:
+        failures.append("precision_delta_negative")
+
+    evidence = (
+        f"valid={bool(data.get('valid'))}; "
+        f"correct_delta={correct_delta:g}; "
+        f"wrong_delta={wrong_delta:g}; "
+        f"precision_delta={precision_delta:g}"
+    )
+    return AuditItem(
+        requirement_id="hybrid.lightglue_gate_validation",
+        status="PASS" if not failures else "PARTIAL",
+        evidence=evidence,
+        risk="; ".join(failures),
+    )
+
+
+def _selector_summary_payload(data: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    aggregate = data.get("aggregate")
+    if isinstance(aggregate, dict):
+        by_split = data.get("by_split")
+        return aggregate, by_split if isinstance(by_split, dict) else {}
+
+    comparison = data.get("comparison")
+    comparison = comparison if isinstance(comparison, dict) else {}
+    selector = comparison.get("selector")
+    if isinstance(selector, dict):
+        by_split = comparison.get("selector_by_split")
+        return selector, by_split if isinstance(by_split, dict) else {}
+
+    selector = data.get("selector")
+    if isinstance(selector, dict):
+        by_split = data.get("selector_by_split")
+        return selector, by_split if isinstance(by_split, dict) else {}
+
+    return {}, {}
+
+
+def _audit_true_geometry_selector_validation(
+    selector_summary_json: Path | None,
+    manifest_validation_json: Path | None,
+) -> AuditItem:
+    data = _read_json_object(selector_summary_json)
+    if data is None:
+        return AuditItem(
+            requirement_id="true_geometry.selector_fresh_validation",
+            status="MISSING",
+            evidence="",
+            risk="no true-geometry selector summary JSON was provided or it could not be parsed",
+        )
+
+    aggregate, by_split = _selector_summary_payload(data)
+    if not aggregate:
+        return AuditItem(
+            requirement_id="true_geometry.selector_fresh_validation",
+            status="MISSING",
+            evidence="",
+            risk="true-geometry selector summary does not contain aggregate selector metrics",
+        )
+
+    manifest = _read_json_object(manifest_validation_json)
+    if manifest is None:
+        embedded_manifest = data.get("manifest_validation")
+        manifest = embedded_manifest if isinstance(embedded_manifest, dict) else None
+
+    rows = _float_value(aggregate, "rows")
+    selected_matches = _float_value(aggregate, "selected_matches", _float_value(aggregate, "pfm_matches"))
+    selected_correct = _float_value(aggregate, "selected_correct", _float_value(aggregate, "pfm_correct"))
+    selected_wrong = _float_value(aggregate, "selected_wrong", _float_value(aggregate, "pfm_wrong"))
+    selected_precision = _float_value(
+        aggregate,
+        "selected_precision",
+        selected_correct / selected_matches if selected_matches else 0.0,
+    )
+    lightglue_correct = _float_value(aggregate, "lightglue_correct")
+    lightglue_wrong = _float_value(aggregate, "lightglue_wrong")
+    lightglue_matches = _float_value(aggregate, "lightglue_matches")
+    lightglue_precision = _float_value(
+        aggregate,
+        "lightglue_precision",
+        lightglue_correct / lightglue_matches if lightglue_matches else 0.0,
+    )
+    correct_delta = _float_value(aggregate, "correct_delta_vs_lightglue", selected_correct - lightglue_correct)
+    wrong_delta = _float_value(aggregate, "wrong_delta_vs_lightglue", selected_wrong - lightglue_wrong)
+
+    failures: list[str] = []
+    if rows <= 0:
+        failures.append("no_selector_rows")
+    if selected_correct <= 0:
+        failures.append("no_selected_correct_matches")
+    if correct_delta <= 0:
+        failures.append("no_positive_correct_delta")
+    if wrong_delta > 0:
+        failures.append("wrong_delta_positive")
+    if selected_precision < lightglue_precision:
+        failures.append("precision_below_lightglue")
+    if not by_split:
+        failures.append("missing_by_split_metrics")
+    for split, split_value in by_split.items():
+        split_metrics = split_value if isinstance(split_value, dict) else {}
+        if _float_value(split_metrics, "rows") <= 0:
+            failures.append(f"{split}_has_no_rows")
+        if _float_value(split_metrics, "correct_delta_vs_lightglue") <= 0:
+            failures.append(f"{split}_no_positive_correct_delta")
+        if _float_value(split_metrics, "wrong_delta_vs_lightglue") > 0:
+            failures.append(f"{split}_wrong_delta_positive")
+
+    base_disjoint = None
+    counts: dict[str, object] = {}
+    excluded_base_ids = 0.0
+    if manifest is None:
+        failures.append("missing_fresh_manifest_validation")
+    else:
+        base_disjoint = bool(manifest.get("base_disjoint"))
+        if not base_disjoint:
+            failures.append("fresh_manifest_not_base_disjoint")
+        raw_counts = manifest.get("counts")
+        counts = raw_counts if isinstance(raw_counts, dict) else {}
+        for split in ("dev", "val", "lockbox"):
+            if _float_value(counts, split) <= 0:
+                failures.append(f"fresh_manifest_missing_{split}")
+        excluded_base_ids = _float_value(manifest, "excluded_base_ids")
+
+    count_text = ",".join(f"{key}={_float_value(counts, key):g}" for key in sorted(counts))
+    split_text = ",".join(str(key) for key in sorted(by_split))
+    evidence = (
+        f"rows={rows:g}; "
+        f"selected_correct={selected_correct:g}; "
+        f"selected_wrong={selected_wrong:g}; "
+        f"lightglue_correct={lightglue_correct:g}; "
+        f"lightglue_wrong={lightglue_wrong:g}; "
+        f"correct_delta={correct_delta:g}; "
+        f"wrong_delta={wrong_delta:g}; "
+        f"selected_precision={selected_precision:.6g}; "
+        f"lightglue_precision={lightglue_precision:.6g}; "
+        f"base_disjoint={base_disjoint}; "
+        f"excluded_base_ids={excluded_base_ids:g}; "
+        f"counts={count_text}; "
+        f"splits={split_text}"
+    )
+    return AuditItem(
+        requirement_id="true_geometry.selector_fresh_validation",
+        status="PASS" if not failures else "PARTIAL",
+        evidence=evidence,
+        risk="; ".join(failures),
+    )
+
+
+def _float_value(row: Mapping[str, object], key: str, default: float = 0.0) -> float:
     try:
-        return float(row.get(key, "") or default)
-    except ValueError:
+        value = row.get(key, "")
+        return float(value if value not in ("", None) else default)
+    except (TypeError, ValueError):
         return default
 
 
@@ -132,6 +307,9 @@ def audit_goal(
     project_root: Path,
     selector_promotion_json: Path | None = None,
     active_mainline_validation_json: Path | None = None,
+    hybrid_lightglue_validation_json: Path | None = None,
+    true_geometry_selector_summary_json: Path | None = None,
+    true_geometry_manifest_validation_json: Path | None = None,
     train_metrics_csv: Path | None = None,
 ) -> list[AuditItem]:
     bench = read_text(project_root / "scripts" / "benchmark_lazy_pose_pairs.py")
@@ -146,6 +324,13 @@ def audit_goal(
     items: list[AuditItem] = []
 
     items.append(_audit_active_mainline_validation(active_mainline_validation_json))
+    items.append(_audit_hybrid_lightglue_validation(hybrid_lightglue_validation_json))
+    items.append(
+        _audit_true_geometry_selector_validation(
+            true_geometry_selector_summary_json,
+            true_geometry_manifest_validation_json,
+        )
+    )
 
     checkpoint_patterns = [
         "best_by_match_score_pytorch_pfm_state.pt",
@@ -471,6 +656,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--selector-promotion-json", type=Path, default=None)
     parser.add_argument("--active-mainline-validation-json", type=Path, default=None)
+    parser.add_argument("--hybrid-lightglue-validation-json", type=Path, default=None)
+    parser.add_argument("--true-geometry-selector-summary-json", type=Path, default=None)
+    parser.add_argument("--true-geometry-manifest-validation-json", type=Path, default=None)
     parser.add_argument("--train-metrics-csv", type=Path, default=None)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-html", type=Path, required=True)
@@ -483,6 +671,9 @@ def main() -> int:
         project_root=args.project_root,
         selector_promotion_json=args.selector_promotion_json,
         active_mainline_validation_json=args.active_mainline_validation_json,
+        hybrid_lightglue_validation_json=args.hybrid_lightglue_validation_json,
+        true_geometry_selector_summary_json=args.true_geometry_selector_summary_json,
+        true_geometry_manifest_validation_json=args.true_geometry_manifest_validation_json,
         train_metrics_csv=args.train_metrics_csv,
     )
     write_json(args.output_json, items)

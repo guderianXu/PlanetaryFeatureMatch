@@ -274,6 +274,335 @@ class PFMModelTest(unittest.TestCase):
         self.assertEqual(output.matches.size(1), 2)
         self.assertEqual(output.scores.dim(), 1)
 
+    def test_graph_matcher_outputs_pair_accept_logit(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=6,
+        )
+        descriptors_a = torch.nn.functional.normalize(torch.randn(6, 8), dim=1)
+        descriptors_b = torch.nn.functional.normalize(torch.randn(7, 8), dim=1)
+        meta_a = torch.zeros(6, 6)
+        meta_b = torch.zeros(7, 6)
+
+        output = graph(descriptors_a, meta_a, descriptors_b, meta_b)
+
+        self.assertIsNotNone(output.pair_accept_logit)
+        self.assertEqual(tuple(output.pair_accept_logit.shape), ())
+        self.assertTrue(torch.isfinite(output.pair_accept_logit))
+
+    def test_graph_matcher_pair_acceptance_context_features_track_match_geometry(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.tensor(
+            [[12.0, -3.0, -4.0], [-2.0, 11.0, -5.0], [-4.0, -3.0, 10.0]],
+            dtype=torch.float32,
+        )
+        raw_similarity = torch.tensor(
+            [[0.95, 0.10, 0.05], [0.15, 0.93, 0.10], [0.05, 0.20, 0.91]],
+            dtype=torch.float32,
+        )
+        accept_logits = torch.full_like(pair_logits, 2.0)
+        scores = torch.tensor([12.0, 11.0, 10.0], dtype=torch.float32)
+        source_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        target_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        meta_a = torch.tensor(
+            [[0.0, 0.0, 0.0, 0.0], [10.0, 0.0, 0.0, 0.0], [20.0, 0.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+        coherent_meta_b = torch.tensor(
+            [[2.0, 1.0, 0.0, 0.0], [12.0, 1.0, 0.0, 0.0], [22.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+        scattered_meta_b = torch.tensor(
+            [[2.0, 1.0, 0.0, 0.0], [40.0, 20.0, 0.0, 0.0], [-30.0, -15.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+
+        coherent = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=coherent_meta_b,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+        scattered = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=scattered_meta_b,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+
+        dx_mad_index = pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES.index("match_dx_mad")
+        displacement_mad_index = pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES.index("match_displacement_mad")
+        self.assertEqual(coherent.numel(), len(pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES))
+        self.assertGreater(float(scattered[dx_mad_index]), float(coherent[dx_mad_index]))
+        self.assertGreater(float(scattered[displacement_mad_index]), float(coherent[displacement_mad_index]))
+
+    def test_graph_matcher_pair_acceptance_context_features_track_raw_margin(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.tensor(
+            [[12.0, -3.0, -4.0], [-2.0, 11.0, -5.0], [-4.0, -3.0, 10.0]],
+            dtype=torch.float32,
+        )
+        clear_raw_similarity = torch.tensor(
+            [[0.95, 0.10, 0.05], [0.15, 0.93, 0.10], [0.05, 0.20, 0.91]],
+            dtype=torch.float32,
+        )
+        ambiguous_raw_similarity = torch.tensor(
+            [[0.95, 0.94, 0.93], [0.92, 0.93, 0.91], [0.90, 0.89, 0.91]],
+            dtype=torch.float32,
+        )
+        accept_logits = torch.full_like(pair_logits, 2.0)
+        scores = torch.tensor([12.0, 11.0, 10.0], dtype=torch.float32)
+        source_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        target_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        meta = torch.zeros(3, 4, dtype=torch.float32)
+
+        clear = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=clear_raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta,
+            meta_b=meta,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+        ambiguous = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=ambiguous_raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta,
+            meta_b=meta,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+
+        margin_index = pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES.index("matched_raw_margin_min")
+        self.assertGreater(float(clear[margin_index]), float(ambiguous[margin_index]))
+
+    def test_graph_matcher_pair_acceptance_context_features_track_low_raw_margin_fraction(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.eye(3, dtype=torch.float32) * 10.0
+        raw_similarity = torch.tensor(
+            [
+                [0.95, 0.94, 0.10],
+                [0.20, 0.93, 0.50],
+                [0.10, 0.20, 0.91],
+            ],
+            dtype=torch.float32,
+        )
+        accept_logits = torch.full_like(pair_logits, 2.0)
+        scores = torch.tensor([10.0, 10.0, 10.0], dtype=torch.float32)
+        source_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        target_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        meta = torch.zeros(3, 4, dtype=torch.float32)
+
+        features = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta,
+            meta_b=meta,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+
+        low_fraction_index = pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES.index(
+            "matched_raw_margin_low_fraction"
+        )
+        self.assertAlmostEqual(float(features[low_fraction_index]), 2.0 / 3.0, places=5)
+
+    def test_graph_matcher_pair_acceptance_context_features_track_projective_residual(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.eye(5, dtype=torch.float32) * 10.0
+        raw_similarity = torch.eye(5, dtype=torch.float32)
+        accept_logits = torch.full_like(pair_logits, 2.0)
+        scores = torch.ones(5, dtype=torch.float32)
+        source_indices = torch.arange(5, dtype=torch.long)
+        target_indices = torch.arange(5, dtype=torch.long)
+        meta_a = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0, 0.0],
+                [10.0, 10.0, 0.0, 0.0],
+                [5.0, 4.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        coherent_meta_b = meta_a.clone()
+        coherent_meta_b[:, :2] = coherent_meta_b[:, :2] * 2.0 + torch.tensor([3.0, -4.0])
+        outlier_meta_b = coherent_meta_b.clone()
+        outlier_meta_b[4, :2] = torch.tensor([70.0, -45.0])
+
+        coherent = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=coherent_meta_b,
+            input_keypoints_a=5,
+            input_keypoints_b=5,
+            kept_keypoints_a=5,
+            kept_keypoints_b=5,
+        )
+        outlier = graph._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=outlier_meta_b,
+            input_keypoints_a=5,
+            input_keypoints_b=5,
+            kept_keypoints_a=5,
+            kept_keypoints_b=5,
+        )
+
+        residual_index = pfm_model.PAIR_ACCEPT_CONTEXT_FEATURE_NAMES.index(
+            "match_projective_residual_median"
+        )
+        self.assertLess(float(coherent[residual_index]), 1.0e-3)
+        self.assertGreater(float(outlier[residual_index]), float(coherent[residual_index]) + 1.0)
+
+    def test_graph_matcher_pair_acceptance_legacy_features_bound_raw_logits(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.full((4, 4), 50.0, dtype=torch.float32)
+        accept_logits = torch.zeros_like(pair_logits)
+        scores = torch.full((4,), 50.0, dtype=torch.float32)
+
+        features = graph._legacy_pair_acceptance_features(
+            pair_logits,
+            accept_logits,
+            scores,
+            input_keypoints_a=8,
+            input_keypoints_b=8,
+            kept_keypoints_a=4,
+            kept_keypoints_b=4,
+        )
+
+        self.assertLessEqual(float(features[0].abs()), 1.0)
+        self.assertLessEqual(float(features[1].abs()), 1.0)
+        self.assertLessEqual(float(features[4].abs()), 1.0)
+        self.assertAlmostEqual(float(features[5]), 0.25)
+        self.assertAlmostEqual(float(features[6]), 0.5)
+        self.assertAlmostEqual(float(features[7]), 0.5)
+
+    def test_graph_matcher_pair_accept_context_head_is_initially_noop(self):
+        graph = pfm_model.PlanetaryGraphMatcher(
+            descriptor_dim=8,
+            hidden_dim=16,
+            attention_layers=1,
+            keypoint_meta_dim=4,
+        )
+        pair_logits = torch.eye(3, dtype=torch.float32) * 10.0
+        raw_similarity = torch.tensor(
+            [[0.95, 0.10, 0.05], [0.15, 0.93, 0.10], [0.05, 0.20, 0.91]],
+            dtype=torch.float32,
+        )
+        accept_logits = torch.full_like(pair_logits, 2.0)
+        scores = torch.tensor([10.0, 10.0, 10.0], dtype=torch.float32)
+        source_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        target_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+        meta_a = torch.tensor(
+            [[0.0, 0.0, 0.0, 0.0], [10.0, 0.0, 0.0, 0.0], [20.0, 0.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+        meta_b = torch.tensor(
+            [[2.0, 1.0, 0.0, 0.0], [12.0, 1.0, 0.0, 0.0], [22.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        )
+
+        old_logit = graph.pair_accept_head(
+            graph._legacy_pair_acceptance_features(
+                pair_logits,
+                accept_logits,
+                scores,
+                input_keypoints_a=3,
+                input_keypoints_b=3,
+                kept_keypoints_a=3,
+                kept_keypoints_b=3,
+            )
+        ).squeeze()
+        combined_logit = graph._pair_acceptance_logit(
+            pair_logits,
+            accept_logits,
+            scores,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=meta_b,
+            input_keypoints_a=3,
+            input_keypoints_b=3,
+            kept_keypoints_a=3,
+            kept_keypoints_b=3,
+        )
+
+        self.assertTrue(hasattr(graph, "pair_accept_context_head"))
+        self.assertTrue(torch.allclose(combined_logit, old_logit, atol=1.0e-6))
+
     def test_graph_matcher_match_scores_include_accept_probability(self):
         graph = pfm_model.PlanetaryGraphMatcher(
             descriptor_dim=4,

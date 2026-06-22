@@ -17,7 +17,9 @@ from .commands import TrainingRequest, create_training_runs, start_generated_run
 from .models import RunSummary
 from .services import (
     active_training_processes,
+    discover_hybrid_gate_runs,
     discover_runs,
+    discover_true_geometry_selector_runs,
     read_metrics_csv,
     run_metrics_path,
     delete_run,
@@ -124,6 +126,8 @@ def _layout(title: str, body: str, active: str = "/") -> str:
             _nav_item("/history", "历史训练", active),
             _nav_item("/runs", "任务", active),
             _nav_item("/compare", "对比", active),
+            _nav_item("/hybrid", "Hybrid Gate", active),
+            _nav_item("/true-geometry", "True Geometry", active),
             _nav_item("/datasets", "数据集", active),
         ]
     )
@@ -248,6 +252,20 @@ def _visual_report_path(run_path: Path) -> Path | None:
             if candidate.exists():
                 return candidate
     return None
+
+
+def _run_report_path(run_path: Path) -> Path | None:
+    for candidate in (run_path / "run.html", run_path / "index.html", run_path / "report" / "index.html", run_path / "report" / "run.html"):
+        if candidate.exists():
+            return candidate
+    report_path = run_path / "report"
+    if report_path.is_file():
+        return report_path
+    return None
+
+
+def _runs_route_name(path: str, suffix: str) -> str:
+    return unquote(path[len("/runs/") : -len(suffix)].strip("/"))
 
 
 def _duration_label(run: RunSummary) -> str:
@@ -853,6 +871,124 @@ def render_compare(project_root: Path, query: dict[str, list[str]]) -> str:
     return _layout("对比", body, active="/compare")
 
 
+def _signed_delta(value: object, digits: int = 0) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:.{digits}f}"
+
+
+def _extra_run_roots(project_root: Path) -> list[Path]:
+    roots = [project_root / "runs"]
+    raw = os.environ.get("PFM_DASHBOARD_EXTRA_RUN_ROOTS", "")
+    for item in raw.split(os.pathsep):
+        if item.strip():
+            roots.append(Path(item).expanduser())
+    return roots
+
+
+def _discover_true_geometry_selectors(project_root: Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    seen: set[Path] = set()
+    for root in _extra_run_roots(project_root):
+        resolved = root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        records.extend(discover_true_geometry_selector_runs(root))
+    records.sort(key=lambda row: float(row.get("updated_at", 0.0)), reverse=True)
+    return records
+
+
+def render_hybrid_gate(project_root: Path) -> str:
+    gates = discover_hybrid_gate_runs(project_root / "runs")
+    rows = []
+    for gate in gates[:120]:
+        report = gate.get("report_html")
+        report_link = (
+            f'<a href="/runs/{quote(str(gate["name"]), safe="")}/report">报告</a>'
+            if isinstance(report, Path) and report.exists()
+            else "-"
+        )
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(gate['name']))}</code><span class=\"run-time\">更新 {_format_time(float(gate.get('updated_at', 0.0)))}</span></td>"
+            f"<td>{'PASS' if gate.get('valid') else 'FAIL'}</td>"
+            f"<td>{html.escape(str(gate.get('reject_action', '-')))}</td>"
+            f"<td>{gate.get('kept_pfm_rows', 0)}</td>"
+            f"<td>{gate.get('fallback_lightglue_rows', 0)}</td>"
+            f"<td>{gate.get('rejected_rows', 0)}</td>"
+            f"<td>{gate.get('hybrid_correct', 0)}</td>"
+            f"<td>{gate.get('hybrid_wrong', 0)}</td>"
+            f"<td>{float(gate.get('hybrid_precision', 0.0)):.9f}</td>"
+            f"<td>{_signed_delta(gate.get('correct_delta_vs_lightglue'), 0)}</td>"
+            f"<td>{_signed_delta(gate.get('wrong_delta_vs_lightglue'), 0)}</td>"
+            f"<td>{float(gate.get('threshold', 0.0)):.6f}</td>"
+            f"<td>{report_link}</td>"
+            "</tr>"
+        )
+    body = f"""
+<section class="panel">
+  <div class="panel-head"><div><h2>Hybrid Gate</h2><p>汇总 PFM+LightGlue fallback 和 PFM-only pair gate 的 fresh/held-out 评估产物。</p></div></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>任务</th><th>状态</th><th>动作</th><th>保留 PFM</th><th>回退 LG</th><th>拒绝</th><th>正确</th><th>错误</th><th>精度</th><th>Correct Δ LG</th><th>Wrong Δ LG</th><th>阈值</th><th>产物</th></tr></thead>
+    <tbody>{''.join(rows) or '<tr><td colspan="13">暂无 hybrid gate 结果</td></tr>'}</tbody>
+  </table></div>
+</section>
+"""
+    return _layout("Hybrid Gate", body, active="/hybrid")
+
+
+def render_true_geometry_selector(project_root: Path) -> str:
+    selectors = _discover_true_geometry_selectors(project_root)
+    rows = []
+    project_runs_root = (project_root / "runs").resolve()
+    for selector in selectors[:120]:
+        report = selector.get("report_html")
+        report_link = "-"
+        if isinstance(report, Path) and report.exists():
+            try:
+                report.resolve().relative_to(project_runs_root)
+                report_link = f'<a href="/runs/{quote(str(selector["name"]), safe="")}/report">报告</a>'
+            except ValueError:
+                report_link = f"<code>{html.escape(str(report))}</code>"
+        split_counts = selector.get("split_counts")
+        split_counts = split_counts if isinstance(split_counts, dict) else {}
+        split_text = " / ".join(
+            f"{key}:{int(float(value))}" for key, value in sorted(split_counts.items()) if key in {"dev", "val", "lockbox"}
+        )
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(selector['name']))}</code><span class=\"run-time\">更新 {_format_time(float(selector.get('updated_at', 0.0)))}</span></td>"
+            f"<td>{html.escape(str(selector.get('audit_status') or '-'))}</td>"
+            f"<td>{'是' if selector.get('base_disjoint') else '否'}</td>"
+            f"<td>{selector.get('rows', 0)}</td>"
+            f"<td>{selector.get('selected_correct', 0)}</td>"
+            f"<td>{selector.get('selected_wrong', 0)}</td>"
+            f"<td>{float(selector.get('selected_precision', 0.0)):.9f}</td>"
+            f"<td>{selector.get('lightglue_correct', 0)}</td>"
+            f"<td>{selector.get('lightglue_wrong', 0)}</td>"
+            f"<td>{_signed_delta(selector.get('correct_delta_vs_lightglue'), 0)}</td>"
+            f"<td>{_signed_delta(selector.get('wrong_delta_vs_lightglue'), 0)}</td>"
+            f"<td>{selector.get('excluded_base_ids', 0)}</td>"
+            f"<td>{html.escape(split_text or '-')}</td>"
+            f"<td>{report_link}</td>"
+            "</tr>"
+        )
+    body = f"""
+<section class="panel">
+  <div class="panel-head"><div><h2>True Geometry Selector</h2><p>汇总使用真实深度图和相机文件过滤后的 PFM selector fresh 验证，LightGlue 只作为对比基线。</p></div></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>任务</th><th>审计</th><th>Base 隔离</th><th>Pair</th><th>正确</th><th>错误</th><th>精度</th><th>LG 正确</th><th>LG 错误</th><th>Correct Δ LG</th><th>Wrong Δ LG</th><th>排除 Base</th><th>Split</th><th>产物</th></tr></thead>
+    <tbody>{''.join(rows) or '<tr><td colspan="14">暂无 true-geometry selector 结果</td></tr>'}</tbody>
+  </table></div>
+</section>
+"""
+    return _layout("True Geometry Selector", body, active="/true-geometry")
+
+
 def render_datasets() -> str:
     rows = []
     for path in DEFAULT_DATASETS:
@@ -922,6 +1058,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_html(render_runs(root))
         elif parsed.path == "/compare":
             self._send_html(render_compare(root, query))
+        elif parsed.path == "/hybrid":
+            self._send_html(render_hybrid_gate(root))
+        elif parsed.path == "/true-geometry":
+            self._send_html(render_true_geometry_selector(root))
         elif parsed.path == "/datasets":
             self._send_html(render_datasets())
         elif parsed.path == "/api/runs":
@@ -934,13 +1074,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if (root / "runs" / name).exists()
             }
             self._send_json({"metrics": metrics})
+        elif parsed.path == "/api/hybrid-gates":
+            self._send_json({"hybrid_gates": discover_hybrid_gate_runs(root / "runs")})
+        elif parsed.path == "/api/true-geometry-selectors":
+            self._send_json({"true_geometry_selectors": _discover_true_geometry_selectors(root)})
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/log"):
             name = unquote(parsed.path.split("/")[2])
             self._send_text(tail_text(root / "runs" / name / "train.log", lines=200))
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/report"):
-            name = unquote(parsed.path.split("/")[2])
-            report = root / "runs" / name / "run.html"
-            self._send_html(report.read_text(encoding="utf-8") if report.exists() else "报告缺失")
+            name = _runs_route_name(parsed.path, "/report")
+            report = _run_report_path(root / "runs" / name)
+            self._send_html(report.read_text(encoding="utf-8") if report is not None else "报告缺失")
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/visual-report"):
             name = unquote(parsed.path.split("/")[2])
             run_path = root / "runs" / name

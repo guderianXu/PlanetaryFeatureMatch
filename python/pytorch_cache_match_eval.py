@@ -432,6 +432,28 @@ def gather_descriptor_rows(descriptors: torch.Tensor, selected_indices: torch.Te
     return flat.index_select(0, selected_indices.to(descriptors.device)).contiguous()
 
 
+def refine_keypoints_with_offsets(
+    keypoints: torch.Tensor,
+    selected_indices: torch.Tensor,
+    keypoint_offsets: torch.Tensor | None,
+) -> torch.Tensor:
+    if keypoint_offsets is None:
+        return keypoints
+    if keypoint_offsets.dim() != 4 or keypoint_offsets.size(0) != 1 or keypoint_offsets.size(1) != 2:
+        raise ValueError("keypoint_offsets must have shape 1x2xHxW")
+    if keypoints.dim() != 2 or keypoints.size(1) != 2:
+        raise ValueError("keypoints must have shape Nx2")
+    if selected_indices.numel() == 0:
+        return keypoints
+    height, width = keypoint_offsets.shape[-2:]
+    flat_offsets = keypoint_offsets[0].permute(1, 2, 0).reshape(-1, 2)
+    offsets = flat_offsets.index_select(0, selected_indices.to(flat_offsets.device)).to(keypoints.device, keypoints.dtype)
+    refined = keypoints + offsets
+    refined_x = refined[:, 0].clamp(0.0, float(max(0, width - 1)))
+    refined_y = refined[:, 1].clamp(0.0, float(max(0, height - 1)))
+    return torch.stack([refined_x, refined_y], dim=1).contiguous()
+
+
 def sample_descriptor_rows_at_keypoints(descriptors: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor:
     if descriptors.dim() != 4 or descriptors.size(0) != 1:
         raise ValueError("descriptors must have shape 1xDxHxW")
@@ -445,6 +467,20 @@ def sample_descriptor_rows_at_keypoints(descriptors: torch.Tensor, keypoints: to
     grid = torch.stack([grid_x, grid_y], dim=1).view(1, -1, 1, 2)
     sampled = F.grid_sample(descriptors.to(torch.float32), grid, mode="bilinear", padding_mode="border", align_corners=True)
     return sampled.squeeze(0).squeeze(-1).T.contiguous()
+
+
+def descriptor_rows_for_selected_keypoints(
+    descriptors: torch.Tensor,
+    selected_indices: torch.Tensor,
+    *,
+    keypoints: torch.Tensor,
+    keypoint_offsets: torch.Tensor | None = None,
+    use_keypoint_offsets: bool = False,
+) -> torch.Tensor:
+    if not use_keypoint_offsets or keypoint_offsets is None:
+        return gather_descriptor_rows(descriptors, selected_indices)
+    refined = refine_keypoints_with_offsets(keypoints, selected_indices, keypoint_offsets)
+    return sample_descriptor_rows_at_keypoints(descriptors, refined)
 
 
 def sample_map_rows_at_keypoints(map_tensor: torch.Tensor | None, keypoints: torch.Tensor, *, width: int = 1) -> torch.Tensor | None:
@@ -593,7 +629,10 @@ def graph_matcher_matches(
     graph_stats: dict[str, float | int] | None = None,
     diagnostics: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    def set_empty_diagnostics(device: torch.device) -> None:
+    def set_empty_diagnostics(
+        device: torch.device,
+        output: pfm_model.GraphMatcherOutput | None = None,
+    ) -> None:
         if diagnostics is None:
             return
         diagnostics.clear()
@@ -608,6 +647,13 @@ def graph_matcher_matches(
             "accept_probability",
         ):
             diagnostics[key] = torch.empty(0, dtype=torch.float32, device=device)
+        if output is not None and output.pair_accept_logit is not None:
+            pair_accept_logit = output.pair_accept_logit.detach().to(device=device, dtype=torch.float32)
+            diagnostics["pair_accept_logit"] = pair_accept_logit.contiguous()
+            diagnostics["pair_accept_probability"] = torch.sigmoid(pair_accept_logit).contiguous()
+        else:
+            diagnostics["pair_accept_logit"] = torch.empty(0, dtype=torch.float32, device=device)
+            diagnostics["pair_accept_probability"] = torch.empty(0, dtype=torch.float32, device=device)
 
     if max_matches < 0:
         raise ValueError("max_matches must be nonnegative; use 0 to keep all matches")
@@ -707,7 +753,7 @@ def graph_matcher_matches(
         matches = output.matches.to(device=desc_a.device)
         scores = output.scores.to(device=desc_a.device)
     if scores.numel() == 0:
-        set_empty_diagnostics(desc_a.device)
+        set_empty_diagnostics(desc_a.device, output)
         return matches, scores
     keep = scores >= float(min_score)
     if graph_min_raw_score > -1.0 or graph_min_raw_margin > 0.0:
@@ -744,7 +790,7 @@ def graph_matcher_matches(
     if diagnostics is not None:
         diagnostics.clear()
         if matches.numel() == 0:
-            set_empty_diagnostics(desc_a.device)
+            set_empty_diagnostics(desc_a.device, output)
         else:
             match_indices = matches.to(output.logits.device)
             source_indices = match_indices[:, 0]
@@ -781,6 +827,13 @@ def graph_matcher_matches(
                 "accept_logit": accept_values,
                 "accept_probability": torch.sigmoid(accept_values),
             }
+            if output.pair_accept_logit is not None:
+                pair_accept_logit = output.pair_accept_logit.detach().to(
+                    device=desc_a.device,
+                    dtype=torch.float32,
+                )
+                values["pair_accept_logit"] = pair_accept_logit
+                values["pair_accept_probability"] = torch.sigmoid(pair_accept_logit)
             diagnostics.update(
                 {
                     key: value.detach().to(device=desc_a.device, dtype=torch.float32).contiguous()
@@ -1180,6 +1233,7 @@ def match_pair_descriptor_maps(
     keypoint_scores_b: torch.Tensor | None = None,
     raw_features_a: pfm_model.RawFeatureMaps | None = None,
     raw_features_b: pfm_model.RawFeatureMaps | None = None,
+    use_keypoint_offsets: bool = False,
 ) -> MatchEvalResult:
     if graph_fallback_mode not in {"mutual", "none"}:
         raise ValueError("graph_fallback_mode must be mutual or none")
@@ -1210,10 +1264,40 @@ def match_pair_descriptor_maps(
         keypoint_cell_cap=keypoint_cell_cap,
         keypoint_scores=keypoint_scores_b,
     )
-    rows_a = gather_descriptor_rows(descriptors_a, selected_a)
-    rows_b = gather_descriptor_rows(descriptors_b, selected_b)
-    row_scores_a = gather_score_rows(keypoint_scores_a, selected_a)
-    row_scores_b = gather_score_rows(keypoint_scores_b, selected_b)
+    base_keypoints_a = keypoints_a
+    base_keypoints_b = keypoints_b
+    keypoints_a = refine_keypoints_with_offsets(
+        base_keypoints_a,
+        selected_a,
+        raw_features_a.keypoint_offsets if use_keypoint_offsets and raw_features_a is not None else None,
+    )
+    keypoints_b = refine_keypoints_with_offsets(
+        base_keypoints_b,
+        selected_b,
+        raw_features_b.keypoint_offsets if use_keypoint_offsets and raw_features_b is not None else None,
+    )
+    rows_a = descriptor_rows_for_selected_keypoints(
+        descriptors_a,
+        selected_a,
+        keypoints=base_keypoints_a,
+        keypoint_offsets=raw_features_a.keypoint_offsets if raw_features_a is not None else None,
+        use_keypoint_offsets=use_keypoint_offsets,
+    )
+    rows_b = descriptor_rows_for_selected_keypoints(
+        descriptors_b,
+        selected_b,
+        keypoints=base_keypoints_b,
+        keypoint_offsets=raw_features_b.keypoint_offsets if raw_features_b is not None else None,
+        use_keypoint_offsets=use_keypoint_offsets,
+    )
+    if use_keypoint_offsets:
+        sampled_scores_a = sample_map_rows_at_keypoints(keypoint_scores_a, keypoints_a, width=1)
+        sampled_scores_b = sample_map_rows_at_keypoints(keypoint_scores_b, keypoints_b, width=1)
+        row_scores_a = sampled_scores_a[:, 0] if sampled_scores_a is not None else None
+        row_scores_b = sampled_scores_b[:, 0] if sampled_scores_b is not None else None
+    else:
+        row_scores_a = gather_score_rows(keypoint_scores_a, selected_a)
+        row_scores_b = gather_score_rows(keypoint_scores_b, selected_b)
     if matcher_mode == "graph_matcher":
         if model is None:
             raise ValueError("model is required for graph_matcher mode")
@@ -1514,6 +1598,7 @@ def evaluate_pair_path(
     graph_max_attention_layers: int = 0,
     graph_max_attention_work_fraction: float = 1.0,
     graph_width_prune_keep_ratio: float = 1.0,
+    use_keypoint_offsets: bool = False,
 ) -> MatchEvalResult:
     if geometry_threshold_px < 0.0:
         raise ValueError("geometry_threshold_px must be non-negative")
@@ -1576,6 +1661,7 @@ def evaluate_pair_path(
             keypoint_scores_b=keypoint_scores_b,
             raw_features_a=raw_features_a,
             raw_features_b=raw_features_b,
+            use_keypoint_offsets=use_keypoint_offsets,
         )
 
 
@@ -1614,6 +1700,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weak-texture-keypoint-fraction", type=float, default=0.0)
     parser.add_argument("--keypoint-spatial-bins", type=int, default=0)
     parser.add_argument("--keypoint-cell-cap", type=int, default=0)
+    parser.add_argument("--use-keypoint-offsets", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--keypoint-score-mode", choices=["texture", "learned"], default="texture")
     parser.add_argument("--matcher-mode", choices=["raw_descriptor", "graph_matcher"], default="raw_descriptor")
     parser.add_argument("--graph-fallback-mode", choices=["mutual", "none"], default="mutual")
@@ -1749,6 +1836,7 @@ def main() -> int:
                 graph_max_attention_layers=args.graph_max_attention_layers,
                 graph_max_attention_work_fraction=args.graph_max_attention_work_fraction,
                 graph_width_prune_keep_ratio=args.graph_width_prune_keep_ratio,
+                use_keypoint_offsets=args.use_keypoint_offsets,
             )
             row = {
                 "pair_pt": pair_path.as_posix(),

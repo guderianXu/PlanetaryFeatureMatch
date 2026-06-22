@@ -27,6 +27,51 @@ MATCHER_RELIABILITY_PAIR_BIAS_MODES = ("full", "off")
 MATCHER_RELIABILITY_DUSTBIN_BIAS_MODES = ("full", "matchability", "off")
 MATCHER_FINAL_ACCEPT_SCORE_MODES = ("multiply", "none", "add")
 MATCHER_ACCEPT_ASSIGNMENT_MODES = ("add", "off")
+PAIR_ACCEPT_CONTEXT_FEATURE_NAMES = (
+    "score_min",
+    "score_mean",
+    "score_median",
+    "score_max",
+    "score_std",
+    "accept_probability_min",
+    "accept_probability_mean",
+    "accept_probability_median",
+    "accept_probability_max",
+    "accept_probability_std",
+    "pair_logit_min",
+    "pair_logit_mean",
+    "pair_logit_median",
+    "pair_logit_max",
+    "pair_logit_std",
+    "raw_similarity_min",
+    "raw_similarity_mean",
+    "raw_similarity_median",
+    "raw_similarity_max",
+    "raw_similarity_std",
+    "matched_raw_similarity_min",
+    "matched_raw_similarity_mean",
+    "matched_raw_similarity_median",
+    "matched_raw_similarity_max",
+    "matched_raw_similarity_std",
+    "matched_raw_margin_min",
+    "matched_raw_margin_mean",
+    "matched_raw_margin_median",
+    "matched_raw_margin_max",
+    "matched_raw_margin_std",
+    "matched_raw_margin_low_fraction",
+    "match_count_ratio",
+    "kept_keypoints_a_ratio",
+    "kept_keypoints_b_ratio",
+    "match_dx_median",
+    "match_dy_median",
+    "match_dx_mad",
+    "match_dy_mad",
+    "match_displacement_median",
+    "match_displacement_mad",
+    "match_projective_residual_valid",
+    "match_projective_residual_median",
+    "match_projective_residual_p90",
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +123,7 @@ class GraphMatcherOutput:
     matches: torch.Tensor
     scores: torch.Tensor
     accept_logits: torch.Tensor | None = None
+    pair_accept_logit: torch.Tensor | None = None
     executed_layers: int = 0
     input_keypoints_a: int = 0
     input_keypoints_b: int = 0
@@ -873,6 +919,17 @@ class PlanetaryGraphMatcher(nn.Module):
             nn.GELU(),
             nn.Linear(max(16, hidden_dim // 8), 1),
         )
+        self.pair_accept_head = nn.Sequential(
+            nn.Linear(8, max(16, hidden_dim // 8)),
+            nn.GELU(),
+            nn.Linear(max(16, hidden_dim // 8), 1),
+        )
+        self.pair_accept_context_head = nn.Sequential(
+            nn.LayerNorm(len(PAIR_ACCEPT_CONTEXT_FEATURE_NAMES)),
+            nn.Linear(len(PAIR_ACCEPT_CONTEXT_FEATURE_NAMES), max(16, hidden_dim // 8)),
+            nn.GELU(),
+            nn.Linear(max(16, hidden_dim // 8), 1),
+        )
         self.logit_scale = nn.Parameter(torch.ones(1) * math.sqrt(float(hidden_dim)))
         self.raw_score_temperature = nn.Parameter(torch.tensor(0.15, dtype=torch.float32))
         self.graph_delta_scale = nn.Parameter(torch.tensor(0.30, dtype=torch.float32))
@@ -890,6 +947,8 @@ class PlanetaryGraphMatcher(nn.Module):
         )
         _zero_module(self.geometry_bias[-1])
         _zero_module(self.accept_head[-1])
+        _zero_module(self.pair_accept_head[-1])
+        _zero_module(self.pair_accept_context_head[-1])
 
     def _metadata(self, keypoints_or_meta: torch.Tensor) -> torch.Tensor:
         if keypoints_or_meta.dim() != 2:
@@ -1034,6 +1093,290 @@ class PlanetaryGraphMatcher(nn.Module):
             dim=-1,
         )
         return self.accept_head(features).squeeze(-1) + self._pair_reliability_bias(meta_a, meta_b)
+
+    @staticmethod
+    def _tensor_stats(values: torch.Tensor, *, empty_like: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        zero = empty_like.new_zeros(())
+        if values.numel() == 0:
+            return zero, zero, zero, zero, zero
+        values = torch.nan_to_num(values.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        return (
+            values.min(),
+            values.mean(),
+            values.median(),
+            values.max(),
+            values.std(unbiased=False) if values.numel() > 1 else zero,
+        )
+
+    def _legacy_pair_acceptance_features(
+        self,
+        pair_logits: torch.Tensor,
+        accept_logits: torch.Tensor,
+        probabilities: torch.Tensor,
+        *,
+        input_keypoints_a: int,
+        input_keypoints_b: int,
+        kept_keypoints_a: int,
+        kept_keypoints_b: int,
+    ) -> torch.Tensor:
+        accept_probability = torch.sigmoid(accept_logits).to(torch.float32)
+        score_values = probabilities.to(torch.float32)
+        valid_pair_logits = pair_logits.to(torch.float32)
+        valid_pair_logits = valid_pair_logits[torch.isfinite(valid_pair_logits) & valid_pair_logits.gt(-9999.0)]
+        match_count = float(score_values.numel())
+        keypoint_count = float(max(1, input_keypoints_a + input_keypoints_b))
+        zero = pair_logits.new_zeros((), dtype=torch.float32)
+
+        def bounded(value: torch.Tensor) -> torch.Tensor:
+            return torch.tanh(value.to(torch.float32) / 8.0)
+
+        return torch.stack(
+            [
+                bounded(score_values.mean()) if score_values.numel() else zero,
+                bounded(score_values.max()) if score_values.numel() else zero,
+                accept_probability.mean(),
+                accept_probability.max(),
+                bounded(valid_pair_logits.mean()) if valid_pair_logits.numel() else zero,
+                torch.tensor(match_count / keypoint_count, dtype=torch.float32, device=pair_logits.device),
+                torch.tensor(
+                    kept_keypoints_a / max(1, input_keypoints_a),
+                    dtype=torch.float32,
+                    device=pair_logits.device,
+                ),
+                torch.tensor(
+                    kept_keypoints_b / max(1, input_keypoints_b),
+                    dtype=torch.float32,
+                    device=pair_logits.device,
+                ),
+            ]
+        )
+
+    def _pair_acceptance_context_features(
+        self,
+        pair_logits: torch.Tensor,
+        accept_logits: torch.Tensor,
+        probabilities: torch.Tensor,
+        *,
+        raw_similarity: torch.Tensor,
+        source_indices: torch.Tensor,
+        target_indices: torch.Tensor,
+        meta_a: torch.Tensor,
+        meta_b: torch.Tensor,
+        input_keypoints_a: int,
+        input_keypoints_b: int,
+        kept_keypoints_a: int,
+        kept_keypoints_b: int,
+    ) -> torch.Tensor:
+        base = pair_logits.to(torch.float32)
+        valid_logit_mask = torch.isfinite(base) & base.gt(-9999.0)
+        valid_pair_logits = base[valid_logit_mask]
+        valid_accept = torch.sigmoid(accept_logits.to(torch.float32))[valid_logit_mask]
+        score_values = probabilities.to(torch.float32)
+        score_stats = self._tensor_stats(score_values, empty_like=base)
+        accept_stats = self._tensor_stats(valid_accept, empty_like=base)
+        pair_logit_stats = self._tensor_stats(valid_pair_logits, empty_like=base)
+        raw_values = raw_similarity.to(torch.float32)
+        valid_raw_similarity = raw_values[torch.isfinite(raw_values)]
+        raw_similarity_stats = self._tensor_stats(valid_raw_similarity, empty_like=base)
+
+        if source_indices.numel() > 0 and target_indices.numel() > 0 and raw_values.numel() > 0:
+            raw_source_indices = source_indices.to(device=raw_values.device, dtype=torch.long)
+            raw_target_indices = target_indices.to(device=raw_values.device, dtype=torch.long)
+            matched_raw_similarity = raw_values[raw_source_indices, raw_target_indices]
+            if raw_values.size(1) > 1:
+                row_top2 = raw_values.topk(2, dim=1).values
+                row_margin = (row_top2[:, 0] - row_top2[:, 1]).clamp(-2.0, 2.0)
+            else:
+                row_margin = raw_values.new_zeros((raw_values.size(0),))
+            if raw_values.size(0) > 1:
+                col_top2 = raw_values.topk(2, dim=0).values
+                col_margin = (col_top2[0] - col_top2[1]).clamp(-2.0, 2.0)
+            else:
+                col_margin = raw_values.new_zeros((raw_values.size(1),))
+            matched_raw_margin = torch.minimum(
+                row_margin.index_select(0, raw_source_indices),
+                col_margin.index_select(0, raw_target_indices),
+            )
+        else:
+            matched_raw_similarity = raw_values.new_empty((0,))
+            matched_raw_margin = raw_values.new_empty((0,))
+        matched_raw_similarity_stats = self._tensor_stats(matched_raw_similarity, empty_like=base)
+        matched_raw_margin_stats = self._tensor_stats(matched_raw_margin, empty_like=base)
+        if matched_raw_margin.numel() > 0:
+            matched_raw_margin_low_fraction = matched_raw_margin.le(0.05).to(torch.float32).mean()
+        else:
+            matched_raw_margin_low_fraction = base.new_zeros(())
+
+        match_count = float(score_values.numel())
+        keypoint_count = float(max(1, input_keypoints_a + input_keypoints_b))
+        match_count_ratio = base.new_tensor(match_count / keypoint_count)
+        kept_a_ratio = base.new_tensor(kept_keypoints_a / max(1, input_keypoints_a))
+        kept_b_ratio = base.new_tensor(kept_keypoints_b / max(1, input_keypoints_b))
+
+        zero = base.new_zeros(())
+        if source_indices.numel() > 0 and target_indices.numel() > 0 and meta_a.size(1) >= 2 and meta_b.size(1) >= 2:
+            source_indices = source_indices.to(device=meta_a.device, dtype=torch.long)
+            target_indices = target_indices.to(device=meta_b.device, dtype=torch.long)
+            source_xy = meta_a.index_select(0, source_indices)[:, :2].to(torch.float32)
+            target_xy = meta_b.index_select(0, target_indices)[:, :2].to(torch.float32)
+            displacement = target_xy - source_xy
+            dx = displacement[:, 0]
+            dy = displacement[:, 1]
+            distance = torch.linalg.vector_norm(displacement, dim=1)
+            dx_median = dx.median()
+            dy_median = dy.median()
+            distance_median = distance.median()
+            dx_mad = (dx - dx_median).abs().median()
+            dy_mad = (dy - dy_median).abs().median()
+            distance_mad = (distance - distance_median).abs().median()
+            projective_valid, projective_median, projective_p90 = self._projective_residual_stats(
+                source_xy,
+                target_xy,
+                empty_like=base,
+            )
+        else:
+            dx_median = dy_median = dx_mad = dy_mad = distance_median = distance_mad = zero
+            projective_valid = projective_median = projective_p90 = zero
+
+        features = torch.stack(
+            [
+                *score_stats,
+                *accept_stats,
+                *pair_logit_stats,
+                *raw_similarity_stats,
+                *matched_raw_similarity_stats,
+                *matched_raw_margin_stats,
+                matched_raw_margin_low_fraction,
+                match_count_ratio,
+                kept_a_ratio,
+                kept_b_ratio,
+                dx_median,
+                dy_median,
+                dx_mad,
+                dy_mad,
+                distance_median,
+                distance_mad,
+                projective_valid,
+                projective_median,
+                projective_p90,
+            ]
+        )
+        return torch.nan_to_num(features, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
+
+    @staticmethod
+    def _normalize_projective_points(points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        centroid = points.mean(dim=0)
+        centered = points - centroid
+        mean_distance = torch.linalg.vector_norm(centered, dim=1).mean().clamp_min(1.0e-6)
+        scale = points.new_tensor(math.sqrt(2.0)) / mean_distance
+        normalized = centered * scale
+        transform = points.new_tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        transform[0, 0] = scale
+        transform[1, 1] = scale
+        transform[0, 2] = -scale * centroid[0]
+        transform[1, 2] = -scale * centroid[1]
+        return normalized, transform
+
+    @classmethod
+    def _projective_residual_stats(
+        cls,
+        source_xy: torch.Tensor,
+        target_xy: torch.Tensor,
+        *,
+        empty_like: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if source_xy.size(0) < 4 or target_xy.size(0) < 4:
+            zero = empty_like.new_zeros(())
+            return zero, zero, zero
+
+        source = source_xy.to(torch.float32)
+        target = target_xy.to(torch.float32)
+        source_norm, source_transform = cls._normalize_projective_points(source)
+        target_norm, target_transform = cls._normalize_projective_points(target)
+        x = source_norm[:, 0]
+        y = source_norm[:, 1]
+        u = target_norm[:, 0]
+        v = target_norm[:, 1]
+        ones = torch.ones_like(x)
+        zeros = torch.zeros_like(x)
+        rows_u = torch.stack((-x, -y, -ones, zeros, zeros, zeros, u * x, u * y, u), dim=1)
+        rows_v = torch.stack((zeros, zeros, zeros, -x, -y, -ones, v * x, v * y, v), dim=1)
+        system = torch.stack((rows_u, rows_v), dim=1).reshape(-1, 9)
+        try:
+            _u, _s, vh = torch.linalg.svd(system, full_matrices=False)
+        except RuntimeError:
+            zero = empty_like.new_zeros(())
+            return zero, zero, zero
+        homography_norm = vh[-1].reshape(3, 3)
+        if not torch.isfinite(homography_norm).all():
+            zero = empty_like.new_zeros(())
+            return zero, zero, zero
+        homography = torch.linalg.inv(target_transform) @ homography_norm @ source_transform
+        homogeneous_source = torch.cat([source, torch.ones((source.size(0), 1), dtype=source.dtype, device=source.device)], dim=1)
+        projected = (homography @ homogeneous_source.transpose(0, 1)).transpose(0, 1)
+        denominator = projected[:, 2:3]
+        valid = denominator.abs().gt(1.0e-6).squeeze(1)
+        if not bool(valid.any()):
+            zero = empty_like.new_zeros(())
+            return zero, zero, zero
+        projected_xy = projected[valid, :2] / denominator[valid]
+        residual = torch.linalg.vector_norm(projected_xy - target[valid], dim=1)
+        if residual.numel() == 0 or not torch.isfinite(residual).all():
+            zero = empty_like.new_zeros(())
+            return zero, zero, zero
+        valid_ratio = residual.new_tensor(float(residual.numel()) / float(source.size(0)))
+        median = residual.median()
+        p90 = torch.quantile(residual, 0.9) if residual.numel() > 1 else residual[0]
+        return valid_ratio, median, p90
+
+    def _pair_acceptance_logit(
+        self,
+        pair_logits: torch.Tensor,
+        accept_logits: torch.Tensor,
+        probabilities: torch.Tensor,
+        *,
+        raw_similarity: torch.Tensor,
+        source_indices: torch.Tensor,
+        target_indices: torch.Tensor,
+        meta_a: torch.Tensor,
+        meta_b: torch.Tensor,
+        input_keypoints_a: int,
+        input_keypoints_b: int,
+        kept_keypoints_a: int,
+        kept_keypoints_b: int,
+    ) -> torch.Tensor:
+        if pair_logits.numel() == 0:
+            return self.dustbin_bias.new_zeros(())
+        legacy_features = self._legacy_pair_acceptance_features(
+            pair_logits,
+            accept_logits,
+            probabilities,
+            input_keypoints_a=input_keypoints_a,
+            input_keypoints_b=input_keypoints_b,
+            kept_keypoints_a=kept_keypoints_a,
+            kept_keypoints_b=kept_keypoints_b,
+        )
+        context_features = self._pair_acceptance_context_features(
+            pair_logits,
+            accept_logits,
+            probabilities,
+            raw_similarity=raw_similarity,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=meta_a,
+            meta_b=meta_b,
+            input_keypoints_a=input_keypoints_a,
+            input_keypoints_b=input_keypoints_b,
+            kept_keypoints_a=kept_keypoints_a,
+            kept_keypoints_b=kept_keypoints_b,
+        )
+        return self.pair_accept_head(legacy_features).squeeze() + self.pair_accept_context_head(context_features).squeeze()
 
     def _provisional_pair_logits(
         self,
@@ -1345,11 +1688,26 @@ class PlanetaryGraphMatcher(nn.Module):
         attention_work_fraction = (
             0.0 if full_attention_work_units == 0 else attention_work_units / full_attention_work_units
         )
+        pair_accept_logit = self._pair_acceptance_logit(
+            pair_logits,
+            accept_logits,
+            probabilities,
+            raw_similarity=raw_similarity_full,
+            source_indices=source_indices,
+            target_indices=target_indices,
+            meta_a=kp_a,
+            meta_b=kp_b,
+            input_keypoints_a=input_keypoints_a,
+            input_keypoints_b=input_keypoints_b,
+            kept_keypoints_a=kept_keypoints_a,
+            kept_keypoints_b=kept_keypoints_b,
+        )
         return GraphMatcherOutput(
             logits.contiguous(),
             matches,
             scores,
             accept_logits.contiguous(),
+            pair_accept_logit=pair_accept_logit,
             executed_layers=int(self.last_executed_attention_layers),
             input_keypoints_a=input_keypoints_a,
             input_keypoints_b=input_keypoints_b,

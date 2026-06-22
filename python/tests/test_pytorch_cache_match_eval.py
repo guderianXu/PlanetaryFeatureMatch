@@ -278,6 +278,39 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(rows, torch.tensor([[4.0, 5.0]]), atol=1.0e-5))
 
+    def test_refine_keypoints_with_offsets_adds_selected_subpixel_offsets(self):
+        keypoints = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        selected = torch.tensor([0, 1], dtype=torch.long)
+        offsets = torch.zeros(1, 2, 1, 2)
+        offsets[0, 0, 0, 0] = 0.25
+        offsets[0, 1, 0, 0] = 0.50
+        offsets[0, 0, 0, 1] = -0.25
+        offsets[0, 1, 0, 1] = 0.00
+
+        refined = eval_py.refine_keypoints_with_offsets(keypoints, selected, offsets)
+
+        expected = torch.tensor([[0.25, 0.0], [0.75, 0.0]], dtype=torch.float32)
+        self.assertTrue(torch.allclose(refined, expected, atol=1.0e-6))
+
+    def test_descriptor_rows_for_selected_keypoints_samples_refined_positions(self):
+        descriptors = torch.zeros(1, 1, 1, 2)
+        descriptors[0, 0, 0, 0] = 0.0
+        descriptors[0, 0, 0, 1] = 10.0
+        keypoints = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+        selected = torch.tensor([0], dtype=torch.long)
+        offsets = torch.zeros(1, 2, 1, 2)
+        offsets[0, 0, 0, 0] = 0.25
+
+        rows = eval_py.descriptor_rows_for_selected_keypoints(
+            descriptors,
+            selected,
+            keypoints=keypoints,
+            keypoint_offsets=offsets,
+            use_keypoint_offsets=True,
+        )
+
+        self.assertTrue(torch.allclose(rows, torch.tensor([[2.5]]), atol=1.0e-5))
+
     def test_graph_metadata_from_raw_features_samples_geometry_fields(self):
         heatmap = torch.full((1, 1, 2, 2), 0.7)
         descriptors = torch.randn(1, 4, 2, 2)
@@ -379,6 +412,23 @@ class PyTorchCacheMatchEvalTest(unittest.TestCase):
             args = eval_py.parse_args()
 
         self.assertEqual(args.min_target_local_contrast, 5.32)
+
+    def test_parse_args_accepts_keypoint_offsets(self):
+        argv = [
+            "pytorch_cache_match_eval.py",
+            "--cache-dir",
+            "cache",
+            "--pytorch-state",
+            "state.pt",
+            "--output",
+            "summary.csv",
+            "--use-keypoint-offsets",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = eval_py.parse_args()
+
+        self.assertTrue(args.use_keypoint_offsets)
 
     def test_target_texture_gradient_uses_uint8_like_sobel_scale(self):
         image = torch.zeros(1, 5, 5)

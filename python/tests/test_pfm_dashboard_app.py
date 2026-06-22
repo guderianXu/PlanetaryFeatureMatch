@@ -5,6 +5,7 @@ import unittest
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from pfm_dashboard.app import make_server
 
@@ -17,12 +18,79 @@ class DashboardAppTest(unittest.TestCase):
             run.mkdir(parents=True)
             (run / "metrics.csv").write_text("step,loss\n1,2.5\n", encoding="utf-8")
             (run / "train.sh").write_text("#!/usr/bin/env bash\npython train.py --steps 2\n", encoding="utf-8")
+            hybrid = root / "runs" / "hybrid_gate"
+            hybrid.mkdir()
+            (hybrid / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "rows": 200,
+                        "kept_pfm_rows": 2,
+                        "fallback_lightglue_rows": 198,
+                        "hybrid_correct": 28444,
+                        "hybrid_wrong": 37,
+                        "hybrid_precision": 0.998700888,
+                        "lightglue_correct": 27783,
+                        "lightglue_wrong": 37,
+                        "hybrid_correct_delta_vs_lightglue": 661,
+                        "hybrid_wrong_delta_vs_lightglue": 0,
+                        "threshold": 0.1008127,
+                        "reject_action": "lightglue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selector = root / "runs" / "phase56_true_geometry"
+            selector.mkdir()
+            (selector / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "manifest_validation": {
+                            "counts": {"train": 26, "dev": 26, "val": 26, "lockbox": 26},
+                            "excluded_base_ids": 676,
+                            "base_disjoint": True,
+                        },
+                        "comparison": {
+                            "selector": {
+                                "rows": 78,
+                                "selected_correct": 19061,
+                                "selected_wrong": 0,
+                                "selected_precision": 1.0,
+                                "lightglue_correct": 3615,
+                                "lightglue_wrong": 38,
+                                "lightglue_precision": 0.989597591,
+                                "correct_delta_vs_lightglue": 15446,
+                                "wrong_delta_vs_lightglue": -38,
+                            },
+                            "selector_by_split": {
+                                "dev": {"rows": 26, "correct_delta_vs_lightglue": 5190},
+                                "val": {"rows": 26, "correct_delta_vs_lightglue": 4764},
+                                "lockbox": {"rows": 26, "correct_delta_vs_lightglue": 5492},
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (selector / "optimization_audit.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "requirement_id": "true_geometry.selector_fresh_validation",
+                            "status": "PASS",
+                            "evidence": "rows=78",
+                            "risk": "",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (selector / "summary.html").write_text("<html><body>true geometry report</body></html>", encoding="utf-8")
             server = make_server("127.0.0.1", 0, project_root=root)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
                 base = f"http://127.0.0.1:{server.server_address[1]}"
-                for path in ["/", "/train", "/runs", "/compare", "/datasets"]:
+                for path in ["/", "/train", "/runs", "/compare", "/hybrid", "/true-geometry", "/datasets"]:
                     with urllib.request.urlopen(base + path, timeout=5) as response:
                         self.assertEqual(response.status, 200)
                         self.assertIn(b"PFM Lab", response.read())
@@ -85,6 +153,26 @@ class DashboardAppTest(unittest.TestCase):
                 with urllib.request.urlopen(base + "/api/metrics?runs=python_sample", timeout=5) as response:
                     metrics = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(metrics["metrics"]["python_sample"]["rows"][0]["loss"], 2.5)
+                with urllib.request.urlopen(base + "/hybrid", timeout=5) as response:
+                    hybrid_html = response.read().decode("utf-8")
+                self.assertIn("Hybrid Gate", hybrid_html)
+                self.assertIn("hybrid_gate", hybrid_html)
+                self.assertIn("28444", hybrid_html)
+                self.assertIn("+661", hybrid_html)
+                with urllib.request.urlopen(base + "/api/hybrid-gates", timeout=5) as response:
+                    hybrid_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(hybrid_payload["hybrid_gates"][0]["name"], "hybrid_gate")
+                self.assertEqual(hybrid_payload["hybrid_gates"][0]["hybrid_wrong"], 37.0)
+                with urllib.request.urlopen(base + "/true-geometry", timeout=5) as response:
+                    true_geometry_html = response.read().decode("utf-8")
+                self.assertIn("True Geometry Selector", true_geometry_html)
+                self.assertIn("phase56_true_geometry", true_geometry_html)
+                self.assertIn("19061", true_geometry_html)
+                self.assertIn("+15446", true_geometry_html)
+                with urllib.request.urlopen(base + "/api/true-geometry-selectors", timeout=5) as response:
+                    selector_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(selector_payload["true_geometry_selectors"][0]["name"], "phase56_true_geometry")
+                self.assertEqual(selector_payload["true_geometry_selectors"][0]["selected_wrong"], 0)
                 with urllib.request.urlopen(base + "/static/dashboard.css", timeout=5) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/css")
                     dashboard_css = response.read()
@@ -119,6 +207,92 @@ class DashboardAppTest(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_hybrid_report_route_handles_nested_run_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            hybrid = root / "runs" / "fresh_eval" / "hybrid_gate"
+            hybrid.mkdir(parents=True)
+            (hybrid / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "hybrid_correct": 28444,
+                        "hybrid_wrong": 37,
+                        "hybrid_precision": 0.998700888,
+                        "hybrid_correct_delta_vs_lightglue": 661,
+                        "hybrid_wrong_delta_vs_lightglue": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (hybrid / "index.html").write_text("<html><body>hybrid report</body></html>", encoding="utf-8")
+            server = make_server("127.0.0.1", 0, project_root=root)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                encoded_name = urllib.parse.quote("fresh_eval/hybrid_gate", safe="")
+                with urllib.request.urlopen(base + "/hybrid", timeout=5) as response:
+                    hybrid_html = response.read().decode("utf-8")
+                self.assertIn(f"/runs/{encoded_name}/report", hybrid_html)
+                with urllib.request.urlopen(base + f"/runs/{encoded_name}/report", timeout=5) as response:
+                    report_html = response.read().decode("utf-8")
+                self.assertIn("hybrid report", report_html)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_true_geometry_route_reads_extra_run_roots_from_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "project"
+            extra = Path(temp) / "external_runs"
+            (root / "runs").mkdir(parents=True)
+            selector = extra / "phase56_external"
+            selector.mkdir(parents=True)
+            (selector / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "manifest_validation": {
+                            "counts": {"train": 26, "dev": 26, "val": 26, "lockbox": 26},
+                            "excluded_base_ids": 676,
+                            "base_disjoint": True,
+                        },
+                        "comparison": {
+                            "selector": {
+                                "rows": 78,
+                                "selected_correct": 19061,
+                                "selected_wrong": 0,
+                                "selected_precision": 1.0,
+                                "lightglue_correct": 3615,
+                                "lightglue_wrong": 38,
+                                "correct_delta_vs_lightglue": 15446,
+                                "wrong_delta_vs_lightglue": -38,
+                            },
+                            "selector_by_split": {
+                                "dev": {"rows": 26, "correct_delta_vs_lightglue": 5190},
+                                "val": {"rows": 26, "correct_delta_vs_lightglue": 4764},
+                                "lockbox": {"rows": 26, "correct_delta_vs_lightglue": 5492},
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict("os.environ", {"PFM_DASHBOARD_EXTRA_RUN_ROOTS": str(extra)}):
+                server = make_server("127.0.0.1", 0, project_root=root)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    with urllib.request.urlopen(base + "/true-geometry", timeout=5) as response:
+                        html = response.read().decode("utf-8")
+                    self.assertIn("phase56_external", html)
+                    with urllib.request.urlopen(base + "/api/true-geometry-selectors", timeout=5) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(payload["true_geometry_selectors"][0]["name"], "phase56_external")
+                finally:
+                    server.shutdown()
+                    server.server_close()
 
     def test_train_post_uses_full_cpp_profile_without_alignment_checkbox(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
