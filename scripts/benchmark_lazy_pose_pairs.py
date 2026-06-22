@@ -56,12 +56,13 @@ from pfm_pytorch_training import (  # noqa: E402
     amp_dtype_from_name,
     apply_extractor_freeze_warmup,
     descriptor_parameters,
+    freeze_non_trainable_batch_norm_statistics,
     hard_pair_probability,
     make_grad_scaler,
     load_graph_matcher_teacher_guard_model,
     parse_graph_supervision_depths,
     parse_rotation_consistency_degrees,
-    read_false_match_labels,
+    should_freeze_non_trainable_batch_norm_statistics,
     train_step,
 )
 from pfm_training_stability import (  # noqa: E402
@@ -86,9 +87,19 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
+)
+VISUAL_GEOMETRY_FILTER_CHOICES = (
+    "none",
+    "affine",
+    "local",
+    "ransac",
+    "magsac",
+    "true_geometry",
 )
 
 PAIR_TYPE_SAME_POSITION_VIEW = "same_position_view"
@@ -115,6 +126,12 @@ GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
     "graph_matcher_true_match_margin_loss",
     "graph_matcher_true_match_margin_violations",
     "graph_matcher_true_match_margin_mean",
+    "graph_matcher_true_geometry_match_count_floor_loss",
+    "graph_matcher_true_geometry_match_count_floor_target_count",
+    "graph_matcher_true_geometry_match_count_floor_student_count",
+    "graph_matcher_true_geometry_match_count_floor_count_deficit",
+    "graph_matcher_true_geometry_match_count_floor_topk_score_mean",
+    "graph_matcher_true_geometry_match_count_floor_violations",
     "graph_matcher_final_false_match_loss",
     "graph_matcher_final_false_match_edges",
     "graph_matcher_final_false_match_score_mean",
@@ -134,6 +151,21 @@ GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
     "graph_matcher_ransac_consistency_score_mean",
     "graph_matcher_ransac_consistency_residual_mean_px",
     "graph_matcher_ransac_consistency_accept_mean",
+    "graph_matcher_warp_outlier_loss",
+    "graph_matcher_warp_outlier_edges",
+    "graph_matcher_warp_outlier_residual_mean_px",
+    "graph_matcher_warp_outlier_accept_mean",
+    "graph_matcher_warp_outlier_accept_loss",
+    "graph_matcher_warp_outlier_accept_edges",
+    "graph_matcher_warp_outlier_accept_score_mean",
+    "graph_matcher_warp_outlier_accept_residual_mean_px",
+    "graph_matcher_warp_outlier_accept_probability_mean",
+    "graph_matcher_warp_soft_boundary_loss",
+    "graph_matcher_warp_soft_boundary_edges",
+    "graph_matcher_warp_soft_boundary_residual_mean_px",
+    "graph_matcher_warp_soft_boundary_target_mean",
+    "graph_matcher_warp_soft_boundary_score_probability_mean",
+    "graph_matcher_warp_soft_boundary_accept_probability_mean",
     "graph_matcher_teacher_guard_loss",
     "graph_matcher_teacher_guard_positive_margin_loss",
     "graph_matcher_teacher_guard_false_edge_loss",
@@ -148,6 +180,11 @@ GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
     "graph_matcher_teacher_match_count_floor_student_count",
     "graph_matcher_teacher_match_count_floor_count_deficit",
     "graph_matcher_teacher_match_count_floor_topk_score_mean",
+    "graph_matcher_teacher_match_count_ceiling_loss",
+    "graph_matcher_teacher_match_count_ceiling_teacher_count",
+    "graph_matcher_teacher_match_count_ceiling_student_count",
+    "graph_matcher_teacher_match_count_ceiling_count_excess",
+    "graph_matcher_teacher_match_count_ceiling_excess_score_mean",
     "graph_matcher_extra_false_match_pairs",
 )
 RELIABILITY_METRIC_FIELDS = (
@@ -325,6 +362,7 @@ class LazyPairSpec:
     pair_type: str = PAIR_TYPE_SAME_POSITION_VIEW
     fixed_crop_a: "CropWindow | None" = None
     fixed_crop_b: "CropWindow | None" = None
+    manifest_extra_fields: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1726,6 +1764,16 @@ def _parse_crop_window(row: dict[str, str], prefix: str) -> CropWindow | None:
     return CropWindow(x0=int(values[0]), y0=int(values[1]), x1=int(values[2]), y1=int(values[3]))
 
 
+def _manifest_extra_fields(row: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (key, value)
+            for key, value in row.items()
+            if key not in set(PAIR_SPEC_MANIFEST_FIELDS) and value != ""
+        )
+    )
+
+
 def _pair_spec_manifest_row(pair_index: int, result: LazyPairResult) -> dict[str, object]:
     spec = result.spec
     return {
@@ -1774,9 +1822,92 @@ def read_pair_spec_manifest(path: Path, records: list[RenderRecord]) -> list[Laz
                     pair_type=row.get("pair_type") or PAIR_TYPE_SAME_POSITION_VIEW,
                     fixed_crop_a=_parse_crop_window(row, "crop_a"),
                     fixed_crop_b=_parse_crop_window(row, "crop_b"),
+                    manifest_extra_fields=_manifest_extra_fields(row),
                 )
             )
     return specs
+
+
+def lazy_pair_has_false_cluster_replay(spec: LazyPairSpec) -> bool:
+    return any(key.startswith("false_cluster_") and value for key, value in spec.manifest_extra_fields)
+
+
+def lazy_pair_acceptance_target(spec: LazyPairSpec) -> tuple[float, float] | None:
+    fields = dict(spec.manifest_extra_fields)
+    label_text = fields.get("pair_accept_label", "")
+    if label_text == "":
+        return None
+    label = float(label_text)
+    if label not in (0.0, 1.0):
+        raise ValueError(f"pair_accept_label must be 0 or 1, got {label_text!r}")
+    weight = float(fields.get("pair_accept_weight", "1.0") or "1.0")
+    if not math.isfinite(weight) or weight <= 0.0:
+        raise ValueError(f"pair_accept_weight must be positive, got {weight!r}")
+    return label, weight
+
+
+def lazy_true_geometry_match_count_target(spec: LazyPairSpec) -> tuple[float, float] | None:
+    fields = dict(spec.manifest_extra_fields)
+    count_text = fields.get("true_geometry_positive_matches", "")
+    if count_text == "":
+        return None
+    count = float(count_text)
+    if not math.isfinite(count) or count < 0.0:
+        raise ValueError(f"true_geometry_positive_matches must be nonnegative, got {count_text!r}")
+    if count == 0.0:
+        return None
+    weight = float(fields.get("true_geometry_supervision_weight", fields.get("pair_accept_weight", "1.0")) or "1.0")
+    if not math.isfinite(weight) or weight <= 0.0:
+        raise ValueError(f"true_geometry_supervision_weight must be positive, got {weight!r}")
+    return count, weight
+
+
+def false_cluster_replay_loss_multiplier_for_results(
+    args: argparse.Namespace,
+    results_or_specs: list[LazyPairResult | LazyPairSpec],
+) -> float:
+    multiplier = float(getattr(args, "false_cluster_replay_loss_multiplier", 1.0))
+    if multiplier <= 1.0:
+        return 1.0
+    for item in results_or_specs:
+        spec = item.spec if isinstance(item, LazyPairResult) else item
+        if lazy_pair_has_false_cluster_replay(spec):
+            return multiplier
+    return 1.0
+
+
+def true_geometry_supervision_metrics_for_results(
+    results_or_specs: list[LazyPairResult | LazyPairSpec],
+) -> dict[str, float]:
+    supervised_pairs = 0
+    accept_pairs = 0
+    reject_pairs = 0
+    weights: list[float] = []
+    for item in results_or_specs:
+        spec = item.spec if isinstance(item, LazyPairResult) else item
+        fields = dict(spec.manifest_extra_fields)
+        if not any(key.startswith("true_geometry_") for key in fields):
+            continue
+        supervised_pairs += 1
+        label = fields.get("pair_accept_label", "")
+        if label == "1":
+            accept_pairs += 1
+        elif label == "0":
+            reject_pairs += 1
+        weight_text = fields.get("true_geometry_supervision_weight", fields.get("pair_accept_weight", "1.0"))
+        try:
+            weight = float(weight_text)
+        except (TypeError, ValueError):
+            weight = 1.0
+        if not math.isfinite(weight) or weight <= 0.0:
+            weight = 1.0
+        weights.append(weight)
+    return {
+        "true_geometry_supervised_pairs": float(supervised_pairs),
+        "true_geometry_accept_pairs": float(accept_pairs),
+        "true_geometry_reject_pairs": float(reject_pairs),
+        "true_geometry_supervision_weight_mean": sum(weights) / len(weights) if weights else 0.0,
+    }
 
 
 @dataclass(frozen=True)
@@ -2333,7 +2464,13 @@ def _load_model(args: argparse.Namespace, device: torch.device):
         train_dual_fpn=args.train_dual_fpn,
         train_descriptor_head=args.train_descriptor_head,
         train_sparse_context=args.train_sparse_context,
-        train_keypoint_head=args.train_keypoint_head,
+        train_keypoint_head=(
+            args.train_keypoint_head
+            or args.keypoint_weight > 0.0
+            or (args.keypoint_offset_weight > 0.0 and not args.train_keypoint_offset_head_only)
+            or (args.selected_keypoint_offset_weight > 0.0 and not args.train_keypoint_offset_head_only)
+        ),
+        train_keypoint_offset_head=args.train_keypoint_offset_head_only,
         train_geometry_head=args.train_geometry_head or args.affine_regularization_weight > 0.0,
         train_texture_adapter=args.train_texture_adapter,
         train_descriptor_fusion=args.train_descriptor_fusion,
@@ -2341,10 +2478,13 @@ def _load_model(args: argparse.Namespace, device: torch.device):
         train_reliability_head=args.train_reliability_head,
         train_graph_matcher=args.train_graph_matcher,
         train_graph_calibration_only=args.train_graph_calibration_only,
+        train_pair_accept_head_only=args.train_pair_accept_head_only,
     )
     if not trainable:
         raise RuntimeError("no trainable parameters selected")
     model.train()
+    if should_freeze_non_trainable_batch_norm_statistics(args):
+        freeze_non_trainable_batch_norm_statistics(model)
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=args.weight_decay)
     return model, optimizer
 
@@ -2816,18 +2956,253 @@ def false_match_mining_target_variant_allowed(spec: LazyPairSpec, target_variant
     return spec.target.variant.strip().lower() in tokens
 
 
+def _false_match_key_part(value: object) -> str:
+    return str(value).replace("|", "%7C").replace("\n", " ").strip()
+
+
+def _false_match_crop_token(crop: CropWindow | None) -> str:
+    if crop is None:
+        return "none"
+    return f"{crop.x0},{crop.y0},{crop.x1},{crop.y1}"
+
+
+def _false_match_crop_from_row(row: dict[str, str], prefix: str) -> CropWindow | None:
+    values = [row.get(f"{prefix}_{name}", "") for name in ("x0", "y0", "x1", "y1")]
+    if any(value == "" for value in values):
+        return None
+    return CropWindow(x0=int(values[0]), y0=int(values[1]), x1=int(values[2]), y1=int(values[3]))
+
+
+def _lazy_pair_false_match_key_from_values(
+    *,
+    pair_type: str,
+    reference_dataset_id: str,
+    reference_pose_id: str,
+    reference_base_id: str,
+    reference_variant: str,
+    target_dataset_id: str,
+    target_pose_id: str,
+    target_base_id: str,
+    target_variant: str,
+    crop_a: CropWindow | None = None,
+    crop_b: CropWindow | None = None,
+) -> str:
+    parts = [
+        "lazy_pair_false_v1",
+        pair_type,
+        reference_dataset_id,
+        reference_pose_id,
+        reference_base_id,
+        reference_variant,
+        target_dataset_id,
+        target_pose_id,
+        target_base_id,
+        target_variant,
+        _false_match_crop_token(crop_a),
+        _false_match_crop_token(crop_b),
+    ]
+    return "|".join(_false_match_key_part(part) for part in parts)
+
+
+def lazy_pair_false_match_key(
+    spec: LazyPairSpec,
+    *,
+    crop_a: CropWindow | None = None,
+    crop_b: CropWindow | None = None,
+) -> str:
+    """Return a stable key for false-match labels tied to a lazy pair identity."""
+
+    return _lazy_pair_false_match_key_from_values(
+        pair_type=spec.pair_type,
+        reference_dataset_id=_record_dataset_id(spec.reference),
+        reference_pose_id=spec.reference.pose_id,
+        reference_base_id=_record_raw_base_id(spec.reference),
+        reference_variant=spec.reference.variant,
+        target_dataset_id=_record_dataset_id(spec.target),
+        target_pose_id=spec.target.pose_id,
+        target_base_id=_record_raw_base_id(spec.target),
+        target_variant=spec.target.variant,
+        crop_a=crop_a if crop_a is not None else spec.fixed_crop_a,
+        crop_b=crop_b if crop_b is not None else spec.fixed_crop_b,
+    )
+
+
+def lazy_pair_legacy_false_match_key(spec: LazyPairSpec) -> str:
+    """Return the metadata key used by older mined false-match CSV files."""
+
+    parts = [
+        "lazy_pair_false_legacy_v1",
+        spec.pair_type,
+        spec.reference.base_id,
+        spec.reference.variant,
+        spec.target.base_id,
+        spec.target.variant,
+    ]
+    return "|".join(_false_match_key_part(part) for part in parts)
+
+
+def lazy_pair_false_match_candidate_keys(
+    spec: LazyPairSpec,
+    *,
+    crop_a: CropWindow | None = None,
+    crop_b: CropWindow | None = None,
+) -> list[str]:
+    keys: list[str] = []
+
+    def add(key: str) -> None:
+        if key not in keys:
+            keys.append(key)
+
+    add(lazy_pair_false_match_key(spec, crop_a=crop_a, crop_b=crop_b))
+    add(lazy_pair_false_match_key(spec))
+    add(lazy_pair_legacy_false_match_key(spec))
+    return keys
+
+
+def _false_match_row_key(row: dict[str, str]) -> str:
+    lazy_key = (row.get("lazy_pair_key") or row.get("pair_key") or "").strip()
+    if lazy_key:
+        return lazy_key
+    stable_fields = [
+        "reference_dataset_id",
+        "reference_pose_id",
+        "reference_variant",
+        "target_dataset_id",
+        "target_pose_id",
+        "target_variant",
+    ]
+    if all((row.get(field) or "").strip() for field in stable_fields):
+        reference_base_id = (
+            row.get("reference_raw_base_id")
+            or row.get("reference_base_id")
+            or row.get("reference_pose_id")
+            or ""
+        )
+        target_base_id = row.get("target_raw_base_id") or row.get("target_base_id") or row.get("target_pose_id") or ""
+        return _lazy_pair_false_match_key_from_values(
+            pair_type=(row.get("pair_type") or PAIR_TYPE_SAME_POSITION_VIEW).strip(),
+            reference_dataset_id=(row.get("reference_dataset_id") or "").strip(),
+            reference_pose_id=(row.get("reference_pose_id") or "").strip(),
+            reference_base_id=reference_base_id.strip(),
+            reference_variant=(row.get("reference_variant") or "").strip(),
+            target_dataset_id=(row.get("target_dataset_id") or "").strip(),
+            target_pose_id=(row.get("target_pose_id") or "").strip(),
+            target_base_id=target_base_id.strip(),
+            target_variant=(row.get("target_variant") or "").strip(),
+            crop_a=_false_match_crop_from_row(row, "crop_a"),
+            crop_b=_false_match_crop_from_row(row, "crop_b"),
+        )
+    legacy_fields = ["reference_base_id", "reference_variant", "target_base_id", "target_variant"]
+    if all((row.get(field) or "").strip() for field in legacy_fields):
+        parts = [
+            "lazy_pair_false_legacy_v1",
+            (row.get("pair_type") or PAIR_TYPE_SAME_POSITION_VIEW).strip(),
+            (row.get("reference_base_id") or "").strip(),
+            (row.get("reference_variant") or "").strip(),
+            (row.get("target_base_id") or "").strip(),
+            (row.get("target_variant") or "").strip(),
+        ]
+        return "|".join(_false_match_key_part(part) for part in parts)
+    return Path((row.get("pair_pt") or "").strip()).as_posix()
+
+
+def _merge_false_match_labels(left: FalseMatchLabels, right: FalseMatchLabels) -> FalseMatchLabels:
+    return FalseMatchLabels(
+        points_a_xy=torch.cat([left.points_a_xy, right.points_a_xy], dim=0),
+        points_b_xy=torch.cat([left.points_b_xy, right.points_b_xy], dim=0),
+    )
+
+
+def _add_false_match_label(labels: dict[str, FalseMatchLabels], key: str, value: FalseMatchLabels) -> None:
+    if not key:
+        return
+    existing = labels.get(key)
+    labels[key] = value if existing is None else _merge_false_match_labels(existing, value)
+
+
+def read_lazy_false_match_labels(paths: list[Path]) -> dict[str, FalseMatchLabels]:
+    grouped_a: dict[str, list[list[float]]] = {}
+    grouped_b: dict[str, list[list[float]]] = {}
+    for path in paths:
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                key = _false_match_row_key(row)
+                if not key:
+                    continue
+                try:
+                    ax = float(row["ax"])
+                    ay = float(row["ay"])
+                    bx = float(row["bx"])
+                    by = float(row["by"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not all(math.isfinite(value) for value in (ax, ay, bx, by)):
+                    continue
+                grouped_a.setdefault(key, []).append([ax, ay])
+                grouped_b.setdefault(key, []).append([bx, by])
+    return {
+        key: FalseMatchLabels(
+            points_a_xy=torch.tensor(grouped_a[key], dtype=torch.float32),
+            points_b_xy=torch.tensor(grouped_b[key], dtype=torch.float32),
+        )
+        for key in sorted(grouped_a)
+    }
+
+
+def alias_false_match_labels_for_lazy_results(
+    labels_by_key: dict[str, FalseMatchLabels],
+    pair_paths: list[Path],
+    results: list[LazyPairResult],
+) -> dict[str, FalseMatchLabels]:
+    aliased = dict(labels_by_key)
+    for pair_path, result in zip(pair_paths, results):
+        for key in lazy_pair_false_match_candidate_keys(result.spec, crop_a=result.crop_a, crop_b=result.crop_b):
+            labels = labels_by_key.get(key)
+            if labels is None:
+                continue
+            _add_false_match_label(aliased, pair_path.as_posix(), labels)
+            try:
+                _add_false_match_label(aliased, pair_path.resolve(strict=False).as_posix(), labels)
+            except OSError:
+                pass
+            break
+    return aliased
+
+
+def merge_false_match_label_maps(
+    labels: dict[str, FalseMatchLabels],
+    extra_labels: dict[str, FalseMatchLabels],
+) -> dict[str, FalseMatchLabels]:
+    merged = dict(labels)
+    for key, value in extra_labels.items():
+        _add_false_match_label(merged, key, value)
+    return merged
+
+
 def annotate_false_match_rows_with_pair_metadata(
     rows: list[dict[str, object]],
     spec: LazyPairSpec,
+    *,
+    crop_a: CropWindow | None = None,
+    crop_b: CropWindow | None = None,
 ) -> list[dict[str, object]]:
     annotated_rows: list[dict[str, object]] = []
     for row in rows:
         annotated = dict(row)
+        annotated["lazy_pair_key"] = lazy_pair_false_match_key(spec, crop_a=crop_a, crop_b=crop_b)
+        annotated["reference_dataset_id"] = _record_dataset_id(spec.reference)
+        annotated["reference_pose_id"] = spec.reference.pose_id
+        annotated["reference_raw_base_id"] = _record_raw_base_id(spec.reference)
         annotated["reference_base_id"] = spec.reference.base_id
         annotated["reference_variant"] = spec.reference.variant
+        annotated["target_dataset_id"] = _record_dataset_id(spec.target)
+        annotated["target_pose_id"] = spec.target.pose_id
+        annotated["target_raw_base_id"] = _record_raw_base_id(spec.target)
         annotated["target_base_id"] = spec.target.base_id
         annotated["target_variant"] = spec.target.variant
         annotated["pair_type"] = spec.pair_type
+        annotated.update(_crop_window_row("crop_a", crop_a))
+        annotated.update(_crop_window_row("crop_b", crop_b))
         annotated_rows.append(annotated)
     return annotated_rows
 
@@ -3105,6 +3480,14 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "keypoint_weight",
         "keypoint_loss",
         "keypoint_points",
+        "keypoint_offset_weight",
+        "keypoint_offset_loss",
+        "keypoint_offset_points",
+        "selected_keypoint_offset_weight",
+        "selected_keypoint_offset_loss",
+        "selected_keypoint_offset_points",
+        "selected_keypoint_offset_forward_points",
+        "selected_keypoint_offset_reverse_points",
         "graph_matcher_loss_weight",
         "graph_matcher_assignment_weight",
         "graph_matcher_accept_weight",
@@ -3129,6 +3512,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_teacher_match_count_floor_weight",
         "graph_matcher_teacher_match_count_floor_threshold",
         "graph_matcher_teacher_match_count_floor_margin",
+        "graph_matcher_teacher_match_count_ceiling_weight",
+        "graph_matcher_teacher_match_count_ceiling_threshold",
+        "graph_matcher_teacher_match_count_ceiling_margin",
         "graph_matcher_teacher_distillation_weight",
         "graph_matcher_teacher_distillation_temperature",
         "graph_matcher_positive_dustbin_guard_reject_threshold",
@@ -3151,11 +3537,35 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_positive_dustbin_margin",
         "graph_matcher_true_match_margin_weight",
         "graph_matcher_true_match_margin",
+        "graph_matcher_true_geometry_match_count_floor_weight",
+        "graph_matcher_true_geometry_match_count_floor_threshold",
+        "graph_matcher_true_geometry_match_count_floor_margin",
         "graph_matcher_final_false_match_weight",
         "graph_matcher_mined_false_match_weight",
         "graph_matcher_mined_false_match_loss_cap",
         "graph_matcher_mined_false_match_reference_margin",
+        "false_cluster_replay_pairs",
+        "false_cluster_replay_loss_multiplier",
+        "true_geometry_supervised_pairs",
+        "true_geometry_accept_pairs",
+        "true_geometry_reject_pairs",
+        "true_geometry_supervision_weight_mean",
         "graph_matcher_raw_false_match_weight",
+        "graph_matcher_warp_outlier_weight",
+        "graph_matcher_warp_outlier_topk",
+        "graph_matcher_warp_outlier_residual_threshold_px",
+        "graph_matcher_warp_outlier_min_score",
+        "graph_matcher_warp_outlier_margin",
+        "graph_matcher_warp_outlier_accept_weight",
+        "graph_matcher_warp_outlier_accept_topk",
+        "graph_matcher_warp_outlier_accept_residual_threshold_px",
+        "graph_matcher_warp_outlier_accept_min_score",
+        "graph_matcher_warp_soft_boundary_weight",
+        "graph_matcher_warp_soft_boundary_topk",
+        "graph_matcher_warp_soft_boundary_lower_residual_px",
+        "graph_matcher_warp_soft_boundary_upper_residual_px",
+        "graph_matcher_warp_soft_boundary_min_score",
+        "graph_matcher_pair_acceptance_loss_weight",
         "graph_matcher_total_loss",
         "graph_matcher_ce_loss",
         "graph_matcher_assignment_loss",
@@ -3166,6 +3576,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_raw_preservation_loss",
         "graph_matcher_hard_negative_dustbin_loss",
         "graph_matcher_positive_dustbin_margin_loss",
+        "graph_matcher_pair_acceptance_loss",
+        "graph_matcher_pair_acceptance_target",
+        "graph_matcher_pair_acceptance_weight",
+        "graph_matcher_pair_acceptance_probability",
         "graph_matcher_deep_supervision_loss",
         "graph_matcher_depth_distillation_loss",
         "graph_matcher_depth_distillation_teacher_layers",
@@ -3253,7 +3667,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             illumination_match_changed_view=args.illumination_match_changed_view,
         )
         print(f"hard_lazy_specs={len(hard_specs)} hard_variants={','.join(args.hard_variant)}", flush=True)
-    static_false_matches = read_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
+    static_false_matches = read_lazy_false_match_labels(args.false_match_csv) if args.false_match_csv else {}
     false_match_handle = None
     false_match_writer: csv.DictWriter | None = None
     if args.mine_false_matches:
@@ -3264,11 +3678,26 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             false_match_handle,
             fieldnames=[
                 "pair_pt",
+                "lazy_pair_key",
+                "reference_dataset_id",
+                "reference_pose_id",
+                "reference_raw_base_id",
                 "reference_base_id",
                 "reference_variant",
+                "target_dataset_id",
+                "target_pose_id",
+                "target_raw_base_id",
                 "target_base_id",
                 "target_variant",
                 "pair_type",
+                "crop_a_x0",
+                "crop_a_y0",
+                "crop_a_x1",
+                "crop_a_y1",
+                "crop_b_x0",
+                "crop_b_y0",
+                "crop_b_x1",
+                "crop_b_y1",
                 "ax",
                 "ay",
                 "bx",
@@ -3354,6 +3783,18 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             augmented_pairs = [result.pair for result in results]
             augment_ms = (time.perf_counter() - augment_start) * 1000.0
             prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
+            pair_acceptance_targets = {
+                path.resolve(strict=False): target
+                for path, result in zip(fake_paths, results)
+                for target in [lazy_pair_acceptance_target(result.spec)]
+                if target is not None
+            }
+            true_geometry_match_count_targets = {
+                path.resolve(strict=False): target
+                for path, result in zip(fake_paths, results)
+                for target in [lazy_true_geometry_match_count_target(result.spec)]
+                if target is not None
+            }
             illumination_prefetched = {
                 path.resolve(strict=False): result.illumination_pair
                 for path, result in zip(fake_paths, results)
@@ -3364,7 +3805,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 for path, result in zip(fake_paths, results)
                 if result.illumination_match_pair is not None
             }
-            mined_false_matches = dict(static_false_matches)
+            mined_false_matches = alias_false_match_labels_for_lazy_results(static_false_matches, fake_paths, results)
             mined_false_rows: list[dict[str, object]] = []
             false_mine_ms = 0.0
             false_probability = hard_pair_probability(
@@ -3403,8 +3844,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                         false_source=args.false_match_mine_source,
                         **false_match_mining_graph_kwargs(args),
                     )
-                    mined_false_matches.update(labels)
-                    mined_false_rows.extend(annotate_false_match_rows_with_pair_metadata(label_rows, result.spec))
+                    mined_false_matches = merge_false_match_label_maps(mined_false_matches, labels)
+                    mined_false_rows.extend(
+                        annotate_false_match_rows_with_pair_metadata(
+                            label_rows,
+                            result.spec,
+                            crop_a=result.crop_a,
+                            crop_b=result.crop_b,
+                        )
+                    )
                 if false_match_writer is not None and false_match_handle is not None:
                     for mined_row in mined_false_rows:
                         false_match_writer.writerow(mined_row)
@@ -3419,6 +3867,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 original_requires_grad,
                 freeze_extractor=freeze_extractor_warmup_active,
             )
+            false_cluster_replay_loss_multiplier = false_cluster_replay_loss_multiplier_for_results(args, results)
+            true_geometry_supervision_metrics = true_geometry_supervision_metrics_for_results(results)
             metrics = train_step(
                 model,
                 optimizer,
@@ -3444,6 +3894,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 abstention_candidates=args.abstention_candidates,
                 keypoint_weight=args.keypoint_weight,
                 keypoint_negative_weight=args.keypoint_negative_weight,
+                keypoint_offset_weight=args.keypoint_offset_weight,
+                selected_keypoint_offset_weight=args.selected_keypoint_offset_weight,
+                selected_keypoint_offset_max_points=args.selected_keypoint_offset_max_points,
+                selected_keypoint_offset_inverse_radius_px=args.selected_keypoint_offset_inverse_radius_px,
                 max_grad_norm=args.max_grad_norm,
                 skip_nonfinite_steps=args.skip_nonfinite_steps,
                 train_blended_descriptors=args.train_blended_descriptors,
@@ -3489,8 +3943,21 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 graph_matcher_positive_dustbin_margin=args.graph_matcher_positive_dustbin_margin,
                 graph_matcher_true_match_margin_weight=args.graph_matcher_true_match_margin_weight,
                 graph_matcher_true_match_margin=args.graph_matcher_true_match_margin,
-                graph_matcher_final_false_match_weight=args.graph_matcher_final_false_match_weight,
-                graph_matcher_mined_false_match_weight=args.graph_matcher_mined_false_match_weight,
+                graph_matcher_true_geometry_match_count_floor_weight=(
+                    args.graph_matcher_true_geometry_match_count_floor_weight
+                ),
+                graph_matcher_true_geometry_match_count_floor_threshold=(
+                    args.graph_matcher_true_geometry_match_count_floor_threshold
+                ),
+                graph_matcher_true_geometry_match_count_floor_margin=(
+                    args.graph_matcher_true_geometry_match_count_floor_margin
+                ),
+                graph_matcher_final_false_match_weight=(
+                    args.graph_matcher_final_false_match_weight * false_cluster_replay_loss_multiplier
+                ),
+                graph_matcher_mined_false_match_weight=(
+                    args.graph_matcher_mined_false_match_weight * false_cluster_replay_loss_multiplier
+                ),
                 graph_matcher_mined_false_match_loss_cap=args.graph_matcher_mined_false_match_loss_cap,
                 graph_matcher_mined_false_match_reference_margin=(
                     args.graph_matcher_mined_false_match_reference_margin
@@ -3508,13 +3975,44 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 graph_matcher_raw_false_match_spatial_min_distance=(
                     args.graph_matcher_raw_false_match_spatial_min_distance
                 ),
-                graph_matcher_ransac_consistency_weight=args.graph_matcher_ransac_consistency_weight,
+                graph_matcher_ransac_consistency_weight=(
+                    args.graph_matcher_ransac_consistency_weight * false_cluster_replay_loss_multiplier
+                ),
                 graph_matcher_ransac_consistency_topk=args.graph_matcher_ransac_consistency_topk,
                 graph_matcher_ransac_consistency_residual_threshold_px=(
                     args.graph_matcher_ransac_consistency_residual_threshold_px
                 ),
                 graph_matcher_ransac_consistency_min_score=args.graph_matcher_ransac_consistency_min_score,
                 graph_matcher_ransac_consistency_margin=args.graph_matcher_ransac_consistency_margin,
+                graph_matcher_warp_outlier_weight=(
+                    args.graph_matcher_warp_outlier_weight * false_cluster_replay_loss_multiplier
+                ),
+                graph_matcher_warp_outlier_topk=args.graph_matcher_warp_outlier_topk,
+                graph_matcher_warp_outlier_residual_threshold_px=(
+                    args.graph_matcher_warp_outlier_residual_threshold_px
+                ),
+                graph_matcher_warp_outlier_min_score=args.graph_matcher_warp_outlier_min_score,
+                graph_matcher_warp_outlier_margin=args.graph_matcher_warp_outlier_margin,
+                graph_matcher_warp_outlier_accept_weight=(
+                    args.graph_matcher_warp_outlier_accept_weight * false_cluster_replay_loss_multiplier
+                ),
+                graph_matcher_warp_outlier_accept_topk=args.graph_matcher_warp_outlier_accept_topk,
+                graph_matcher_warp_outlier_accept_residual_threshold_px=(
+                    args.graph_matcher_warp_outlier_accept_residual_threshold_px
+                ),
+                graph_matcher_warp_outlier_accept_min_score=args.graph_matcher_warp_outlier_accept_min_score,
+                graph_matcher_warp_soft_boundary_weight=(
+                    args.graph_matcher_warp_soft_boundary_weight * false_cluster_replay_loss_multiplier
+                ),
+                graph_matcher_warp_soft_boundary_topk=args.graph_matcher_warp_soft_boundary_topk,
+                graph_matcher_warp_soft_boundary_lower_residual_px=(
+                    args.graph_matcher_warp_soft_boundary_lower_residual_px
+                ),
+                graph_matcher_warp_soft_boundary_upper_residual_px=(
+                    args.graph_matcher_warp_soft_boundary_upper_residual_px
+                ),
+                graph_matcher_warp_soft_boundary_min_score=args.graph_matcher_warp_soft_boundary_min_score,
+                graph_matcher_pair_acceptance_loss_weight=args.graph_matcher_pair_acceptance_loss_weight,
                 graph_matcher_train_candidate_topk=args.graph_matcher_train_candidate_topk,
                 graph_matcher_semi_dense_no_match_points=args.graph_matcher_semi_dense_no_match_points,
                 graph_matcher_semi_dense_min_score=args.graph_matcher_semi_dense_min_score,
@@ -3546,6 +4044,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     args.graph_matcher_teacher_match_count_floor_threshold
                 ),
                 graph_matcher_teacher_match_count_floor_margin=args.graph_matcher_teacher_match_count_floor_margin,
+                graph_matcher_teacher_match_count_ceiling_weight=(
+                    args.graph_matcher_teacher_match_count_ceiling_weight
+                ),
+                graph_matcher_teacher_match_count_ceiling_threshold=(
+                    args.graph_matcher_teacher_match_count_ceiling_threshold
+                ),
+                graph_matcher_teacher_match_count_ceiling_margin=(
+                    args.graph_matcher_teacher_match_count_ceiling_margin
+                ),
                 graph_matcher_teacher_distillation_weight=args.graph_matcher_teacher_distillation_weight,
                 graph_matcher_teacher_distillation_temperature=(
                     args.graph_matcher_teacher_distillation_temperature
@@ -3561,6 +4068,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 training_max_image_size=args.training_max_image_size,
                 forced_pair_paths=fake_paths,
                 prefetched_pairs=prefetched,
+                pair_acceptance_targets=pair_acceptance_targets,
+                true_geometry_match_count_targets=true_geometry_match_count_targets,
                 illumination_consistency_pairs=illumination_prefetched,
                 illumination_consistency_weight=args.illumination_consistency_weight,
                 illumination_consistency_max_points=args.illumination_consistency_points,
@@ -3659,6 +4168,18 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "keypoint_weight": f"{args.keypoint_weight:.6f}",
                 "keypoint_loss": f"{metrics.get('keypoint_loss', 0.0):.6f}",
                 "keypoint_points": f"{metrics.get('keypoint_points', 0.0):.0f}",
+                "keypoint_offset_weight": f"{args.keypoint_offset_weight:.6f}",
+                "keypoint_offset_loss": f"{metrics.get('keypoint_offset_loss', 0.0):.6f}",
+                "keypoint_offset_points": f"{metrics.get('keypoint_offset_points', 0.0):.0f}",
+                "selected_keypoint_offset_weight": f"{args.selected_keypoint_offset_weight:.6f}",
+                "selected_keypoint_offset_loss": f"{metrics.get('selected_keypoint_offset_loss', 0.0):.6f}",
+                "selected_keypoint_offset_points": f"{metrics.get('selected_keypoint_offset_points', 0.0):.0f}",
+                "selected_keypoint_offset_forward_points": (
+                    f"{metrics.get('selected_keypoint_offset_forward_points', 0.0):.0f}"
+                ),
+                "selected_keypoint_offset_reverse_points": (
+                    f"{metrics.get('selected_keypoint_offset_reverse_points', 0.0):.0f}"
+                ),
                 "graph_matcher_loss_weight": f"{args.graph_matcher_loss_weight if args.train_graph_matcher else 0.0:.6f}",
                 "graph_matcher_assignment_weight": (
                     f"{args.graph_matcher_assignment_weight if args.train_graph_matcher else 0.0:.6f}"
@@ -3729,6 +4250,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_teacher_match_count_floor_margin": (
                     f"{args.graph_matcher_teacher_match_count_floor_margin if args.train_graph_matcher else 0.0:.6f}"
                 ),
+                "graph_matcher_teacher_match_count_ceiling_weight": (
+                    f"{args.graph_matcher_teacher_match_count_ceiling_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_threshold": (
+                    f"{args.graph_matcher_teacher_match_count_ceiling_threshold if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_margin": (
+                    f"{args.graph_matcher_teacher_match_count_ceiling_margin if args.train_graph_matcher else 0.0:.6f}"
+                ),
                 "graph_matcher_teacher_distillation_weight": (
                     f"{args.graph_matcher_teacher_distillation_weight if args.train_graph_matcher else 0.0:.6f}"
                 ),
@@ -3777,6 +4307,15 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_true_match_margin": (
                     f"{args.graph_matcher_true_match_margin if args.train_graph_matcher else 0.0:.6f}"
                 ),
+                "graph_matcher_true_geometry_match_count_floor_weight": (
+                    f"{args.graph_matcher_true_geometry_match_count_floor_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_true_geometry_match_count_floor_threshold": (
+                    f"{args.graph_matcher_true_geometry_match_count_floor_threshold if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_true_geometry_match_count_floor_margin": (
+                    f"{args.graph_matcher_true_geometry_match_count_floor_margin if args.train_graph_matcher else 0.0:.6f}"
+                ),
                 "graph_matcher_final_false_match_weight": (
                     f"{args.graph_matcher_final_false_match_weight if args.train_graph_matcher else 0.0:.6f}"
                 ),
@@ -3788,6 +4327,18 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 "graph_matcher_mined_false_match_reference_margin": (
                     f"{args.graph_matcher_mined_false_match_reference_margin if args.train_graph_matcher else -1.0:.6f}"
+                ),
+                "false_cluster_replay_pairs": sum(
+                    1 for result in results if lazy_pair_has_false_cluster_replay(result.spec)
+                ),
+                "false_cluster_replay_loss_multiplier": f"{false_cluster_replay_loss_multiplier:.6f}",
+                "true_geometry_supervised_pairs": int(
+                    true_geometry_supervision_metrics["true_geometry_supervised_pairs"]
+                ),
+                "true_geometry_accept_pairs": int(true_geometry_supervision_metrics["true_geometry_accept_pairs"]),
+                "true_geometry_reject_pairs": int(true_geometry_supervision_metrics["true_geometry_reject_pairs"]),
+                "true_geometry_supervision_weight_mean": (
+                    f"{true_geometry_supervision_metrics['true_geometry_supervision_weight_mean']:.6f}"
                 ),
                 "graph_matcher_raw_false_match_weight": (
                     f"{args.graph_matcher_raw_false_match_weight if args.train_graph_matcher else 0.0:.6f}"
@@ -3807,6 +4358,51 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "graph_matcher_ransac_consistency_margin": (
                     f"{args.graph_matcher_ransac_consistency_margin if args.train_graph_matcher else 0.0:.6f}"
                 ),
+                "graph_matcher_warp_outlier_weight": (
+                    f"{args.graph_matcher_warp_outlier_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_topk": (
+                    args.graph_matcher_warp_outlier_topk if args.train_graph_matcher else 0
+                ),
+                "graph_matcher_warp_outlier_residual_threshold_px": (
+                    f"{args.graph_matcher_warp_outlier_residual_threshold_px if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_min_score": (
+                    f"{args.graph_matcher_warp_outlier_min_score if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_margin": (
+                    f"{args.graph_matcher_warp_outlier_margin if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_accept_weight": (
+                    f"{args.graph_matcher_warp_outlier_accept_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_accept_topk": (
+                    args.graph_matcher_warp_outlier_accept_topk if args.train_graph_matcher else 0
+                ),
+                "graph_matcher_warp_outlier_accept_residual_threshold_px": (
+                    f"{args.graph_matcher_warp_outlier_accept_residual_threshold_px if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_outlier_accept_min_score": (
+                    f"{args.graph_matcher_warp_outlier_accept_min_score if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_soft_boundary_weight": (
+                    f"{args.graph_matcher_warp_soft_boundary_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_soft_boundary_topk": (
+                    args.graph_matcher_warp_soft_boundary_topk if args.train_graph_matcher else 0
+                ),
+                "graph_matcher_warp_soft_boundary_lower_residual_px": (
+                    f"{args.graph_matcher_warp_soft_boundary_lower_residual_px if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_soft_boundary_upper_residual_px": (
+                    f"{args.graph_matcher_warp_soft_boundary_upper_residual_px if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_warp_soft_boundary_min_score": (
+                    f"{args.graph_matcher_warp_soft_boundary_min_score if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_pair_acceptance_loss_weight": (
+                    f"{args.graph_matcher_pair_acceptance_loss_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
                 "graph_matcher_total_loss": f"{metrics.get('graph_matcher_total_loss', 0.0):.6f}",
                 "graph_matcher_ce_loss": f"{metrics.get('graph_matcher_ce_loss', 0.0):.6f}",
                 "graph_matcher_assignment_loss": f"{metrics.get('graph_matcher_assignment_loss', 0.0):.6f}",
@@ -3820,6 +4416,18 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 "graph_matcher_positive_dustbin_margin_loss": (
                     f"{metrics.get('graph_matcher_positive_dustbin_margin_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_pair_acceptance_loss": (
+                    f"{metrics.get('graph_matcher_pair_acceptance_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_pair_acceptance_target": (
+                    f"{metrics.get('graph_matcher_pair_acceptance_target', 0.0):.6f}"
+                ),
+                "graph_matcher_pair_acceptance_weight": (
+                    f"{metrics.get('graph_matcher_pair_acceptance_weight', 0.0):.6f}"
+                ),
+                "graph_matcher_pair_acceptance_probability": (
+                    f"{metrics.get('graph_matcher_pair_acceptance_probability', 0.0):.6f}"
                 ),
                 "graph_matcher_deep_supervision_loss": (
                     f"{metrics.get('graph_matcher_deep_supervision_loss', 0.0):.6f}"
@@ -3874,6 +4482,21 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 "graph_matcher_teacher_match_count_floor_topk_score_mean": (
                     f"{metrics.get('graph_matcher_teacher_match_count_floor_topk_score_mean', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_loss": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_ceiling_loss', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_teacher_count": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_ceiling_teacher_count', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_student_count": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_ceiling_student_count', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_count_excess": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_ceiling_count_excess', 0.0):.6f}"
+                ),
+                "graph_matcher_teacher_match_count_ceiling_excess_score_mean": (
+                    f"{metrics.get('graph_matcher_teacher_match_count_ceiling_excess_score_mean', 0.0):.6f}"
                 ),
                 "graph_matcher_executed_attention_layers": (
                     f"{metrics.get('graph_matcher_executed_attention_layers', 0.0):.0f}"
@@ -4068,6 +4691,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 print(
                     f"train step={step}/{args.steps} loss={row['loss']} "
                     f"top1={row['top1_accuracy']} false={row['false_match_points']} "
+                    f"kpoff={row['keypoint_offset_loss']} "
                     f"gassign={row['graph_matcher_assignment_loss']} gnomatch={row['graph_matcher_no_match_loss']} "
                     f"illum={row['illumination_consistency_points']} "
                     f"illum_match={row['illumination_match_points']} hard={row['hard_lazy_pairs']} "
@@ -4249,6 +4873,13 @@ def _save_training_state(
                 "illumination_consistency_points": int(args.illumination_consistency_points),
                 "keypoint_weight": float(args.keypoint_weight),
                 "keypoint_negative_weight": float(args.keypoint_negative_weight),
+                "keypoint_offset_weight": float(args.keypoint_offset_weight),
+                "selected_keypoint_offset_weight": float(args.selected_keypoint_offset_weight),
+                "selected_keypoint_offset_max_points": int(args.selected_keypoint_offset_max_points),
+                "selected_keypoint_offset_inverse_radius_px": float(
+                    args.selected_keypoint_offset_inverse_radius_px
+                ),
+                "train_keypoint_offset_head_only": bool(args.train_keypoint_offset_head_only),
                 "matchability_weight": float(args.matchability_weight),
                 "descriptor_uncertainty_weight": float(args.descriptor_uncertainty_weight),
                 "no_match_prior_weight": float(args.no_match_prior_weight),
@@ -4298,6 +4929,9 @@ def _save_training_state(
                 "graph_matcher_accept_weight": float(args.graph_matcher_accept_weight),
                 "graph_matcher_prune_ranking_weight": float(args.graph_matcher_prune_ranking_weight),
                 "graph_matcher_stop_confidence_weight": float(args.graph_matcher_stop_confidence_weight),
+                "graph_matcher_pair_acceptance_loss_weight": float(
+                    args.graph_matcher_pair_acceptance_loss_weight
+                ),
                 "graph_matcher_train_max_attention_layers": int(args.graph_matcher_train_max_attention_layers),
                 "graph_matcher_train_random_attention_layers": bool(args.graph_matcher_train_random_attention_layers),
                 "graph_matcher_train_max_attention_work_fraction": float(
@@ -4339,6 +4973,15 @@ def _save_training_state(
                 "graph_matcher_positive_dustbin_margin": float(args.graph_matcher_positive_dustbin_margin),
                 "graph_matcher_true_match_margin_weight": float(args.graph_matcher_true_match_margin_weight),
                 "graph_matcher_true_match_margin": float(args.graph_matcher_true_match_margin),
+                "graph_matcher_true_geometry_match_count_floor_weight": float(
+                    args.graph_matcher_true_geometry_match_count_floor_weight
+                ),
+                "graph_matcher_true_geometry_match_count_floor_threshold": float(
+                    args.graph_matcher_true_geometry_match_count_floor_threshold
+                ),
+                "graph_matcher_true_geometry_match_count_floor_margin": float(
+                    args.graph_matcher_true_geometry_match_count_floor_margin
+                ),
                 "graph_matcher_final_false_match_weight": float(args.graph_matcher_final_false_match_weight),
                 "graph_matcher_mined_false_match_weight": float(args.graph_matcher_mined_false_match_weight),
                 "graph_matcher_mined_false_match_loss_cap": float(
@@ -4347,6 +4990,7 @@ def _save_training_state(
                 "graph_matcher_mined_false_match_reference_margin": float(
                     args.graph_matcher_mined_false_match_reference_margin
                 ),
+                "false_cluster_replay_loss_multiplier": float(args.false_cluster_replay_loss_multiplier),
                 "graph_matcher_final_false_match_topk": int(args.graph_matcher_final_false_match_topk),
                 "graph_matcher_final_false_match_min_score": float(args.graph_matcher_final_false_match_min_score),
                 "graph_matcher_final_false_match_margin": float(args.graph_matcher_final_false_match_margin),
@@ -4369,6 +5013,34 @@ def _save_training_state(
                 ),
                 "graph_matcher_ransac_consistency_min_score": float(args.graph_matcher_ransac_consistency_min_score),
                 "graph_matcher_ransac_consistency_margin": float(args.graph_matcher_ransac_consistency_margin),
+                "graph_matcher_warp_outlier_weight": float(args.graph_matcher_warp_outlier_weight),
+                "graph_matcher_warp_outlier_topk": int(args.graph_matcher_warp_outlier_topk),
+                "graph_matcher_warp_outlier_residual_threshold_px": float(
+                    args.graph_matcher_warp_outlier_residual_threshold_px
+                ),
+                "graph_matcher_warp_outlier_min_score": float(args.graph_matcher_warp_outlier_min_score),
+                "graph_matcher_warp_outlier_margin": float(args.graph_matcher_warp_outlier_margin),
+                "graph_matcher_warp_outlier_accept_weight": float(args.graph_matcher_warp_outlier_accept_weight),
+                "graph_matcher_warp_outlier_accept_topk": int(args.graph_matcher_warp_outlier_accept_topk),
+                "graph_matcher_warp_outlier_accept_residual_threshold_px": float(
+                    args.graph_matcher_warp_outlier_accept_residual_threshold_px
+                ),
+                "graph_matcher_warp_outlier_accept_min_score": float(
+                    args.graph_matcher_warp_outlier_accept_min_score
+                ),
+                "graph_matcher_warp_soft_boundary_weight": float(
+                    args.graph_matcher_warp_soft_boundary_weight
+                ),
+                "graph_matcher_warp_soft_boundary_topk": int(args.graph_matcher_warp_soft_boundary_topk),
+                "graph_matcher_warp_soft_boundary_lower_residual_px": float(
+                    args.graph_matcher_warp_soft_boundary_lower_residual_px
+                ),
+                "graph_matcher_warp_soft_boundary_upper_residual_px": float(
+                    args.graph_matcher_warp_soft_boundary_upper_residual_px
+                ),
+                "graph_matcher_warp_soft_boundary_min_score": float(
+                    args.graph_matcher_warp_soft_boundary_min_score
+                ),
                 "graph_matcher_depth_distillation_weight": float(args.graph_matcher_depth_distillation_weight),
                 "graph_matcher_depth_distillation_teacher_layers": int(
                     args.graph_matcher_depth_distillation_teacher_layers
@@ -4403,6 +5075,15 @@ def _save_training_state(
                 ),
                 "graph_matcher_teacher_match_count_floor_margin": float(
                     args.graph_matcher_teacher_match_count_floor_margin
+                ),
+                "graph_matcher_teacher_match_count_ceiling_weight": float(
+                    args.graph_matcher_teacher_match_count_ceiling_weight
+                ),
+                "graph_matcher_teacher_match_count_ceiling_threshold": float(
+                    args.graph_matcher_teacher_match_count_ceiling_threshold
+                ),
+                "graph_matcher_teacher_match_count_ceiling_margin": float(
+                    args.graph_matcher_teacher_match_count_ceiling_margin
                 ),
                 "graph_matcher_teacher_distillation_weight": float(
                     args.graph_matcher_teacher_distillation_weight
@@ -4579,6 +5260,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-positive-dustbin-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-true-match-margin-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-true-match-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-true-geometry-match-count-floor-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-final-false-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-mined-false-match-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-mined-false-match-loss-cap", type=float, default=0.0)
@@ -4597,6 +5281,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-ransac-consistency-residual-threshold-px", type=float, default=3.0)
     parser.add_argument("--graph-matcher-ransac-consistency-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-ransac-consistency-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-warp-outlier-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-outlier-residual-threshold-px", type=float, default=3.0)
+    parser.add_argument("--graph-matcher-warp-outlier-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-margin", type=float, default=0.25)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-residual-threshold-px", type=float, default=3.0)
+    parser.add_argument("--graph-matcher-warp-outlier-accept-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-lower-residual-px", type=float, default=5.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-upper-residual-px", type=float, default=8.0)
+    parser.add_argument("--graph-matcher-warp-soft-boundary-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-pair-acceptance-loss-weight", type=float, default=0.0)
+    parser.add_argument("--false-cluster-replay-loss-multiplier", type=float, default=1.0)
     parser.add_argument("--graph-matcher-depth-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-depth-distillation-teacher-layers", type=int, default=0)
     parser.add_argument("--graph-matcher-depth-distillation-temperature", type=float, default=1.0)
@@ -4610,6 +5310,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-threshold", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-match-count-ceiling-margin", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-distillation-temperature", type=float, default=1.0)
     parser.add_argument("--graph-matcher-positive-dustbin-guard-reject-threshold", type=float, default=1.1)
@@ -4641,6 +5344,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-curriculum-warmup-steps", type=int, default=100)
     parser.add_argument("--keypoint-weight", type=float, default=0.0)
     parser.add_argument("--keypoint-negative-weight", type=float, default=0.01)
+    parser.add_argument("--keypoint-offset-weight", type=float, default=0.0)
+    parser.add_argument("--selected-keypoint-offset-weight", type=float, default=0.0)
+    parser.add_argument("--selected-keypoint-offset-max-points", type=int, default=256)
+    parser.add_argument("--selected-keypoint-offset-inverse-radius-px", type=float, default=1.5)
+    parser.add_argument("--train-keypoint-offset-head-only", action="store_true")
     parser.add_argument("--false-match-csv", action="append", type=Path, default=[])
     parser.add_argument("--false-match-weight", type=float, default=0.0)
     parser.add_argument("--false-match-max-points", type=int, default=128)
@@ -4713,6 +5421,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-reliability-head", action="store_true")
     parser.add_argument("--train-graph-matcher", action="store_true")
     parser.add_argument("--train-graph-calibration-only", action="store_true")
+    parser.add_argument("--train-pair-accept-head-only", action="store_true")
     parser.add_argument("--freeze-extractor-warmup-steps", type=int, default=0)
     parser.add_argument("--descriptor-geometry-mode", choices=pfm_model.DESCRIPTOR_GEOMETRY_MODES, default="full")
     parser.add_argument("--descriptor-geometry-blend-weight", type=float, default=1.0)
@@ -4755,7 +5464,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Named visualize_lazy_pose_matches.py post-filter profile for automatic visual eval.",
     )
-    parser.add_argument("--visual-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="none")
+    parser.add_argument("--visual-geometry-filter", choices=VISUAL_GEOMETRY_FILTER_CHOICES, default="none")
     parser.add_argument(
         "--visual-geometry-threshold-px",
         type=float,
@@ -4769,7 +5478,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visual-graph-width-prune-keep-ratio", type=float, default=1.0)
     parser.add_argument("--visual-filtered-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visual-filtered-mutual", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--visual-filtered-geometry-filter", choices=["none", "affine", "local", "ransac", "magsac"], default="local")
+    parser.add_argument("--visual-filtered-geometry-filter", choices=VISUAL_GEOMETRY_FILTER_CHOICES, default="local")
     parser.add_argument("--visual-filtered-min-score", type=float, default=-1.0)
     parser.add_argument("--visual-filtered-min-margin", type=float, default=0.02)
     parser.add_argument("--visual-filtered-min-matches", type=int, default=0)
@@ -4797,6 +5506,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-match-count-floor-threshold must be finite")
     if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
         parser.error("--graph-matcher-teacher-match-count-floor-margin must be nonnegative")
+    if args.graph_matcher_teacher_match_count_ceiling_weight < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-ceiling-weight must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_ceiling_threshold)):
+        parser.error("--graph-matcher-teacher-match-count-ceiling-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_ceiling_margin < 0.0:
+        parser.error("--graph-matcher-teacher-match-count-ceiling-margin must be nonnegative")
     if args.graph_matcher_teacher_distillation_weight < 0.0:
         parser.error("--graph-matcher-teacher-distillation-weight must be nonnegative")
     if (
@@ -4808,10 +5523,11 @@ def parse_args() -> argparse.Namespace:
         args.graph_matcher_teacher_guard_weight > 0.0
         or args.graph_matcher_teacher_score_floor_weight > 0.0
         or args.graph_matcher_teacher_match_count_floor_weight > 0.0
+        or args.graph_matcher_teacher_match_count_ceiling_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, match-count ceiling, or distillation weight is positive"
         )
     if (
         not math.isfinite(float(args.descriptor_geometry_blend_weight))
@@ -4930,6 +5646,10 @@ def prepare_lazy_pair_specs(
 ) -> tuple[list[LazyPairSpec], dict[str, int], str]:
     if args.pair_spec_manifest is not None and args.mode != "overlap-list":
         specs = read_pair_spec_manifest(args.pair_spec_manifest, records)
+        if args.shuffle:
+            rng = random.Random(args.seed)
+            rng.shuffle(specs)
+            specs = _reindex_pair_specs(specs)
         return specs, count_pair_types(specs), "pair_spec_manifest"
 
     specs, pair_type_counts = build_lazy_pair_specs(
@@ -5077,6 +5797,16 @@ def main() -> int:
         raise ValueError("--keypoint-weight must be non-negative")
     if args.keypoint_negative_weight < 0.0:
         raise ValueError("--keypoint-negative-weight must be non-negative")
+    if args.keypoint_offset_weight < 0.0:
+        raise ValueError("--keypoint-offset-weight must be non-negative")
+    if args.selected_keypoint_offset_weight < 0.0:
+        raise ValueError("--selected-keypoint-offset-weight must be non-negative")
+    if args.selected_keypoint_offset_max_points < 0:
+        raise ValueError("--selected-keypoint-offset-max-points must be non-negative")
+    if args.selected_keypoint_offset_inverse_radius_px < 0.0:
+        raise ValueError("--selected-keypoint-offset-inverse-radius-px must be non-negative")
+    if args.train_keypoint_offset_head_only and (args.train_keypoint_head or args.keypoint_weight > 0.0):
+        raise ValueError("--train-keypoint-offset-head-only conflicts with keypoint heatmap training")
     if args.false_match_curriculum_max_probability < 0.0 or args.false_match_curriculum_max_probability > 1.0:
         raise ValueError("--false-match-curriculum-max-probability must be in [0, 1]")
     if args.false_match_weight < 0.0:
@@ -5177,6 +5907,12 @@ def main() -> int:
         raise ValueError("--graph-matcher-true-match-margin-weight must be non-negative")
     if args.graph_matcher_true_match_margin < 0.0:
         raise ValueError("--graph-matcher-true-match-margin must be non-negative")
+    if args.graph_matcher_true_geometry_match_count_floor_weight < 0.0:
+        raise ValueError("--graph-matcher-true-geometry-match-count-floor-weight must be non-negative")
+    if not math.isfinite(float(args.graph_matcher_true_geometry_match_count_floor_threshold)):
+        raise ValueError("--graph-matcher-true-geometry-match-count-floor-threshold must be finite")
+    if args.graph_matcher_true_geometry_match_count_floor_margin < 0.0:
+        raise ValueError("--graph-matcher-true-geometry-match-count-floor-margin must be non-negative")
     if args.graph_matcher_final_false_match_weight < 0.0:
         raise ValueError("--graph-matcher-final-false-match-weight must be non-negative")
     if args.graph_matcher_mined_false_match_weight < 0.0:
@@ -5216,6 +5952,50 @@ def main() -> int:
         raise ValueError("--graph-matcher-ransac-consistency-min-score must be non-negative")
     if args.graph_matcher_ransac_consistency_margin < 0.0:
         raise ValueError("--graph-matcher-ransac-consistency-margin must be non-negative")
+    if args.graph_matcher_warp_outlier_weight < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-weight must be non-negative")
+    if args.graph_matcher_warp_outlier_topk < 0:
+        raise ValueError("--graph-matcher-warp-outlier-topk must be non-negative")
+    if args.graph_matcher_warp_outlier_residual_threshold_px < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-residual-threshold-px must be non-negative")
+    if args.graph_matcher_warp_outlier_min_score < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-min-score must be non-negative")
+    if args.graph_matcher_warp_outlier_margin < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-margin must be non-negative")
+    if args.graph_matcher_warp_outlier_accept_weight < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-accept-weight must be non-negative")
+    if args.graph_matcher_warp_outlier_accept_topk < 0:
+        raise ValueError("--graph-matcher-warp-outlier-accept-topk must be non-negative")
+    if args.graph_matcher_warp_outlier_accept_residual_threshold_px < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-accept-residual-threshold-px must be non-negative")
+    if args.graph_matcher_warp_outlier_accept_min_score < 0.0:
+        raise ValueError("--graph-matcher-warp-outlier-accept-min-score must be non-negative")
+    if args.graph_matcher_warp_soft_boundary_weight < 0.0:
+        raise ValueError("--graph-matcher-warp-soft-boundary-weight must be non-negative")
+    if args.graph_matcher_warp_soft_boundary_topk < 0:
+        raise ValueError("--graph-matcher-warp-soft-boundary-topk must be non-negative")
+    if (
+        not math.isfinite(float(args.graph_matcher_warp_soft_boundary_lower_residual_px))
+        or args.graph_matcher_warp_soft_boundary_lower_residual_px < 0.0
+    ):
+        raise ValueError("--graph-matcher-warp-soft-boundary-lower-residual-px must be finite and non-negative")
+    if (
+        not math.isfinite(float(args.graph_matcher_warp_soft_boundary_upper_residual_px))
+        or args.graph_matcher_warp_soft_boundary_upper_residual_px
+        <= args.graph_matcher_warp_soft_boundary_lower_residual_px
+    ):
+        raise ValueError(
+            "--graph-matcher-warp-soft-boundary-upper-residual-px must be finite and greater than lower"
+        )
+    if args.graph_matcher_warp_soft_boundary_min_score < 0.0:
+        raise ValueError("--graph-matcher-warp-soft-boundary-min-score must be non-negative")
+    if args.graph_matcher_pair_acceptance_loss_weight < 0.0:
+        raise ValueError("--graph-matcher-pair-acceptance-loss-weight must be non-negative")
+    if (
+        not math.isfinite(float(args.false_cluster_replay_loss_multiplier))
+        or args.false_cluster_replay_loss_multiplier < 1.0
+    ):
+        raise ValueError("--false-cluster-replay-loss-multiplier must be finite and >= 1")
     if args.graph_matcher_depth_distillation_weight < 0.0:
         raise ValueError("--graph-matcher-depth-distillation-weight must be non-negative")
     if args.graph_matcher_depth_distillation_teacher_layers < 0:
@@ -5239,6 +6019,12 @@ def main() -> int:
         raise ValueError("--graph-matcher-teacher-match-count-floor-threshold must be finite")
     if args.graph_matcher_teacher_match_count_floor_margin < 0.0:
         raise ValueError("--graph-matcher-teacher-match-count-floor-margin must be non-negative")
+    if args.graph_matcher_teacher_match_count_ceiling_weight < 0.0:
+        raise ValueError("--graph-matcher-teacher-match-count-ceiling-weight must be non-negative")
+    if not math.isfinite(float(args.graph_matcher_teacher_match_count_ceiling_threshold)):
+        raise ValueError("--graph-matcher-teacher-match-count-ceiling-threshold must be finite")
+    if args.graph_matcher_teacher_match_count_ceiling_margin < 0.0:
+        raise ValueError("--graph-matcher-teacher-match-count-ceiling-margin must be non-negative")
     if (
         not math.isfinite(float(args.graph_matcher_teacher_distillation_temperature))
         or args.graph_matcher_teacher_distillation_temperature <= 0.0
@@ -5326,6 +6112,15 @@ def main() -> int:
         "descriptor_scale_log_clamp_max": float(args.descriptor_scale_log_clamp_max),
         "descriptor_geometry_safety_schedule": str(args.descriptor_geometry_safety_schedule),
         "quality_score_mode": str(args.quality_score_mode),
+        "keypoint_supervision": {
+            "weight": float(args.keypoint_weight),
+            "negative_weight": float(args.keypoint_negative_weight),
+            "offset_weight": float(args.keypoint_offset_weight),
+            "selected_offset_weight": float(args.selected_keypoint_offset_weight),
+            "selected_offset_max_points": int(args.selected_keypoint_offset_max_points),
+            "selected_offset_inverse_radius_px": float(args.selected_keypoint_offset_inverse_radius_px),
+            "offset_head_only": bool(args.train_keypoint_offset_head_only),
+        },
         "matcher_calibration": {
             "reliability_pair_bias": str(args.matcher_reliability_pair_bias),
             "reliability_dustbin_bias": str(args.matcher_reliability_dustbin_bias),

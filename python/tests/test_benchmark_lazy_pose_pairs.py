@@ -234,6 +234,12 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.45",
             "--graph-matcher-positive-dustbin-margin",
             "0.2",
+            "--graph-matcher-true-geometry-match-count-floor-weight",
+            "0.12",
+            "--graph-matcher-true-geometry-match-count-floor-threshold",
+            "14.0",
+            "--graph-matcher-true-geometry-match-count-floor-margin",
+            "0.6",
             "--graph-matcher-mined-false-match-loss-cap",
             "3.5",
             "--graph-matcher-mined-false-match-reference-margin",
@@ -258,6 +264,36 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "0.03",
             "--graph-matcher-ransac-consistency-margin",
             "0.4",
+            "--graph-matcher-warp-outlier-weight",
+            "0.09",
+            "--graph-matcher-warp-outlier-topk",
+            "7",
+            "--graph-matcher-warp-outlier-residual-threshold-px",
+            "4.5",
+            "--graph-matcher-warp-outlier-min-score",
+            "0.06",
+            "--graph-matcher-warp-outlier-margin",
+            "0.55",
+            "--graph-matcher-warp-outlier-accept-weight",
+            "0.035",
+            "--graph-matcher-warp-outlier-accept-topk",
+            "9",
+            "--graph-matcher-warp-outlier-accept-residual-threshold-px",
+            "5.5",
+            "--graph-matcher-warp-outlier-accept-min-score",
+            "0.07",
+            "--graph-matcher-warp-soft-boundary-weight",
+            "0.045",
+            "--graph-matcher-warp-soft-boundary-topk",
+            "11",
+            "--graph-matcher-warp-soft-boundary-lower-residual-px",
+            "5.0",
+            "--graph-matcher-warp-soft-boundary-upper-residual-px",
+            "8.0",
+            "--graph-matcher-warp-soft-boundary-min-score",
+            "0.04",
+            "--false-cluster-replay-loss-multiplier",
+            "2.25",
             "--graph-matcher-depth-distillation-weight",
             "0.6",
             "--graph-matcher-depth-distillation-teacher-layers",
@@ -284,6 +320,12 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "18.0",
             "--graph-matcher-teacher-match-count-floor-margin",
             "0.5",
+            "--graph-matcher-teacher-match-count-ceiling-weight",
+            "0.04",
+            "--graph-matcher-teacher-match-count-ceiling-threshold",
+            "18.5",
+            "--graph-matcher-teacher-match-count-ceiling-margin",
+            "0.75",
             "--graph-matcher-teacher-distillation-weight",
             "0.35",
             "--graph-matcher-teacher-distillation-temperature",
@@ -398,6 +440,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.graph_matcher_dustbin_ramp_steps, 300)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_margin_weight, 0.45)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_margin, 0.2)
+        self.assertAlmostEqual(args.graph_matcher_true_geometry_match_count_floor_weight, 0.12)
+        self.assertAlmostEqual(args.graph_matcher_true_geometry_match_count_floor_threshold, 14.0)
+        self.assertAlmostEqual(args.graph_matcher_true_geometry_match_count_floor_margin, 0.6)
         self.assertAlmostEqual(args.graph_matcher_mined_false_match_loss_cap, 3.5)
         self.assertAlmostEqual(args.graph_matcher_mined_false_match_reference_margin, 0.5)
         self.assertAlmostEqual(args.graph_matcher_raw_false_match_weight, 0.04)
@@ -410,6 +455,21 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_residual_threshold_px, 2.5)
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_min_score, 0.03)
         self.assertAlmostEqual(args.graph_matcher_ransac_consistency_margin, 0.4)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_weight, 0.09)
+        self.assertEqual(args.graph_matcher_warp_outlier_topk, 7)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_residual_threshold_px, 4.5)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_min_score, 0.06)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_margin, 0.55)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_weight, 0.035)
+        self.assertEqual(args.graph_matcher_warp_outlier_accept_topk, 9)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_residual_threshold_px, 5.5)
+        self.assertAlmostEqual(args.graph_matcher_warp_outlier_accept_min_score, 0.07)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_weight, 0.045)
+        self.assertEqual(args.graph_matcher_warp_soft_boundary_topk, 11)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_lower_residual_px, 5.0)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_upper_residual_px, 8.0)
+        self.assertAlmostEqual(args.graph_matcher_warp_soft_boundary_min_score, 0.04)
+        self.assertAlmostEqual(args.false_cluster_replay_loss_multiplier, 2.25)
         self.assertAlmostEqual(args.graph_matcher_depth_distillation_weight, 0.6)
         self.assertEqual(args.graph_matcher_depth_distillation_teacher_layers, 4)
         self.assertAlmostEqual(args.graph_matcher_depth_distillation_temperature, 1.5)
@@ -423,6 +483,9 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_weight, 0.03)
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_threshold, 18.0)
         self.assertAlmostEqual(args.graph_matcher_teacher_match_count_floor_margin, 0.5)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_weight, 0.04)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_threshold, 18.5)
+        self.assertAlmostEqual(args.graph_matcher_teacher_match_count_ceiling_margin, 0.75)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_weight, 0.35)
         self.assertAlmostEqual(args.graph_matcher_teacher_distillation_temperature, 1.75)
         self.assertAlmostEqual(args.graph_matcher_positive_dustbin_guard_reject_threshold, 0.2)
@@ -460,6 +523,79 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(args.visual_filtered_min_matches, 16)
         self.assertEqual(args.visual_post_filter_profile, "fov76_geo5_geo10_extreme_rescue_lowmatch_guard")
         self.assertEqual(args.visual_eval_every_steps, 100)
+
+    def test_parse_args_accepts_keypoint_offset_weight(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--mode",
+            "train",
+            "--keypoint-offset-weight",
+            "0.2",
+            "--selected-keypoint-offset-weight",
+            "0.3",
+            "--selected-keypoint-offset-max-points",
+            "64",
+            "--selected-keypoint-offset-inverse-radius-px",
+            "2.25",
+            "--train-keypoint-offset-head-only",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertAlmostEqual(args.keypoint_offset_weight, 0.2)
+        self.assertAlmostEqual(args.selected_keypoint_offset_weight, 0.3)
+        self.assertEqual(args.selected_keypoint_offset_max_points, 64)
+        self.assertAlmostEqual(args.selected_keypoint_offset_inverse_radius_px, 2.25)
+        self.assertTrue(args.train_keypoint_offset_head_only)
+
+    def test_load_model_can_select_only_keypoint_offset_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            checkpoint = Path(temp) / "state.pt"
+            checkpoint.write_bytes(b"placeholder")
+            argv = [
+                "benchmark_lazy_pose_pairs.py",
+                "--render-manifest",
+                "render.csv",
+                "--output-dir",
+                "run",
+                "--mode",
+                "train",
+                "--init-pytorch-state",
+                str(checkpoint),
+                "--keypoint-offset-weight",
+                "1.0",
+                "--no-train-descriptor-head",
+                "--train-keypoint-offset-head-only",
+            ]
+            model = lazy_bench.pfm_model.PlanetaryFeatureMatcher(
+                base_channels=4,
+                descriptor_dim=8,
+                graph_hidden_dim=8,
+                graph_attention_layers=1,
+            )
+
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(lazy_bench.pfm_model, "load_pytorch_state", return_value=(model, {})),
+                mock.patch.object(
+                    lazy_bench,
+                    "descriptor_parameters",
+                    wraps=lazy_bench.descriptor_parameters,
+                ) as descriptor_parameters,
+            ):
+                args = lazy_bench.parse_args()
+                _, optimizer = lazy_bench._load_model(args, torch.device("cpu"))
+
+        self.assertEqual(len(optimizer.param_groups[0]["params"]), 2)
+        self.assertFalse(model.backbone.stage1[1].training)
+        _, kwargs = descriptor_parameters.call_args
+        self.assertFalse(kwargs["train_keypoint_head"])
+        self.assertTrue(kwargs["train_keypoint_offset_head"])
 
     def test_parse_args_enable_rejection_training_expands_safe_defaults(self) -> None:
         argv = [
@@ -526,6 +662,28 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(args.false_match_mine_geometry_threshold_px, 10.0)
         self.assertEqual(args.false_match_mine_source, "geometry_rejected_truth_wrong")
 
+    def test_parse_args_accepts_true_geometry_visual_eval_profile(self) -> None:
+        argv = [
+            "benchmark_lazy_pose_pairs.py",
+            "--render-manifest",
+            "render.csv",
+            "--output-dir",
+            "run",
+            "--visual-post-filter-profile",
+            "true_geometry_error5_overlap10",
+            "--visual-geometry-filter",
+            "true_geometry",
+            "--visual-filtered-geometry-filter",
+            "true_geometry",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = lazy_bench.parse_args()
+
+        self.assertEqual(args.visual_post_filter_profile, "true_geometry_error5_overlap10")
+        self.assertEqual(args.visual_geometry_filter, "true_geometry")
+        self.assertEqual(args.visual_filtered_geometry_filter, "true_geometry")
+
     def test_parse_args_accepts_graph_geometry_false_mining_options(self) -> None:
         argv = [
             "benchmark_lazy_pose_pairs.py",
@@ -569,6 +727,7 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
             "train",
             "--train-graph-matcher",
             "--train-graph-calibration-only",
+            "--train-pair-accept-head-only",
         ]
 
         with mock.patch.object(sys, "argv", argv):
@@ -576,6 +735,13 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
 
         self.assertTrue(args.train_graph_matcher)
         self.assertTrue(args.train_graph_calibration_only)
+        self.assertTrue(args.train_pair_accept_head_only)
+
+    def test_pair_accept_head_only_freezes_non_trainable_batch_norm_statistics(self) -> None:
+        text = (ROOT / "scripts" / "benchmark_lazy_pose_pairs.py").read_text(encoding="utf-8")
+
+        self.assertIn("should_freeze_non_trainable_batch_norm_statistics", text)
+        self.assertIn("if should_freeze_non_trainable_batch_norm_statistics(args):", text)
 
     def test_mine_false_matches_can_use_graph_local_geometry_rejected_wrong_edges(self) -> None:
         class FakeModel:
@@ -934,6 +1100,111 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(annotated[0]["target_variant"], "extreme_02")
         self.assertEqual(annotated[0]["pair_type"], lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW)
         self.assertEqual(annotated[0]["ax"], "1.0")
+
+    def test_lazy_false_match_key_changes_with_pair_identity_and_crop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "pose001", "nadir", dataset_id="fov076")
+            target = self.record(root, "pose001", "extreme_02", dataset_id="fov076")
+            other_target = self.record(root, "pose001", "extreme_03", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target,
+                pair_type=lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW,
+            )
+            other_spec = replace(spec, target=other_target)
+
+            key = lazy_bench.lazy_pair_false_match_key(
+                spec,
+                crop_a=lazy_bench.CropWindow(1, 2, 33, 34),
+                crop_b=lazy_bench.CropWindow(5, 6, 37, 38),
+            )
+            changed_variant_key = lazy_bench.lazy_pair_false_match_key(
+                other_spec,
+                crop_a=lazy_bench.CropWindow(1, 2, 33, 34),
+                crop_b=lazy_bench.CropWindow(5, 6, 37, 38),
+            )
+            changed_crop_key = lazy_bench.lazy_pair_false_match_key(
+                spec,
+                crop_a=lazy_bench.CropWindow(1, 2, 33, 35),
+                crop_b=lazy_bench.CropWindow(5, 6, 37, 38),
+            )
+
+        self.assertIn("fov076", key)
+        self.assertIn("pose001", key)
+        self.assertIn("extreme_02", key)
+        self.assertNotEqual(key, changed_variant_key)
+        self.assertNotEqual(key, changed_crop_key)
+
+    def test_static_lazy_false_matches_alias_to_current_fake_pair_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "pose001", "nadir", dataset_id="fov076")
+            target = self.record(root, "pose001", "extreme_02", dataset_id="fov076")
+            crop_a = lazy_bench.CropWindow(1, 2, 33, 34)
+            crop_b = lazy_bench.CropWindow(5, 6, 37, 38)
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target,
+                pair_type=lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW,
+                fixed_crop_a=crop_a,
+                fixed_crop_b=crop_b,
+            )
+            pair = self.make_pair()
+            result = lazy_bench.LazyPairResult(
+                spec=spec,
+                pair=pair,
+                valid_fraction=1.0,
+                valid_pixels=16,
+                attempt_count=1,
+                elapsed_ms=1.0,
+                crop_a=crop_a,
+                crop_b=crop_b,
+            )
+            key = lazy_bench.lazy_pair_false_match_key(spec, crop_a=crop_a, crop_b=crop_b)
+            labels = {
+                key: lazy_bench.FalseMatchLabels(
+                    points_a_xy=torch.tensor([[1.0, 2.0]]),
+                    points_b_xy=torch.tensor([[3.0, 4.0]]),
+                )
+            }
+            fake_path = Path("run/lazy_pair_refs/step_000010_pair_00.pt")
+
+            aliased = lazy_bench.alias_false_match_labels_for_lazy_results(labels, [fake_path], [result])
+
+        self.assertIn(fake_path.as_posix(), aliased)
+        self.assertTrue(torch.equal(aliased[fake_path.as_posix()].points_a_xy, torch.tensor([[1.0, 2.0]])))
+
+    def test_read_lazy_false_match_labels_uses_metadata_key_when_pair_path_is_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "pose001", "nadir", dataset_id="fov076")
+            target = self.record(root, "pose001", "extreme_02", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target,
+                pair_type=lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW,
+            )
+            key = lazy_bench.lazy_pair_false_match_key(spec)
+            csv_path = root / "false_matches.csv"
+            csv_path.write_text(
+                "pair_pt,lazy_pair_key,reference_dataset_id,reference_pose_id,reference_variant,"
+                "target_dataset_id,target_pose_id,target_variant,pair_type,ax,ay,bx,by\n"
+                f"lazy_pair_refs/step_000001_pair_00.pt,{key},fov076,{reference.pose_id},nadir,"
+                f"fov076,{target.pose_id},extreme_02,same_position_view,1,2,3,4\n",
+                encoding="utf-8",
+            )
+
+            labels = lazy_bench.read_lazy_false_match_labels([csv_path])
+
+        self.assertEqual(set(labels), {key})
+        self.assertTrue(torch.equal(labels[key].points_b_xy, torch.tensor([[3.0, 4.0]])))
 
     def test_parse_args_accepts_training_stability_controls(self) -> None:
         argv = [
@@ -1773,6 +2044,168 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(specs[0].fixed_crop_a, lazy_bench.CropWindow(1, 2, 5, 6))
         self.assertEqual(specs[0].fixed_crop_b, lazy_bench.CropWindow(7, 8, 11, 12))
 
+    def test_pair_spec_manifest_preserves_false_cluster_extra_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target = self.record(root, "b001", "extreme_03", dataset_id="fov076")
+            manifest = root / "false_cluster_pairs.csv"
+            with manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        *lazy_bench.PAIR_SPEC_MANIFEST_FIELDS,
+                        "false_cluster_reasons",
+                        "false_cluster_score",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "pair_index": "0",
+                        "split": "train",
+                        "pair_type": lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW,
+                        "reference_dataset_id": "fov076",
+                        "reference_pose_id": reference.pose_id,
+                        "reference_base_id": reference.base_id,
+                        "reference_variant": reference.variant,
+                        "target_dataset_id": "fov076",
+                        "target_pose_id": target.pose_id,
+                        "target_base_id": target.base_id,
+                        "target_variant": target.variant,
+                        "valid_fraction": "1.0",
+                        "valid_pixels": "16",
+                        "attempts": "1",
+                        "crop_a_x0": "",
+                        "crop_a_y0": "",
+                        "crop_a_x1": "",
+                        "crop_a_y1": "",
+                        "crop_b_x0": "",
+                        "crop_b_y0": "",
+                        "crop_b_x1": "",
+                        "crop_b_y1": "",
+                        "false_cluster_reasons": "pfm_wrong|teacher_wrong_excess",
+                        "false_cluster_score": "42.0",
+                    }
+                )
+
+            specs = lazy_bench.read_pair_spec_manifest(manifest, [reference, target])
+
+        self.assertEqual(
+            dict(specs[0].manifest_extra_fields)["false_cluster_reasons"],
+            "pfm_wrong|teacher_wrong_excess",
+        )
+        self.assertTrue(lazy_bench.lazy_pair_has_false_cluster_replay(specs[0]))
+
+    def test_false_cluster_replay_multiplier_only_affects_false_cluster_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target = self.record(root, "b001", "extreme_03", dataset_id="fov076")
+            plain = lazy_bench.LazyPairSpec(pair_index=0, split="train", reference=reference, target=target)
+            replay = lazy_bench.LazyPairSpec(
+                pair_index=1,
+                split="train",
+                reference=reference,
+                target=target,
+                manifest_extra_fields=(("false_cluster_reasons", "pfm_wrong"),),
+            )
+            args = argparse.Namespace(false_cluster_replay_loss_multiplier=2.5)
+
+            self.assertEqual(lazy_bench.false_cluster_replay_loss_multiplier_for_results(args, [plain]), 1.0)
+            self.assertEqual(lazy_bench.false_cluster_replay_loss_multiplier_for_results(args, [replay]), 2.5)
+
+    def test_pair_acceptance_target_reads_manifest_extra_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target_record = self.record(root, "b001", "extreme_03", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target_record,
+                manifest_extra_fields=(("pair_accept_label", "0"), ("pair_accept_weight", "3.5")),
+            )
+
+            target = lazy_bench.lazy_pair_acceptance_target(spec)
+
+        self.assertEqual(target, (0.0, 3.5))
+
+    def test_pair_acceptance_target_returns_none_without_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target_record = self.record(root, "b001", "mid_01", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target_record,
+                manifest_extra_fields=(),
+            )
+
+            target = lazy_bench.lazy_pair_acceptance_target(spec)
+
+        self.assertIsNone(target)
+
+    def test_true_geometry_match_count_target_reads_manifest_extra_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target_record = self.record(root, "b001", "extreme_03", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target_record,
+                manifest_extra_fields=(
+                    ("true_geometry_positive_matches", "30"),
+                    ("true_geometry_supervision_weight", "2.25"),
+                ),
+            )
+
+            target = lazy_bench.lazy_true_geometry_match_count_target(spec)
+
+        self.assertEqual(target, (30.0, 2.25))
+
+    def test_true_geometry_match_count_target_returns_none_without_positive_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target_record = self.record(root, "b001", "mid_01", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target_record,
+                manifest_extra_fields=(("pair_accept_label", "1"),),
+            )
+
+            target = lazy_bench.lazy_true_geometry_match_count_target(spec)
+
+        self.assertIsNone(target)
+
+    def test_true_geometry_match_count_target_returns_none_for_zero_positive_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov076")
+            target_record = self.record(root, "b001", "mid_01", dataset_id="fov076")
+            spec = lazy_bench.LazyPairSpec(
+                pair_index=0,
+                split="train",
+                reference=reference,
+                target=target_record,
+                manifest_extra_fields=(
+                    ("true_geometry_positive_matches", "0"),
+                    ("true_geometry_supervision_weight", "4.0"),
+                ),
+            )
+
+            target = lazy_bench.lazy_true_geometry_match_count_target(spec)
+
+        self.assertIsNone(target)
+
     def test_prepare_lazy_pair_specs_uses_pair_spec_manifest_for_training(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1825,6 +2258,62 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertEqual(counts[lazy_bench.PAIR_TYPE_CROSS_CAMERA], 1)
         self.assertEqual(specs[0].fixed_crop_a, lazy_bench.CropWindow(1, 2, 5, 6))
         self.assertEqual(specs[0].fixed_crop_b, lazy_bench.CropWindow(7, 8, 11, 12))
+
+    def test_prepare_lazy_pair_specs_shuffles_pair_spec_manifest_for_training(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reference = self.record(root, "b001", "nadir", dataset_id="fov090")
+            targets = [
+                self.record(root, f"b00{idx}", "mid_01", dataset_id="fov090")
+                for idx in range(2, 7)
+            ]
+            results = [
+                lazy_bench.LazyPairResult(
+                    spec=lazy_bench.LazyPairSpec(
+                        pair_index=idx,
+                        split="train",
+                        reference=reference,
+                        target=target,
+                        pair_type=lazy_bench.PAIR_TYPE_CROSS_CAMERA,
+                    ),
+                    pair=self.make_pair(),
+                    valid_fraction=0.25,
+                    valid_pixels=16,
+                    attempt_count=1,
+                    elapsed_ms=1.0,
+                )
+                for idx, target in enumerate(targets)
+            ]
+            manifest = root / "overlap_pairs.csv"
+            lazy_bench.write_pair_spec_manifest(manifest, results)
+            args = argparse.Namespace(
+                pair_spec_manifest=manifest,
+                mode="train",
+                split="train",
+                pair_mode="mixed",
+                reference_variant="nadir",
+                target_variants=("mid_01",),
+                cross_variants=("nadir", "mid_01"),
+                cross_camera_offsets=(1,),
+                cross_fov_offsets=(0,),
+                image_source="uint8",
+                limit_pairs=0,
+                seed=123,
+                shuffle=True,
+            )
+
+            specs, counts, source = lazy_bench.prepare_lazy_pair_specs(
+                args,
+                [reference, *targets],
+                target_variants=("mid_01",),
+                cross_variants=("nadir", "mid_01"),
+                effective_pair_type_weights={lazy_bench.PAIR_TYPE_CROSS_CAMERA: 1.0},
+            )
+
+        self.assertEqual(source, "pair_spec_manifest")
+        self.assertEqual(counts[lazy_bench.PAIR_TYPE_CROSS_CAMERA], len(targets))
+        self.assertEqual([spec.target.pose_id for spec in specs], [targets[idx].pose_id for idx in (3, 1, 4, 2, 0)])
+        self.assertEqual([spec.pair_index for spec in specs], list(range(len(targets))))
 
     def test_run_visual_report_passes_training_pair_selection_to_visualizer(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2342,6 +2831,14 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                 reference=reference,
                 target=target,
                 pair_type=lazy_bench.PAIR_TYPE_SAME_POSITION_VIEW,
+                manifest_extra_fields=(
+                    ("pair_accept_label", "0"),
+                    ("pair_accept_weight", "3.5"),
+                    ("true_geometry_supervision_weight", "2.25"),
+                    ("true_geometry_positive_matches", "30"),
+                    ("true_geometry_filtered_matches", "31"),
+                    ("true_geometry_wrong_matches", "1"),
+                ),
             )
             result = lazy_bench.LazyPairResult(
                 spec=spec,
@@ -2390,6 +2887,56 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                 "18.0",
                 "--graph-matcher-teacher-match-count-floor-margin",
                 "0.5",
+                "--graph-matcher-teacher-match-count-ceiling-weight",
+                "0.03",
+                "--graph-matcher-teacher-match-count-ceiling-threshold",
+                "18.0",
+                "--graph-matcher-teacher-match-count-ceiling-margin",
+                "0.75",
+                "--graph-matcher-warp-outlier-weight",
+                "0.08",
+                "--graph-matcher-warp-outlier-topk",
+                "5",
+                "--graph-matcher-warp-outlier-residual-threshold-px",
+                "4.5",
+                "--graph-matcher-warp-outlier-min-score",
+                "0.06",
+                "--graph-matcher-warp-outlier-margin",
+                "0.55",
+                "--graph-matcher-warp-outlier-accept-weight",
+                "0.03",
+                "--graph-matcher-warp-outlier-accept-topk",
+                "6",
+                "--graph-matcher-warp-outlier-accept-residual-threshold-px",
+                "5.5",
+                "--graph-matcher-warp-outlier-accept-min-score",
+                "0.07",
+                "--graph-matcher-warp-soft-boundary-weight",
+                "0.04",
+                "--graph-matcher-warp-soft-boundary-topk",
+                "7",
+                "--graph-matcher-warp-soft-boundary-lower-residual-px",
+                "5.0",
+                "--graph-matcher-warp-soft-boundary-upper-residual-px",
+                "8.0",
+                "--graph-matcher-warp-soft-boundary-min-score",
+                "0.02",
+                "--graph-matcher-pair-acceptance-loss-weight",
+                "0.25",
+                "--graph-matcher-true-geometry-match-count-floor-weight",
+                "0.4",
+                "--graph-matcher-true-geometry-match-count-floor-threshold",
+                "12.0",
+                "--graph-matcher-true-geometry-match-count-floor-margin",
+                "0.5",
+                "--keypoint-offset-weight",
+                "0.2",
+                "--selected-keypoint-offset-weight",
+                "0.3",
+                "--selected-keypoint-offset-max-points",
+                "64",
+                "--selected-keypoint-offset-inverse-radius-px",
+                "2.25",
                 "--no-save-best-checkpoints",
                 "--no-auto-visual-report",
                 "--no-gpu-monitor",
@@ -2414,6 +2961,40 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
                     "graph_matcher_teacher_match_count_floor_teacher_count": 8.0,
                     "graph_matcher_teacher_match_count_floor_student_count": 6.0,
                     "graph_matcher_teacher_match_count_floor_count_deficit": 2.0,
+                    "graph_matcher_teacher_match_count_ceiling_loss": 0.03125,
+                    "graph_matcher_teacher_match_count_ceiling_teacher_count": 8.0,
+                    "graph_matcher_teacher_match_count_ceiling_student_count": 10.0,
+                    "graph_matcher_teacher_match_count_ceiling_count_excess": 2.0,
+                    "graph_matcher_warp_outlier_loss": 0.25,
+                    "graph_matcher_warp_outlier_edges": 3.0,
+                    "graph_matcher_warp_outlier_residual_mean_px": 9.0,
+                    "graph_matcher_warp_outlier_accept_mean": 0.7,
+                    "graph_matcher_warp_outlier_accept_loss": 0.125,
+                    "graph_matcher_warp_outlier_accept_edges": 4.0,
+                    "graph_matcher_warp_outlier_accept_score_mean": 1.5,
+                    "graph_matcher_warp_outlier_accept_residual_mean_px": 10.0,
+                    "graph_matcher_warp_outlier_accept_probability_mean": 0.8,
+                    "graph_matcher_warp_soft_boundary_loss": 0.0625,
+                    "graph_matcher_warp_soft_boundary_edges": 5.0,
+                    "graph_matcher_warp_soft_boundary_residual_mean_px": 6.5,
+                    "graph_matcher_warp_soft_boundary_target_mean": 0.5,
+                    "graph_matcher_warp_soft_boundary_score_probability_mean": 0.6,
+                    "graph_matcher_warp_soft_boundary_accept_probability_mean": 0.7,
+                    "graph_matcher_pair_acceptance_loss": 0.625,
+                    "graph_matcher_pair_acceptance_target": 0.0,
+                    "graph_matcher_pair_acceptance_weight": 3.5,
+                    "graph_matcher_pair_acceptance_probability": 0.25,
+                    "graph_matcher_true_geometry_match_count_floor_loss": 0.375,
+                    "graph_matcher_true_geometry_match_count_floor_target_count": 30.0,
+                    "graph_matcher_true_geometry_match_count_floor_student_count": 18.0,
+                    "graph_matcher_true_geometry_match_count_floor_count_deficit": 12.0,
+                    "graph_matcher_true_geometry_match_count_floor_topk_score_mean": 13.0,
+                    "keypoint_offset_loss": 0.015625,
+                    "keypoint_offset_points": 4.0,
+                    "selected_keypoint_offset_loss": 0.03125,
+                    "selected_keypoint_offset_points": 6.0,
+                    "selected_keypoint_offset_forward_points": 3.0,
+                    "selected_keypoint_offset_reverse_points": 3.0,
                 }
 
             with (
@@ -2438,9 +3019,56 @@ class BenchmarkLazyPosePairsTest(unittest.TestCase):
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_weight"], 0.02)
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_threshold"], 18.0)
         self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_floor_margin"], 0.5)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_ceiling_weight"], 0.03)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_ceiling_threshold"], 18.0)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_teacher_match_count_ceiling_margin"], 0.75)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_weight"], 0.08)
+        self.assertEqual(train_calls[0]["graph_matcher_warp_outlier_topk"], 5)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_residual_threshold_px"], 4.5)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_min_score"], 0.06)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_margin"], 0.55)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_accept_weight"], 0.03)
+        self.assertEqual(train_calls[0]["graph_matcher_warp_outlier_accept_topk"], 6)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_accept_residual_threshold_px"], 5.5)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_outlier_accept_min_score"], 0.07)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_soft_boundary_weight"], 0.04)
+        self.assertEqual(train_calls[0]["graph_matcher_warp_soft_boundary_topk"], 7)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_soft_boundary_lower_residual_px"], 5.0)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_soft_boundary_upper_residual_px"], 8.0)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_warp_soft_boundary_min_score"], 0.02)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_pair_acceptance_loss_weight"], 0.25)
+        self.assertEqual(list(train_calls[0]["pair_acceptance_targets"].values()), [(0.0, 3.5)])
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_true_geometry_match_count_floor_weight"], 0.4)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_true_geometry_match_count_floor_threshold"], 12.0)
+        self.assertAlmostEqual(train_calls[0]["graph_matcher_true_geometry_match_count_floor_margin"], 0.5)
+        self.assertEqual(list(train_calls[0]["true_geometry_match_count_targets"].values()), [(30.0, 2.25)])
+        self.assertAlmostEqual(train_calls[0]["keypoint_offset_weight"], 0.2)
+        self.assertAlmostEqual(train_calls[0]["selected_keypoint_offset_weight"], 0.3)
+        self.assertEqual(train_calls[0]["selected_keypoint_offset_max_points"], 64)
+        self.assertAlmostEqual(train_calls[0]["selected_keypoint_offset_inverse_radius_px"], 2.25)
         self.assertIn("graph_matcher_teacher_score_floor_loss", metrics_text)
         self.assertIn("graph_matcher_teacher_match_count_floor_loss", metrics_text)
+        self.assertIn("graph_matcher_teacher_match_count_ceiling_loss", metrics_text)
+        self.assertIn("graph_matcher_warp_outlier_loss", metrics_text)
+        self.assertIn("graph_matcher_warp_outlier_accept_loss", metrics_text)
+        self.assertIn("graph_matcher_warp_soft_boundary_loss", metrics_text)
+        self.assertIn("graph_matcher_warp_soft_boundary_target_mean", metrics_text)
+        self.assertIn("graph_matcher_pair_acceptance_loss", metrics_text)
+        self.assertIn("graph_matcher_pair_acceptance_probability", metrics_text)
+        self.assertIn("graph_matcher_true_geometry_match_count_floor_loss", metrics_text)
+        self.assertIn("graph_matcher_true_geometry_match_count_floor_count_deficit", metrics_text)
+        self.assertIn("true_geometry_supervised_pairs", metrics_text)
+        self.assertIn("true_geometry_accept_pairs", metrics_text)
+        self.assertIn("true_geometry_reject_pairs", metrics_text)
+        self.assertIn("true_geometry_supervision_weight_mean", metrics_text)
+        self.assertIn("2.250000", metrics_text)
+        self.assertIn("keypoint_offset_loss", metrics_text)
+        self.assertIn("selected_keypoint_offset_loss", metrics_text)
+        self.assertIn("0.031250", metrics_text)
+        self.assertIn("0.015625", metrics_text)
         self.assertIn("0.125000", metrics_text)
+        self.assertIn("0.625000", metrics_text)
+        self.assertIn("0.375000", metrics_text)
 
     def test_run_train_passes_training_image_size_controls_to_train_step(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

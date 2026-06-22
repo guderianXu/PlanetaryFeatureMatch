@@ -17,12 +17,19 @@ from typing import Iterable
 class SelectorConfig:
     target_variants: tuple[str, ...] = ("extreme_02", "extreme_03")
     min_match_gain: int = 1
+    max_match_gain: int | None = None
     min_rescue_matches: int = 8
     max_rescue_homography_p90_px: float = 3.2
     max_rescue_homography_median_px: float = 1.8
     max_rescue_homography_p90_delta_px: float = -1.0
+    min_rescue_displacement_mad_px: float = -1.0
+    max_rescue_displacement_mad_px: float = -1.0
     min_rescue_score_mean: float = 16.0
     require_rescue_score_mean_not_lower: bool = True
+    min_valid_fraction: float | None = None
+    max_valid_fraction: float | None = None
+    min_rescue_score_mean_delta: float | None = None
+    rescue_gate_target_variants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,18 @@ def finite_or(value: float, default: float) -> float:
     return value if math.isfinite(value) else default
 
 
+def safe_float_with_fallback(
+    primary_row: dict[str, object],
+    fallback_row: dict[str, object],
+    key: str,
+    default: float = math.nan,
+) -> float:
+    primary = safe_float(primary_row.get(key), default=math.nan)
+    if math.isfinite(primary):
+        return primary
+    return safe_float(fallback_row.get(key), default=default)
+
+
 def read_summary_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         raise FileNotFoundError(f"missing summary CSV: {path}")
@@ -91,6 +110,10 @@ def parse_source_spec(text: str) -> SourceSpec:
     )
 
 
+def extra_rescue_gates_apply(variant: str, config: SelectorConfig) -> bool:
+    return not config.rescue_gate_target_variants or variant in set(config.rescue_gate_target_variants)
+
+
 def selector_reason(base_row: dict[str, object], rescue_row: dict[str, object], config: SelectorConfig) -> str:
     variant = str(rescue_row.get("target_variant", "")).strip()
     if variant not in set(config.target_variants):
@@ -103,6 +126,9 @@ def selector_reason(base_row: dict[str, object], rescue_row: dict[str, object], 
     required_matches = base_matches + config.min_match_gain
     if rescue_matches < required_matches:
         return f"blocked_match_gain:{rescue_matches}<{required_matches}"
+    match_gain = rescue_matches - base_matches
+    if config.max_match_gain is not None and match_gain > config.max_match_gain:
+        return f"blocked_max_match_gain:{match_gain}>{config.max_match_gain}"
 
     homography_valid = safe_int(rescue_row.get("homography_residual_valid"), default=1)
     if homography_valid <= 0:
@@ -136,12 +162,65 @@ def selector_reason(base_row: dict[str, object], rescue_row: dict[str, object], 
             f"{finite_or(rescue_median, float('inf')):.6g}>{config.max_rescue_homography_median_px:.6g}"
         )
 
+    rescue_displacement_mad = safe_float(rescue_row.get("displacement_mad_px"))
+    if (
+        config.min_rescue_displacement_mad_px >= 0
+        and (
+            not math.isfinite(rescue_displacement_mad)
+            or rescue_displacement_mad < config.min_rescue_displacement_mad_px
+        )
+    ):
+        return (
+            f"blocked_min_displacement_mad:"
+            f"{finite_or(rescue_displacement_mad, float('-inf')):.6g}<"
+            f"{config.min_rescue_displacement_mad_px:.6g}"
+        )
+    if (
+        config.max_rescue_displacement_mad_px >= 0
+        and (
+            not math.isfinite(rescue_displacement_mad)
+            or rescue_displacement_mad > config.max_rescue_displacement_mad_px
+        )
+    ):
+        return (
+            f"blocked_displacement_mad:"
+            f"{finite_or(rescue_displacement_mad, float('inf')):.6g}>"
+            f"{config.max_rescue_displacement_mad_px:.6g}"
+        )
+
+    apply_extra_gates = extra_rescue_gates_apply(variant, config)
+    if apply_extra_gates and config.min_valid_fraction is not None:
+        valid_fraction = safe_float_with_fallback(rescue_row, base_row, "valid_fraction")
+        if not math.isfinite(valid_fraction) or valid_fraction < config.min_valid_fraction:
+            return (
+                f"blocked_min_valid_fraction:"
+                f"{finite_or(valid_fraction, float('-inf')):.6g}<{config.min_valid_fraction:.6g}"
+            )
+
+    if apply_extra_gates and config.max_valid_fraction is not None:
+        valid_fraction = safe_float_with_fallback(rescue_row, base_row, "valid_fraction")
+        if not math.isfinite(valid_fraction) or valid_fraction > config.max_valid_fraction:
+            return (
+                f"blocked_valid_fraction:"
+                f"{finite_or(valid_fraction, float('inf')):.6g}>{config.max_valid_fraction:.6g}"
+            )
+
     rescue_score = safe_float(rescue_row.get("score_mean"))
     if not math.isfinite(rescue_score) or rescue_score < config.min_rescue_score_mean:
         return f"blocked_score_mean:{finite_or(rescue_score, float('-inf')):.6g}<{config.min_rescue_score_mean:.6g}"
 
+    base_score = safe_float(base_row.get("score_mean"))
+    if apply_extra_gates and config.min_rescue_score_mean_delta is not None:
+        if not (math.isfinite(base_score) and math.isfinite(rescue_score)):
+            return "blocked_score_mean_delta:missing"
+        score_delta = rescue_score - base_score
+        if score_delta < config.min_rescue_score_mean_delta:
+            return (
+                f"blocked_score_mean_delta:"
+                f"{score_delta:.6g}<{config.min_rescue_score_mean_delta:.6g}"
+            )
+
     if config.require_rescue_score_mean_not_lower:
-        base_score = safe_float(base_row.get("score_mean"))
         if math.isfinite(base_score) and rescue_score < base_score:
             return f"blocked_score_mean_lower:{rescue_score:.6g}<{base_score:.6g}"
 
@@ -156,12 +235,14 @@ def should_select_rescue(
     return selector_reason(base_row, rescue_row, config) == "rescue_selected"
 
 
-def _row_identity(row: dict[str, object]) -> tuple[str, str, str]:
-    return (
+def _row_identity(row: dict[str, object], *, require_matching_split: bool = True) -> tuple[str, ...]:
+    identity = (
         str(row.get("base_id", "")).strip(),
         str(row.get("target_variant", "")).strip(),
-        str(row.get("split", "")).strip(),
     )
+    if require_matching_split:
+        return (*identity, str(row.get("split", "")).strip())
+    return identity
 
 
 def _validate_aligned_rows(
@@ -169,6 +250,7 @@ def _validate_aligned_rows(
     rescue_rows: list[dict[str, object]],
     *,
     source: str,
+    require_matching_split: bool = True,
 ) -> None:
     if len(baseline_rows) != len(rescue_rows):
         raise ValueError(
@@ -176,8 +258,8 @@ def _validate_aligned_rows(
             f"{len(baseline_rows)} vs {len(rescue_rows)}"
         )
     for index, (base_row, rescue_row) in enumerate(zip(baseline_rows, rescue_rows)):
-        base_identity = _row_identity(base_row)
-        rescue_identity = _row_identity(rescue_row)
+        base_identity = _row_identity(base_row, require_matching_split=require_matching_split)
+        rescue_identity = _row_identity(rescue_row, require_matching_split=require_matching_split)
         if base_identity != rescue_identity:
             raise ValueError(
                 f"{source}: row {index} mismatch: baseline {base_identity} vs rescue {rescue_identity}"
@@ -193,8 +275,14 @@ def combine_summary_rows(
     split: str,
     baseline_label: str,
     rescue_label: str,
+    require_matching_split: bool = True,
 ) -> list[dict[str, object]]:
-    _validate_aligned_rows(baseline_rows, rescue_rows, source=source)
+    _validate_aligned_rows(
+        baseline_rows,
+        rescue_rows,
+        source=source,
+        require_matching_split=require_matching_split,
+    )
     combined: list[dict[str, object]] = []
     for index, (base_row, rescue_row) in enumerate(zip(baseline_rows, rescue_rows)):
         reason = selector_reason(base_row, rescue_row, config)
@@ -210,6 +298,8 @@ def combine_summary_rows(
         rescue_score = safe_float(rescue_row.get("score_mean"))
         base_p90 = safe_float(base_row.get("homography_residual_p90_px"))
         rescue_p90 = safe_float(rescue_row.get("homography_residual_p90_px"))
+        base_displacement_mad = safe_float(base_row.get("displacement_mad_px"))
+        rescue_displacement_mad = safe_float(rescue_row.get("displacement_mad_px"))
 
         output = dict(selected_row)
         output.update(
@@ -240,6 +330,15 @@ def combine_summary_rows(
                 "homography_p90_delta": ""
                 if not (math.isfinite(base_p90) and math.isfinite(rescue_p90))
                 else f"{rescue_p90 - base_p90:.6f}",
+                "baseline_displacement_mad_px": ""
+                if not math.isfinite(base_displacement_mad)
+                else f"{base_displacement_mad:.6f}",
+                "rescue_displacement_mad_px": ""
+                if not math.isfinite(rescue_displacement_mad)
+                else f"{rescue_displacement_mad:.6f}",
+                "displacement_mad_delta": ""
+                if not (math.isfinite(base_displacement_mad) and math.isfinite(rescue_displacement_mad))
+                else f"{rescue_displacement_mad - base_displacement_mad:.6f}",
             }
         )
         combined.append(output)
@@ -384,12 +483,64 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rescue-label", default="phase5d")
     parser.add_argument("--target-variants", default="extreme_02,extreme_03")
     parser.add_argument("--min-match-gain", type=int, default=1)
+    parser.add_argument(
+        "--max-match-gain",
+        type=int,
+        default=None,
+        help="If set, block rescue rows whose rescue matches minus baseline matches exceeds this value.",
+    )
     parser.add_argument("--min-rescue-matches", type=int, default=8)
     parser.add_argument("--max-rescue-homography-p90-px", type=float, default=3.2)
     parser.add_argument("--max-rescue-homography-median-px", type=float, default=1.8)
     parser.add_argument("--max-rescue-homography-p90-delta-px", type=float, default=-1.0)
+    parser.add_argument(
+        "--min-rescue-displacement-mad-px",
+        type=float,
+        default=-1.0,
+        help="If >= 0, block rescue rows whose observable displacement_mad_px is below this threshold.",
+    )
+    parser.add_argument(
+        "--max-rescue-displacement-mad-px",
+        type=float,
+        default=-1.0,
+        help="If >= 0, block rescue rows whose observable displacement_mad_px exceeds this threshold.",
+    )
     parser.add_argument("--min-rescue-score-mean", type=float, default=16.0)
     parser.add_argument("--allow-rescue-score-mean-drop", action="store_true")
+    parser.add_argument(
+        "--min-valid-fraction",
+        type=float,
+        default=None,
+        help="If set, block rescue rows whose valid_fraction is below this inference-observable threshold.",
+    )
+    parser.add_argument(
+        "--max-valid-fraction",
+        type=float,
+        default=None,
+        help="If set, block rescue rows whose valid_fraction exceeds this inference-observable threshold.",
+    )
+    parser.add_argument(
+        "--min-rescue-score-mean-delta",
+        type=float,
+        default=None,
+        help="If set, block rescue rows when rescue score_mean - baseline score_mean is below this value.",
+    )
+    parser.add_argument(
+        "--rescue-gate-target-variants",
+        default="",
+        help=(
+            "Comma-separated target variants for --min-valid-fraction, --max-valid-fraction and "
+            "--min-rescue-score-mean-delta. Empty applies those gates to all rescue variants."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-row-split-for-alignment",
+        action="store_true",
+        help=(
+            "Align baseline/rescue rows by base_id and target_variant only. Use for sequential selector "
+            "replay where a previous combined CSV has source split labels."
+        ),
+    )
     return parser
 
 
@@ -399,12 +550,19 @@ def main(argv: list[str] | None = None) -> int:
     config = SelectorConfig(
         target_variants=parse_variant_list(args.target_variants),
         min_match_gain=args.min_match_gain,
+        max_match_gain=args.max_match_gain,
         min_rescue_matches=args.min_rescue_matches,
         max_rescue_homography_p90_px=args.max_rescue_homography_p90_px,
         max_rescue_homography_median_px=args.max_rescue_homography_median_px,
         max_rescue_homography_p90_delta_px=args.max_rescue_homography_p90_delta_px,
+        min_rescue_displacement_mad_px=args.min_rescue_displacement_mad_px,
+        max_rescue_displacement_mad_px=args.max_rescue_displacement_mad_px,
         min_rescue_score_mean=args.min_rescue_score_mean,
         require_rescue_score_mean_not_lower=not args.allow_rescue_score_mean_drop,
+        min_valid_fraction=args.min_valid_fraction,
+        max_valid_fraction=args.max_valid_fraction,
+        min_rescue_score_mean_delta=args.min_rescue_score_mean_delta,
+        rescue_gate_target_variants=parse_variant_list(args.rescue_gate_target_variants),
     )
 
     all_combined_rows: list[dict[str, object]] = []
@@ -421,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
             split=source.split,
             baseline_label=args.baseline_label,
             rescue_label=args.rescue_label,
+            require_matching_split=not args.ignore_row_split_for_alignment,
         )
         all_combined_rows.extend(combined_rows)
         summary_rows.append(
@@ -459,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
         "baseline_score_mean",
         "rescue_score_mean",
         "score_mean_delta",
+        "baseline_displacement_mad_px",
+        "rescue_displacement_mad_px",
+        "displacement_mad_delta",
     ]
     write_csv_rows(args.output_dir / "combined_filtered_summary.csv", all_combined_rows, preferred_combined_fields)
     write_csv_rows(
@@ -496,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
         "baseline_label": args.baseline_label,
         "rescue_label": args.rescue_label,
         "config": asdict(config),
+        "require_matching_split": not args.ignore_row_split_for_alignment,
         "sources": [
             {
                 "name": source.name,

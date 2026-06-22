@@ -195,6 +195,237 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertIn("homography_p90_delta", combined[1]["selector_reason"])
         self.assertEqual(combined[1]["homography_p90_delta"], "0.500000")
 
+    def test_dual_checkpoint_rescue_selector_can_block_valid_fraction_and_score_drop(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        baseline[1]["valid_fraction"] = "0.42"
+        rescue[1]["valid_fraction"] = "0.42"
+        baseline[1]["score_mean"] = "20.0"
+        rescue[1]["score_mean"] = "19.7"
+        baseline[2]["valid_fraction"] = "0.30"
+        rescue[2]["valid_fraction"] = "0.30"
+        baseline[2]["score_mean"] = "20.0"
+        rescue[2]["score_mean"] = "19.0"
+        rescue[2]["correct"] = 30
+        rescue[2]["wrong"] = 0
+        rescue[2]["precision"] = 1.0
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02", "extreme_03"),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=False,
+            max_valid_fraction=0.35,
+            min_rescue_score_mean_delta=-0.5,
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase3zn")
+        self.assertIn("valid_fraction", combined[1]["selector_reason"])
+        self.assertEqual(combined[2]["selected_model"], "phase3zn")
+        self.assertIn("score_mean_delta", combined[2]["selector_reason"])
+
+    def test_dual_checkpoint_rescue_extra_gates_can_target_selected_variants(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        baseline[1]["valid_fraction"] = "0.42"
+        rescue[1]["valid_fraction"] = "0.42"
+        baseline[2]["valid_fraction"] = "0.42"
+        rescue[2]["valid_fraction"] = "0.42"
+        rescue[2]["score_mean"] = "21.0"
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02", "extreme_03"),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=False,
+            max_valid_fraction=0.35,
+            rescue_gate_target_variants=("extreme_03",),
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase5d")
+        self.assertEqual(combined[1]["selector_reason"], "rescue_selected")
+        self.assertEqual(combined[2]["selected_model"], "phase3zn")
+        self.assertIn("valid_fraction", combined[2]["selector_reason"])
+
+    def test_dual_checkpoint_rescue_selector_can_block_displacement_mad(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        rescue[1]["displacement_mad_px"] = "18.5"
+        rescue[2]["displacement_mad_px"] = "17.5"
+        rescue[2]["score_mean"] = "23.0"
+        rescue[2]["correct"] = 30
+        rescue[2]["wrong"] = 0
+        rescue[2]["precision"] = 1.0
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02", "extreme_03"),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=True,
+            max_rescue_displacement_mad_px=18.0,
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase3zn")
+        self.assertIn("displacement_mad", combined[1]["selector_reason"])
+        self.assertEqual(combined[2]["selected_model"], "phase5d")
+        self.assertEqual(combined[2]["selector_reason"], "rescue_selected")
+
+    def test_dual_checkpoint_rescue_selector_can_block_match_gain_upper_bound(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        rescue[1]["matches"] = 30
+        rescue[1]["correct"] = 30
+        rescue[1]["wrong"] = 0
+        rescue[1]["precision"] = 1.0
+        rescue[2]["matches"] = 15
+        rescue[2]["correct"] = 15
+        rescue[2]["wrong"] = 0
+        rescue[2]["precision"] = 1.0
+        rescue[2]["score_mean"] = "23.0"
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02", "extreme_03"),
+            min_match_gain=1,
+            max_match_gain=5,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=True,
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase3zn")
+        self.assertIn("max_match_gain", combined[1]["selector_reason"])
+        self.assertEqual(combined[2]["selected_model"], "phase5d")
+        self.assertEqual(combined[2]["match_delta"], 3)
+
+    def test_dual_checkpoint_rescue_selector_can_block_min_valid_fraction_and_min_displacement_mad(
+        self,
+    ) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        rescue[1]["valid_fraction"] = "0.20"
+        rescue[1]["displacement_mad_px"] = "20.0"
+        rescue[2]["valid_fraction"] = "0.50"
+        rescue[2]["displacement_mad_px"] = "5.0"
+        rescue[2]["score_mean"] = "23.0"
+        rescue[2]["correct"] = 30
+        rescue[2]["wrong"] = 0
+        rescue[2]["precision"] = 1.0
+        rescue[3]["valid_fraction"] = "0.50"
+        rescue[3]["displacement_mad_px"] = "15.0"
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_01", "extreme_02", "extreme_03"),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=True,
+            min_valid_fraction=0.30,
+            min_rescue_displacement_mad_px=10.0,
+        )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase3zn")
+        self.assertIn("min_valid_fraction", combined[1]["selector_reason"])
+        self.assertEqual(combined[2]["selected_model"], "phase3zn")
+        self.assertIn("min_displacement_mad", combined[2]["selector_reason"])
+        self.assertEqual(combined[3]["selected_model"], "phase5d")
+
+    def test_dual_checkpoint_rescue_can_align_sequential_rows_without_split_identity(self) -> None:
+        dual_rescue_mod = self.dual_rescue_module()
+        baseline, rescue = self.dual_rescue_rows()
+        baseline[1]["split"] = "dev"
+        rescue[1]["split"] = "train"
+        config = dual_rescue_mod.SelectorConfig(
+            target_variants=("extreme_02",),
+            min_match_gain=1,
+            min_rescue_matches=8,
+            max_rescue_homography_p90_px=3.2,
+            max_rescue_homography_median_px=1.8,
+            min_rescue_score_mean=16.0,
+            require_rescue_score_mean_not_lower=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            dual_rescue_mod.combine_summary_rows(
+                baseline,
+                rescue,
+                config=config,
+                source="formal",
+                split="test",
+                baseline_label="phase3zn",
+                rescue_label="phase5d",
+            )
+
+        combined = dual_rescue_mod.combine_summary_rows(
+            baseline,
+            rescue,
+            config=config,
+            source="formal",
+            split="test",
+            baseline_label="phase3zn",
+            rescue_label="phase5d",
+            require_matching_split=False,
+        )
+
+        self.assertEqual(combined[1]["selected_model"], "phase5d")
+
     def test_dual_checkpoint_rescue_cli_combines_multiple_sources(self) -> None:
         dual_rescue_mod = self.dual_rescue_module()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -394,6 +625,37 @@ class StressEvalScriptsTest(unittest.TestCase):
             self.assertIn("correct_delta=61", by_id["active_mainline.selector_validation"].evidence)
             self.assertIn("wrong_delta=0", by_id["active_mainline.selector_validation"].evidence)
             self.assertEqual(by_id["active_mainline.selector_validation"].risk, "")
+
+    def test_goal_audit_reports_hybrid_lightglue_gate_validation(self) -> None:
+        audit_mod = self.goal_audit_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "scripts").mkdir()
+            (root / "python").mkdir()
+            validation = root / "hybrid_validation.json"
+            validation.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "correct_delta_vs_lightglue": 661,
+                        "wrong_delta_vs_lightglue": 0,
+                        "precision_delta_vs_lightglue": 0.0000308,
+                        "errors": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            items = audit_mod.audit_goal(
+                project_root=root,
+                hybrid_lightglue_validation_json=validation,
+            )
+            by_id = {item.requirement_id: item for item in items}
+
+            self.assertEqual(by_id["hybrid.lightglue_gate_validation"].status, "PASS")
+            self.assertIn("correct_delta=661", by_id["hybrid.lightglue_gate_validation"].evidence)
+            self.assertIn("wrong_delta=0", by_id["hybrid.lightglue_gate_validation"].evidence)
+            self.assertEqual(by_id["hybrid.lightglue_gate_validation"].risk, "")
 
     def test_goal_audit_reports_phase2_and_phase5_hard_mining_evidence(self) -> None:
         audit_mod = self.goal_audit_module()
@@ -2970,6 +3232,226 @@ class StressEvalScriptsTest(unittest.TestCase):
             self.assertEqual(selector["config"]["min_rescue_matches"], 16)
             self.assertEqual(selector["config"]["target_variants"], ["extreme_02", "extreme_03"])
 
+    def test_fov76_promotion_pipeline_true_geometry_profile_plans_selector_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pair_root = root / "pairs"
+            guard_root = pair_root / "hard_mining" / "guard"
+            output_dir = root / "out"
+            base_run = root / "base" / "train_output"
+            cand_run = root / "cand" / "train_output"
+            for path in [
+                pair_root / "manifests",
+                pair_root / "val" / "lightglue",
+                pair_root / "test" / "lightglue",
+                guard_root,
+                base_run,
+                cand_run,
+            ]:
+                path.mkdir(parents=True, exist_ok=True)
+            for path in [
+                root / "base" / "state.pt",
+                root / "cand" / "state.pt",
+                base_run / "train_metrics.csv",
+                cand_run / "train_metrics.csv",
+                pair_root / "manifests" / "h100km_fov076_render_manifest.csv",
+                pair_root / "manifests" / "h100km_fov076_uint8_manifest.csv",
+                pair_root / "overlap_edges_val.csv",
+                pair_root / "overlap_edges_test.csv",
+                pair_root / "val" / "lightglue" / "lightglue_sift_metrics.csv",
+                pair_root / "test" / "lightglue" / "lightglue_sift_metrics.csv",
+                guard_root / "regression_guard_val.csv",
+                guard_root / "regression_guard_test.csv",
+                guard_root / "extreme_gain_val.csv",
+                guard_root / "extreme_gain_test.csv",
+            ]:
+                path.write_text("x\n", encoding="utf-8")
+            argv = [
+                "run_fov76_checkpoint_promotion_pipeline.py",
+                "--pair-root",
+                str(pair_root),
+                "--guard-root",
+                str(guard_root),
+                "--output-dir",
+                str(output_dir),
+                "--baseline-state",
+                str(root / "base" / "state.pt"),
+                "--baseline-run-dir",
+                str(base_run),
+                "--candidate-state",
+                str(root / "cand" / "state.pt"),
+                "--candidate-run-dir",
+                str(cand_run),
+                "--baseline-label",
+                "phase3zn",
+                "--candidate-label",
+                "phase49b",
+                "--guard-baseline-label",
+                "phase3zn",
+                "--guard-candidate-label",
+                "phase49b",
+                "--post-filter-profile",
+                "true_geometry_error5_overlap10",
+                "--dry-run",
+            ]
+
+            with mock.patch.object(sys, "argv", argv):
+                args = fov76_gate_mod.parse_args()
+            exit_code = fov76_gate_mod.run_pipeline(args)
+
+            commands = json.loads((output_dir / "planned_commands.json").read_text(encoding="utf-8"))
+            command_text = "\n".join(" ".join(command) for command in commands)
+            metadata = json.loads((output_dir / "promotion_pipeline_metadata.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("run_true_geometry_selector_pipeline.py", command_text)
+            self.assertIn("--selection-rank-profile inference_safe", command_text)
+            self.assertIn("--filtered-geometry-filter true_geometry", command_text)
+            self.assertIn("--true-geometry-min-valid-fraction 0.1", command_text)
+            self.assertIn("--write-match-details", command_text)
+            self.assertIn("--required-variant extreme_01", command_text)
+            self.assertIn("--required-variant extreme_02", command_text)
+            self.assertIn("--required-variant extreme_03", command_text)
+            self.assertIn(f"--source val,{pair_root / 'overlap_edges_val.csv'}", command_text)
+            self.assertIn(f"--source test,{pair_root / 'overlap_edges_test.csv'}", command_text)
+            self.assertTrue(metadata["true_geometry_selector"]["enabled"])
+            self.assertEqual(metadata["true_geometry_selector"]["selection_rank_profile"], "inference_safe")
+            self.assertEqual(
+                metadata["true_geometry_selector"]["required_variants"],
+                ["extreme_01", "extreme_02", "extreme_03"],
+            )
+
+    def test_fov76_promotion_pipeline_lowmatch_profile_does_not_require_true_geometry_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pair_root = root / "pairs"
+            guard_root = pair_root / "hard_mining" / "guard"
+            output_dir = root / "out"
+            base_run = root / "base" / "train_output"
+            cand_run = root / "cand" / "train_output"
+            for path in [
+                pair_root / "manifests",
+                guard_root,
+                base_run,
+                cand_run,
+            ]:
+                path.mkdir(parents=True, exist_ok=True)
+            for path in [
+                root / "base" / "state.pt",
+                root / "cand" / "state.pt",
+                base_run / "train_metrics.csv",
+                cand_run / "train_metrics.csv",
+                pair_root / "manifests" / "h100km_fov076_render_manifest.csv",
+                pair_root / "manifests" / "h100km_fov076_uint8_manifest.csv",
+                pair_root / "overlap_edges_val.csv",
+                pair_root / "overlap_edges_test.csv",
+                guard_root / "regression_guard_val.csv",
+                guard_root / "regression_guard_test.csv",
+                guard_root / "extreme_gain_val.csv",
+                guard_root / "extreme_gain_test.csv",
+            ]:
+                path.write_text("x\n", encoding="utf-8")
+            argv = [
+                "run_fov76_checkpoint_promotion_pipeline.py",
+                "--pair-root",
+                str(pair_root),
+                "--guard-root",
+                str(guard_root),
+                "--output-dir",
+                str(output_dir),
+                "--baseline-state",
+                str(root / "base" / "state.pt"),
+                "--baseline-run-dir",
+                str(base_run),
+                "--candidate-state",
+                str(root / "cand" / "state.pt"),
+                "--candidate-run-dir",
+                str(cand_run),
+                "--baseline-label",
+                "phase3zn",
+                "--candidate-label",
+                "phase5g",
+                "--guard-baseline-label",
+                "phase3zn",
+                "--guard-candidate-label",
+                "phase5g",
+                "--post-filter-profile",
+                "fov76_geo5_geo10_extreme_rescue_lowmatch_guard",
+                "--dry-run",
+            ]
+
+            with mock.patch.object(sys, "argv", argv):
+                args = fov76_gate_mod.parse_args()
+            exit_code = fov76_gate_mod.run_pipeline(args)
+
+            commands = json.loads((output_dir / "planned_commands.json").read_text(encoding="utf-8"))
+            command_text = "\n".join(" ".join(command) for command in commands)
+            metadata = json.loads((output_dir / "promotion_pipeline_metadata.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("run_true_geometry_selector_pipeline.py", command_text)
+            self.assertFalse(metadata["true_geometry_selector"]["enabled"])
+
+    def test_fov76_promotion_pipeline_stages_true_geometry_selector_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            fields = ["label", "base_id", "target_variant", "split", "matches", "correct", "wrong", "score_mean"]
+            detail_fields = ["label", "pair_index", "match_index", "score", "error_px", "correct"]
+            for label in ("phase3zn", "phase49b"):
+                sweep_dir = output_dir / "formal" / f"{label}_val_geo10_minmatch16"
+                report_dir = sweep_dir / "cfg"
+                report_dir.mkdir(parents=True, exist_ok=True)
+                self.write_csv(
+                    report_dir / "all_filtered_summary.csv",
+                    fields,
+                    [
+                        {
+                            "label": "PFM / all-filtered",
+                            "base_id": "base_a",
+                            "target_variant": "extreme_03",
+                            "split": "val",
+                            "matches": 4,
+                            "correct": 4,
+                            "wrong": 0,
+                            "score_mean": 20.0,
+                        }
+                    ],
+                )
+                self.write_csv(
+                    report_dir / "all_filtered_match_details.csv",
+                    detail_fields,
+                    [
+                        {
+                            "label": "PFM / all-filtered",
+                            "pair_index": 0,
+                            "match_index": 0,
+                            "score": 1.0,
+                            "error_px": 1.0,
+                            "correct": 1,
+                        }
+                    ],
+                )
+                self.write_csv(
+                    sweep_dir / "graph_filter_sweep_summary.csv",
+                    ["report_dir"],
+                    [{"report_dir": "cfg"}],
+                )
+
+            args = SimpleNamespace(
+                output_dir=output_dir,
+                baseline_label="phase3zn",
+                candidate_label="phase49b",
+                splits=["val"],
+                true_geometry_selector_eval_subdir="pfm_true_geometry_eval",
+            )
+
+            fov76_gate_mod.stage_true_geometry_selector_reports(args)
+
+            staged = output_dir / "true_geometry_selector_inputs" / "phase49b" / "val" / "pfm_true_geometry_eval"
+            self.assertTrue((staged / "all_filtered_summary.csv").is_file())
+            self.assertTrue((staged / "all_filtered_match_details.csv").is_file())
+
     def test_fov76_promotion_pipeline_builds_dual_checkpoint_selector_inputs(self) -> None:
         def make_visual_row(
             base_id: str,
@@ -3548,6 +4030,7 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(command[command.index("--graph-min-raw-score") + 1], "0.3")
         self.assertIn("--graph-min-raw-margin", command)
         self.assertEqual(command[command.index("--graph-min-raw-margin") + 1], "0.04")
+        self.assertEqual(command[command.index("--graph-min-raw-margin") + 2], "--graph-min-accept-probability")
         self.assertIn("--graph-min-accept-probability", command)
         self.assertEqual(command[command.index("--graph-min-accept-probability") + 1], "0.7")
 
@@ -3614,6 +4097,8 @@ class StressEvalScriptsTest(unittest.TestCase):
             "0.04",
             "--graph-min-accept-probability",
             "0.7",
+            "--pair-accept-min-probability",
+            "0.6",
             "--matcher-candidate-topk",
             "256",
         ]
@@ -3629,6 +4114,7 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.graph_min_raw_score, 0.3)
         self.assertEqual(args.graph_min_raw_margin, 0.04)
         self.assertEqual(args.graph_min_accept_probability, 0.7)
+        self.assertEqual(args.pair_accept_min_probability, 0.6)
         self.assertEqual(args.matcher_candidate_topk, 256)
 
     def test_lazy_visual_parse_args_accepts_robust_geometry_filters(self) -> None:
@@ -3816,6 +4302,109 @@ class StressEvalScriptsTest(unittest.TestCase):
             self.assertEqual(row["score_mean"], "0.533333")
             self.assertEqual(row["score_median"], "0.600000")
             self.assertEqual(row["score_max"], "0.800000")
+
+    def test_lazy_visual_summary_csv_includes_pair_acceptance_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record = RenderRecord(
+                pose_id="pose_nadir",
+                base_id="base_pair_accept",
+                variant="nadir",
+                split="val",
+                tsai_path=root / "a.tsai",
+                image_path=root / "a.tif",
+                uint8_path=root / "a.png",
+                depth_path=root / "a_depth.tif",
+            )
+            target = RenderRecord(
+                pose_id="pose_extreme",
+                base_id="base_pair_accept",
+                variant="extreme_03",
+                split="val",
+                tsai_path=root / "b.tsai",
+                image_path=root / "b.tif",
+                uint8_path=root / "b.png",
+                depth_path=root / "b_depth.tif",
+            )
+            pair = SyntheticPair(
+                view_a=torch.zeros(1, 4, 4),
+                view_b=torch.zeros(1, 4, 4),
+                warp_a_to_b=torch.zeros(4, 4, 2),
+                valid_mask=torch.ones(4, 4, dtype=torch.bool),
+            )
+            visual = LazyMatchVisual(
+                label="candidate",
+                spec=LazyPairSpec(pair_index=0, split="val", reference=record, target=target),
+                pair=pair,
+                valid_fraction=0.5,
+                points_a=np.zeros((1, 2), dtype=np.float32),
+                points_b=np.zeros((1, 2), dtype=np.float32),
+                scores=np.asarray([0.8], dtype=np.float32),
+                errors=np.asarray([1.0], dtype=np.float32),
+                correct=np.asarray([True], dtype=bool),
+                pair_accept_logit=-1.25,
+                pair_accept_probability=0.222700,
+            )
+            path = root / "summary.csv"
+
+            visual_mod.write_summary_csv([visual], path)
+
+            with path.open(encoding="utf-8", newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["pair_accept_logit"], "-1.250000")
+            self.assertEqual(row["pair_accept_probability"], "0.222700")
+            self.assertEqual(row["pair_accept_rejected"], "0")
+            self.assertEqual(row["filtered_reject_reason"], "")
+
+    def test_pair_acceptance_gate_rejects_low_probability_visual(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record = RenderRecord(
+                pose_id="pose_nadir",
+                base_id="base_pair_gate",
+                variant="nadir",
+                split="val",
+                tsai_path=root / "a.tsai",
+                image_path=root / "a.tif",
+                uint8_path=root / "a.png",
+                depth_path=root / "a_depth.tif",
+            )
+            target = RenderRecord(
+                pose_id="pose_extreme",
+                base_id="base_pair_gate",
+                variant="extreme_03",
+                split="val",
+                tsai_path=root / "b.tsai",
+                image_path=root / "b.tif",
+                uint8_path=root / "b.png",
+                depth_path=root / "b_depth.tif",
+            )
+            pair = SyntheticPair(
+                view_a=torch.zeros(1, 4, 4),
+                view_b=torch.zeros(1, 4, 4),
+                warp_a_to_b=torch.zeros(4, 4, 2),
+                valid_mask=torch.ones(4, 4, dtype=torch.bool),
+            )
+            visual = LazyMatchVisual(
+                label="candidate",
+                spec=LazyPairSpec(pair_index=0, split="val", reference=record, target=target),
+                pair=pair,
+                valid_fraction=0.5,
+                points_a=np.zeros((2, 2), dtype=np.float32),
+                points_b=np.zeros((2, 2), dtype=np.float32),
+                scores=np.asarray([0.8, 0.7], dtype=np.float32),
+                errors=np.asarray([1.0, 2.0], dtype=np.float32),
+                correct=np.asarray([True, True], dtype=bool),
+                pair_accept_logit=-2.0,
+                pair_accept_probability=0.119203,
+            )
+
+            gated = visual_mod.apply_pair_acceptance_gate(visual, min_probability=0.5)
+
+        self.assertEqual(gated.matches, 0)
+        self.assertTrue(gated.pair_accept_rejected)
+        self.assertEqual(gated.filtered_reject_reason, "pair_accept_probability")
+        self.assertEqual(gated.pair_accept_probability, 0.119203)
 
     def test_lazy_visual_summary_csv_includes_inference_geometry_statistics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4266,7 +4855,9 @@ class StressEvalScriptsTest(unittest.TestCase):
 
         self.assertGreaterEqual(len(calls), 3)
         for call in calls:
-            self.assertIn("geometry_threshold_px", {keyword.arg for keyword in call.keywords})
+            keyword_names = {keyword.arg for keyword in call.keywords}
+            self.assertIn("geometry_threshold_px", keyword_names)
+            self.assertIn("use_keypoint_offsets", keyword_names)
 
     def test_graph_filter_sweep_builds_visual_command(self) -> None:
         config = filter_sweep_mod.GraphFilterConfig(
@@ -4341,6 +4932,7 @@ class StressEvalScriptsTest(unittest.TestCase):
             input_local_contrast=False,
             input_local_contrast_strength=0.0,
             input_local_contrast_kernel=31,
+            use_keypoint_offsets=True,
             adaptive_geometry_rescue_variants="extreme_02,extreme_03",
             adaptive_geometry_rescue_threshold_px=10.0,
             adaptive_geometry_rescue_min_match_gain=20,
@@ -4394,6 +4986,7 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertIn("--adaptive-geometry-rescue-require-score-mean-not-lower", command)
         self.assertIn("--write-all-summary", command)
         self.assertIn("--write-match-details", command)
+        self.assertIn("--use-keypoint-offsets", command)
 
     def test_graph_filter_sweep_parse_args_accepts_magsac_and_all_summary(self) -> None:
         argv = [
@@ -4435,6 +5028,7 @@ class StressEvalScriptsTest(unittest.TestCase):
             "--adaptive-geometry-rescue-require-score-mean-not-lower",
             "--matcher-candidate-topk",
             "256",
+            "--use-keypoint-offsets",
             "--write-all-summary",
             "--write-match-details",
         ]
@@ -4446,6 +5040,7 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.geometry_filter, "local")
         self.assertEqual(args.geometry_threshold_px, 10.0)
         self.assertEqual(args.geometry_threshold_px_values, [6.0, 8.0])
+        self.assertTrue(args.use_keypoint_offsets)
         self.assertEqual(args.filtered_min_matches, 16)
         self.assertEqual(args.filtered_min_matches_values, [8, 16])
         self.assertEqual(args.filtered_min_matches_by_variant, ["extreme_02=8,extreme_03=6"])
@@ -4530,6 +5125,30 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.low_match_geometry_guard_max_homography_p90_px, 2.8)
         self.assertEqual(args.low_match_geometry_guard_max_homography_median_px, 1.5)
         self.assertEqual(args.low_match_geometry_guard_min_score_mean, 19.0)
+
+    def test_graph_filter_sweep_parse_args_applies_true_geometry_profile(self) -> None:
+        argv = [
+            "run_graph_filter_sweep.py",
+            "--render-manifest",
+            "render.csv",
+            "--uint8-manifest",
+            "uint8.csv",
+            "--pytorch-state",
+            "state.pt",
+            "--output-dir",
+            "out",
+            "--post-filter-profile",
+            "true_geometry_error5_overlap10",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = filter_sweep_mod.parse_args()
+
+        self.assertEqual(args.geometry_filter, "none")
+        self.assertEqual(args.filtered_geometry_filter, "true_geometry")
+        self.assertEqual(args.geometry_threshold_px_values, [5.0])
+        self.assertEqual(args.filtered_min_matches_values, [0])
+        self.assertAlmostEqual(args.true_geometry_min_valid_fraction, 0.10)
 
     def test_graph_filter_sweep_configs_include_geometry_and_min_match_lists(self) -> None:
         args = SimpleNamespace(
