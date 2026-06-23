@@ -1045,6 +1045,21 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('export PFM_PHASE41_EVAL_SUBDIR="${PFM_PHASE41_EVAL_SUBDIR:-pfm_eval_kp6144_bins16_cap12_top512_accept_multiply_phase145_extreme01_guard}"', text)
         self.assertIn("exec bash runs/phase123_phase122_targeted_false_replay_train_eval_20260621.sh", text)
 
+    def test_phase146_safe_gate_mainline_freezes_phase142_and_exports_teacher_manifest(self) -> None:
+        text = self.read_script("runs/phase146_phase142_safe_gate_mainline_teacher_20260623.sh")
+
+        self.assertIn("phase142_phase141_observable_gate_sweep_20260622", text)
+        self.assertIn("feature_valid_fraction >= 0.356314", text)
+        self.assertIn("feature_homography_residual_median_px >= 1.195", text)
+        self.assertIn("scripts/apply_observable_pair_gate.py", text)
+        self.assertIn("scripts/build_gate_acceptance_training_manifest.py", text)
+        self.assertIn("--min-accept-precision 0.0", text)
+        self.assertIn("--max-accept-wrong 999999", text)
+        self.assertIn("phase146_pair_accept_teacher_manifest.csv", text)
+        self.assertIn('"correct_delta_vs_lightglue"', text)
+        self.assertIn('"wrong_delta_vs_lightglue"', text)
+        self.assertIn("phase146_prep_only_complete", text)
+
 
 if __name__ == "__main__":
     unittest.main()
