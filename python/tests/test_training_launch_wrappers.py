@@ -1060,6 +1060,23 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('"wrong_delta_vs_lightglue"', text)
         self.assertIn("phase146_prep_only_complete", text)
 
+    def test_phase147_fresh_gate_validation_reruns_phase141_on_base_disjoint_manifests(self) -> None:
+        text = self.read_script("runs/phase147_phase146_fresh_gate_validation_20260623.sh")
+
+        self.assertIn("phase146_phase142_safe_gate_mainline_teacher_20260623", text)
+        self.assertIn("phase56_large_fresh_true_geometry_selector_eval_20260621", text)
+        self.assertIn("fresh_manifest_validation.json", text)
+        self.assertIn("PFM_CANDIDATE_STATE", text)
+        self.assertIn("runs/phase40_crosscam_extreme_baseline_20260620.sh", text)
+        self.assertIn("scripts/build_match_set_rejection_dataset.py", text)
+        self.assertIn("scripts/apply_observable_pair_gate.py", text)
+        self.assertIn("feature_valid_fraction >= 0.356314", text)
+        self.assertIn("feature_homography_residual_median_px >= 1.195", text)
+        self.assertIn("phase147_fresh_gate_validation", text)
+        self.assertIn("PFM_PHASE147_REQUIRE_VALID", text)
+        self.assertIn('"base_disjoint"', text)
+        self.assertIn('"valid"', text)
+
 
 if __name__ == "__main__":
     unittest.main()
