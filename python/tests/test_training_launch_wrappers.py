@@ -53,6 +53,12 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('UINT8_MANIFEST="${PFM_PHASE40_UINT8_MANIFEST:-${PFM_UINT8_MANIFEST:-/media/w24/D/xjw深度学习训练数据/pfm_overlap_graphs/20260611_234228_h100_fov076_dom76_lat60_0m2e3_internal/manifests/h100km_fov076_uint8_manifest.csv}}"', text)
         self.assertIn('LIGHTGLUE_RUNNER="${PFM_PHASE40_LIGHTGLUE_RUNNER:-${PFM_LIGHTGLUE_RUNNER:-${PROJECT_ROOT}/runs/fov76_phase24_dev_expansion_20260618/run_lightglue_for_manifest.py}}"', text)
 
+    def test_phase40_crosscam_eval_launcher_allows_split_override(self) -> None:
+        text = self.read_script("runs/phase40_crosscam_extreme_baseline_20260620.sh")
+
+        self.assertIn('SPLITS_TEXT="${PFM_PHASE40_SPLITS:-dev val lockbox}"', text)
+        self.assertIn('read -r -a SPLITS <<< "${SPLITS_TEXT}"', text)
+
     def test_phase40_crosscam_eval_launcher_allows_final_accept_score_override(self) -> None:
         text = self.read_script("runs/phase40_crosscam_extreme_baseline_20260620.sh")
 
@@ -232,6 +238,26 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('"${TRAIN_FEATURE_FLAGS[@]}"', text)
         self.assertIn('train_feature_flags=<code>${TRAIN_FEATURE_FLAGS[*]:-none}</code>', text)
 
+    def test_phase41_crosscam_launcher_allows_full_volume_eval_splits(self) -> None:
+        text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
+
+        self.assertIn('EVAL_SPLITS_TEXT="${PFM_PHASE41_EVAL_SPLITS:-dev val lockbox}"', text)
+        self.assertIn('read -r -a EVAL_SPLITS <<< "${EVAL_SPLITS_TEXT}"', text)
+        self.assertIn('for eval_split in "${EVAL_SPLITS[@]}"; do', text)
+        self.assertIn('"${DATA_ROOT}/${eval_split}_pairs.csv"', text)
+        self.assertIn('cp "${DATA_ROOT}/${eval_split}_pairs.csv" "${EVAL_ROOT}/${eval_split}_pairs.csv"', text)
+        self.assertIn('PFM_PHASE40_SPLITS="${EVAL_SPLITS_TEXT}"', text)
+        self.assertIn('splits = tuple(item for item in sys.argv[4].split() if item.strip())', text)
+
+    def test_phase41_crosscam_launcher_can_freeze_graph_matcher_training(self) -> None:
+        text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
+
+        self.assertIn('TRAIN_GRAPH_MATCHER="${PFM_PHASE41_TRAIN_GRAPH_MATCHER:-1}"', text)
+        self.assertIn('if [[ "${TRAIN_GRAPH_MATCHER}" == "1" ]]; then', text)
+        self.assertIn('TRAIN_GRAPH_MATCHER_FLAGS+=(--train-graph-matcher)', text)
+        self.assertIn('"${TRAIN_GRAPH_MATCHER_FLAGS[@]}"', text)
+        self.assertIn('train_graph_matcher=<code>${TRAIN_GRAPH_MATCHER}</code>', text)
+
     def test_phase41_crosscam_launcher_can_skip_eval_for_smoke_training(self) -> None:
         text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
 
@@ -260,6 +286,20 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('export PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION="${PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION:-1}"', text)
         self.assertIn('export PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY="${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-0}"', text)
         self.assertIn('export PFM_PHASE41_SKIP_EVAL="${PFM_PHASE41_SKIP_EVAL:-${PHASE149_SMOKE}}"', text)
+        self.assertIn('bash runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh', text)
+
+    def test_phase150_full_volume_feature_retrain_launcher_uses_all_eval_splits(self) -> None:
+        text = self.read_script("runs/phase150_full_volume_feature_retrain_20260623.sh")
+
+        self.assertIn('PHASE150_SMOKE="${PFM_PHASE150_SMOKE:-0}"', text)
+        self.assertIn('export PFM_PHASE41_EVAL_SPLITS="${PFM_PHASE41_EVAL_SPLITS:-train dev val lockbox}"', text)
+        self.assertIn('export PFM_PHASE41_STEPS="${PFM_PHASE41_STEPS:-${PHASE150_STEPS_DEFAULT}}"', text)
+        self.assertIn('PHASE150_STEPS_DEFAULT=3000', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_GRAPH_MATCHER="${PFM_PHASE41_TRAIN_GRAPH_MATCHER:-0}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_DUAL_FPN="${PFM_PHASE41_TRAIN_DUAL_FPN:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_BACKBONE="${PFM_PHASE41_TRAIN_BACKBONE:-0}"', text)
+        self.assertIn('export PFM_PHASE41_LEARNING_RATE="${PFM_PHASE41_LEARNING_RATE:-3e-6}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_SAMPLES_PER_PAIR="${PFM_PHASE41_TRAIN_SAMPLES_PER_PAIR:-1024}"', text)
         self.assertIn('bash runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh', text)
 
     def test_phase45_true_geometry_visual_eval_can_run_train_without_lightglue(self) -> None:

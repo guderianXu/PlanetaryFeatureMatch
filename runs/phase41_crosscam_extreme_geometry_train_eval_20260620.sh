@@ -62,9 +62,12 @@ TRAIN_MATCHER_CANDIDATE_TOPK="${PFM_PHASE41_TRAIN_MATCHER_CANDIDATE_TOPK:-256}"
 TRAIN_GRAPH_MATCHER_CANDIDATE_TOPK="${PFM_PHASE41_TRAIN_GRAPH_MATCHER_CANDIDATE_TOPK:-${TRAIN_MATCHER_CANDIDATE_TOPK}}"
 TRAIN_MATCHER_FINAL_ACCEPT_SCORE_MODE="${PFM_PHASE41_TRAIN_MATCHER_FINAL_ACCEPT_SCORE_MODE:-none}"
 TRAIN_MATCHER_FINAL_ACCEPT_SCORE_ALPHA="${PFM_PHASE41_TRAIN_MATCHER_FINAL_ACCEPT_SCORE_ALPHA:-0.05}"
+TRAIN_GRAPH_MATCHER="${PFM_PHASE41_TRAIN_GRAPH_MATCHER:-1}"
 TRAIN_MANIFEST="${PFM_PHASE41_TRAIN_MANIFEST:-${DATA_ROOT}/train_pairs_geometry_accept.csv}"
 TRAIN_OUT="${RUN_ROOT}/train_output"
 EVAL_ROOT="${RUN_ROOT}/eval"
+EVAL_SPLITS_TEXT="${PFM_PHASE41_EVAL_SPLITS:-dev val lockbox}"
+read -r -a EVAL_SPLITS <<< "${EVAL_SPLITS_TEXT}"
 EVAL_MAX_KEYPOINTS="${PFM_PHASE41_EVAL_MAX_KEYPOINTS:-4096}"
 EVAL_KEYPOINT_SPATIAL_BINS="${PFM_PHASE41_EVAL_KEYPOINT_SPATIAL_BINS:-16}"
 EVAL_KEYPOINT_CELL_CAP="${PFM_PHASE41_EVAL_KEYPOINT_CELL_CAP:-8}"
@@ -83,20 +86,23 @@ for required in \
   "${INIT_STATE}" \
   "${RENDER_MANIFEST}" \
   "${UINT8_MANIFEST}" \
-  "${TRAIN_MANIFEST}" \
-  "${DATA_ROOT}/dev_pairs.csv" \
-  "${DATA_ROOT}/val_pairs.csv" \
-  "${DATA_ROOT}/lockbox_pairs.csv"; do
+  "${TRAIN_MANIFEST}"; do
   if [[ ! -f "${required}" ]]; then
     echo "missing required input: ${required}" >&2
     exit 1
   fi
 done
+for eval_split in "${EVAL_SPLITS[@]}"; do
+  if [[ ! -f "${DATA_ROOT}/${eval_split}_pairs.csv" ]]; then
+    echo "missing required input: ${DATA_ROOT}/${eval_split}_pairs.csv" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "${RUN_ROOT}" "${TRAIN_OUT}" "${EVAL_ROOT}"
-cp "${DATA_ROOT}/dev_pairs.csv" "${EVAL_ROOT}/dev_pairs.csv"
-cp "${DATA_ROOT}/val_pairs.csv" "${EVAL_ROOT}/val_pairs.csv"
-cp "${DATA_ROOT}/lockbox_pairs.csv" "${EVAL_ROOT}/lockbox_pairs.csv"
+for eval_split in "${EVAL_SPLITS[@]}"; do
+  cp "${DATA_ROOT}/${eval_split}_pairs.csv" "${EVAL_ROOT}/${eval_split}_pairs.csv"
+done
 
 read -r INIT_SHA256 _ < <(sha256sum "${INIT_STATE}")
 TRAIN_ROWS="$(($(wc -l < "${TRAIN_MANIFEST}") - 1))"
@@ -129,6 +135,13 @@ if [[ "${PFM_PHASE41_TRAIN_QUALITY_HEAD:-0}" == "1" ]]; then
 fi
 if [[ "${PFM_PHASE41_TRAIN_RELIABILITY_HEAD:-0}" == "1" ]]; then
   TRAIN_FEATURE_FLAGS+=(--train-reliability-head)
+fi
+TRAIN_GRAPH_MATCHER_FLAGS=()
+if [[ "${TRAIN_GRAPH_MATCHER}" == "1" ]]; then
+  TRAIN_GRAPH_MATCHER_FLAGS+=(--train-graph-matcher)
+elif [[ "${TRAIN_GRAPH_MATCHER}" != "0" ]]; then
+  echo "PFM_PHASE41_TRAIN_GRAPH_MATCHER must be 0 or 1, got ${TRAIN_GRAPH_MATCHER}" >&2
+  exit 1
 fi
 TRAIN_EXTRA_FLAGS=()
 if [[ "${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-0}" == "1" ]]; then
@@ -178,6 +191,7 @@ cat > "${RUN_ROOT}/record.html" <<HTML
 <p>learning_rate=<code>${LEARNING_RATE}</code></p>
 <p>train_descriptor_head=<code>${TRAIN_DESCRIPTOR_HEAD}</code></p>
 <p>train_feature_flags=<code>${TRAIN_FEATURE_FLAGS[*]:-none}</code></p>
+<p>train_graph_matcher=<code>${TRAIN_GRAPH_MATCHER}</code></p>
 <p>train_keypoint_offset_head_only=<code>${PFM_PHASE41_TRAIN_KEYPOINT_OFFSET_HEAD_ONLY:-0}</code></p>
 <p>train_graph_calibration_only=<code>${PFM_PHASE41_TRAIN_GRAPH_CALIBRATION_ONLY:-0}</code></p>
 <p>freeze_extractor_warmup_steps=<code>${FREEZE_EXTRACTOR_WARMUP_STEPS}</code></p>
@@ -195,6 +209,7 @@ cat > "${RUN_ROOT}/record.html" <<HTML
 <p>warp_soft_boundary weight/topk/lower/upper/min_score=<code>${WARP_SOFT_BOUNDARY_WEIGHT}/${WARP_SOFT_BOUNDARY_TOPK}/${WARP_SOFT_BOUNDARY_LOWER_RESIDUAL_PX}/${WARP_SOFT_BOUNDARY_UPPER_RESIDUAL_PX}/${WARP_SOFT_BOUNDARY_MIN_SCORE}</code></p>
 <p>false_cluster_replay_multiplier=<code>${FALSE_CLUSTER_REPLAY_MULTIPLIER}</code></p>
 <p>eval_max_keypoints=<code>${EVAL_MAX_KEYPOINTS}</code> eval_bins/cellcap=<code>${EVAL_KEYPOINT_SPATIAL_BINS}/${EVAL_KEYPOINT_CELL_CAP}</code></p>
+<p>eval_splits=<code>${EVAL_SPLITS_TEXT}</code></p>
 <p>eval_matcher_candidate_topk=<code>${EVAL_MATCHER_CANDIDATE_TOPK}</code> eval_subdir=<code>${PFM_EVAL_SUBDIR}</code></p>
 <p>eval_matcher_final_accept_score_mode=<code>${EVAL_MATCHER_FINAL_ACCEPT_SCORE_MODE}</code></p>
 <p>eval_matcher_final_accept_score_alpha=<code>${EVAL_MATCHER_FINAL_ACCEPT_SCORE_ALPHA}</code></p>
@@ -257,7 +272,7 @@ HTML
   "${TRAIN_DESCRIPTOR_FLAGS[@]}" \
   "${TRAIN_FEATURE_FLAGS[@]}" \
   "${FALSE_MATCH_FLAGS[@]}" \
-  --train-graph-matcher \
+  "${TRAIN_GRAPH_MATCHER_FLAGS[@]}" \
   --graph-matcher-loss-weight 1.0 \
   --graph-matcher-metadata-mode calibrated \
   --matcher-reliability-pair-bias off \
@@ -338,6 +353,7 @@ PFM_PHASE40_ROOT="${EVAL_ROOT}" \
 PFM_CANDIDATE_STATE="${CANDIDATE_STATE}" \
 PFM_PHASE40_RENDER_MANIFEST="${RENDER_MANIFEST}" \
 PFM_PHASE40_UINT8_MANIFEST="${UINT8_MANIFEST}" \
+PFM_PHASE40_SPLITS="${EVAL_SPLITS_TEXT}" \
 PFM_EVAL_SUBDIR="${PFM_EVAL_SUBDIR}" \
 PFM_MAX_KEYPOINTS="${EVAL_MAX_KEYPOINTS}" \
 PFM_KEYPOINT_SPATIAL_BINS="${EVAL_KEYPOINT_SPATIAL_BINS}" \
@@ -382,7 +398,7 @@ if [[ -n "${GEOMETRY_OVERLAP_GATE_THRESHOLD}" ]]; then
     --selected-report-html "${GEOMETRY_GATE_DIR}/aggregate_selected_threshold_summary.html"
 fi
 
-"${PY}" - "${EVAL_ROOT}" "${PFM_EVAL_SUBDIR}" "${GATE_THRESHOLDS}" <<'PY'
+"${PY}" - "${EVAL_ROOT}" "${PFM_EVAL_SUBDIR}" "${GATE_THRESHOLDS}" "${EVAL_SPLITS_TEXT}" <<'PY'
 import csv
 import html
 import json
@@ -393,7 +409,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 pfm_subdir = sys.argv[2]
 thresholds = [float(item) for item in sys.argv[3].split(",") if item.strip()]
-splits = ("dev", "val", "lockbox")
+splits = tuple(item for item in sys.argv[4].split() if item.strip())
 
 
 def _int(row: dict[str, str], key: str) -> int:

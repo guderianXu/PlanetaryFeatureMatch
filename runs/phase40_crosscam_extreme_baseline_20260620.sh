@@ -21,7 +21,8 @@ PFM_MATCHER_FINAL_ACCEPT_SCORE_MODE="${PFM_PHASE40_MATCHER_FINAL_ACCEPT_SCORE_MO
 PFM_MATCHER_FINAL_ACCEPT_SCORE_ALPHA="${PFM_PHASE40_MATCHER_FINAL_ACCEPT_SCORE_ALPHA:--1.0}"
 PFM_PAIR_ACCEPT_MIN_PROBABILITY="${PFM_PAIR_ACCEPT_MIN_PROBABILITY:--1.0}"
 
-declare -a SPLITS=(dev val lockbox)
+SPLITS_TEXT="${PFM_PHASE40_SPLITS:-dev val lockbox}"
+read -r -a SPLITS <<< "${SPLITS_TEXT}"
 
 mkdir -p "${ROOT}"
 cat > "${ROOT}/baseline_record.html" <<HTML
@@ -37,6 +38,7 @@ cat > "${ROOT}/baseline_record.html" <<HTML
 <p>pfm_matcher_final_accept_score_mode=<code>${PFM_MATCHER_FINAL_ACCEPT_SCORE_MODE}</code></p>
 <p>pfm_matcher_final_accept_score_alpha=<code>${PFM_MATCHER_FINAL_ACCEPT_SCORE_ALPHA}</code></p>
 <p>pfm_pair_accept_min_probability=<code>${PFM_PAIR_ACCEPT_MIN_PROBABILITY}</code></p>
+<p>splits=<code>${SPLITS_TEXT}</code></p>
 <p>note=<code>PFM-only geo20 no-rescue versus LightGlue baseline. LightGlue is not used as a training label.</code></p>
 HTML
 
