@@ -1077,6 +1077,28 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('"base_disjoint"', text)
         self.assertIn('"valid"', text)
 
+    def test_phase148_pair_rejection_head_retrains_from_frozen_phase146_teacher(self) -> None:
+        text = self.read_script("runs/phase148_phase146_pair_rejection_head_train_eval_20260623.sh")
+
+        self.assertIn("phase146_phase142_safe_gate_mainline_teacher_20260623", text)
+        self.assertIn("phase146_pair_accept_teacher_manifest.csv", text)
+        self.assertIn("phase148_pair_accept_teacher_balanced_manifest.csv", text)
+        self.assertIn("scripts/build_gate_acceptance_training_manifest.py", text)
+        self.assertIn('--target-accept-fraction "${PFM_PHASE148_TARGET_ACCEPT_FRACTION:-0.50}"', text)
+        self.assertIn("phase147_phase146_fresh_gate_validation_20260623", text)
+        self.assertIn("phase148_teacher_manifest_audit", text)
+        self.assertIn('export PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY="${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_DESCRIPTOR_HEAD="${PFM_PHASE41_TRAIN_DESCRIPTOR_HEAD:-0}"', text)
+        self.assertIn('export PFM_PHASE41_PAIR_ACCEPT_LOSS_WEIGHT="${PFM_PHASE41_PAIR_ACCEPT_LOSS_WEIGHT:-2.0}"', text)
+        self.assertIn('export PFM_PHASE41_TEACHER_WEIGHT="${PFM_PHASE41_TEACHER_WEIGHT:-0.0}"', text)
+        self.assertIn('export PFM_PHASE41_GRAPH_MATCHER_ACCEPT_WEIGHT="${PFM_PHASE41_GRAPH_MATCHER_ACCEPT_WEIGHT:-0.0}"', text)
+        self.assertIn('export PFM_PHASE41_EVAL_SUBDIR="${PFM_PHASE41_EVAL_SUBDIR:-pfm_eval_kp6144_bins16_cap12_top512_accept_multiply_phase148_pair_rejection_head_balanced}"', text)
+        self.assertIn('export PFM_PHASE41_GATE_THRESHOLDS="${PFM_PHASE41_GATE_THRESHOLDS:-0.05,0.10,0.15,0.20,0.25,0.30,0.32,0.34,0.36,0.38,0.40,0.42,0.44,0.46,0.48,0.50,0.52,0.54,0.56,0.58,0.60,0.62,0.64,0.66,0.68,0.70}"', text)
+        self.assertIn('if [[ "${PFM_PHASE148_CLEAR_EVAL:-1}" == "1" ]]; then', text)
+        self.assertIn("aggregate_row_aligned_dense", text)
+        self.assertIn("phase148_pair_rejection_head_validation", text)
+        self.assertIn("bash runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh", text)
+
 
 if __name__ == "__main__":
     unittest.main()
