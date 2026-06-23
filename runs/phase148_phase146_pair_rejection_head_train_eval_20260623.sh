@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/home/w24/xjw_code/deeplearning/PlanetaryFeatureMatch"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PFM_PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 cd "${PROJECT_ROOT}"
 
 ACTIVE_PATTERN='batch_pose_sim_dataset.py|pfm_pytorch_training.py|sat_sim_cuda|benchmark_lazy_pose_pairs.py|visualize_lazy_pose_matches.py|run_lightglue|phase59_true_geometry_selector_multiseed_eval|train_match_detail_filter_calibrator.py|apply_match_detail_filter_calibrator.py|apply_observable_pair_gate_match_filter.py|train_match_set_rejection_calibrator.py|apply_match_set_rejection_calibrator.py|build_cluster_gate_dataset.py'
@@ -17,7 +18,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export TMPDIR="${PFM_TMPDIR:-/media/w24/D/xjw深度学习训练数据/tmp}"
 mkdir -p "${TMPDIR}"
 
-PY="${PFM_PHASE148_PYTHON:-/home/w24/anaconda3/envs/cppTorch/bin/python}"
+PY="${PFM_PHASE148_PYTHON:-${PFM_PYTHON:-/home/w24/anaconda3/envs/cppTorch/bin/python}}"
 PHASE141_ROOT="${PFM_PHASE141_ROOT:-/media/w24/D/xjw深度学习训练数据/pfm_runs/phase141_extreme01_02_gap_replay_conservative_train_eval_20260622}"
 PHASE146_ROOT="${PFM_PHASE146_ROOT:-/media/w24/D/xjw深度学习训练数据/pfm_runs/phase146_phase142_safe_gate_mainline_teacher_20260623}"
 PHASE147_ROOT="${PFM_PHASE147_ROOT:-/media/w24/D/xjw深度学习训练数据/pfm_runs/phase147_phase146_fresh_gate_validation_20260623}"

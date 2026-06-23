@@ -25,12 +25,33 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('--matcher-candidate-topk "${TRAIN_MATCHER_CANDIDATE_TOPK}"', text)
         self.assertIn('--graph-matcher-train-candidate-topk "${TRAIN_GRAPH_MATCHER_CANDIDATE_TOPK}"', text)
 
+    def test_phase41_crosscam_launcher_is_portable_across_training_machines(self) -> None:
+        text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
+
+        self.assertIn('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', text)
+        self.assertIn('PROJECT_ROOT="${PFM_PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"', text)
+        self.assertIn('PY="${PFM_PYTHON:-${PY:-/home/w24/anaconda3/envs/cppTorch/bin/python}}"', text)
+        self.assertIn('RENDER_MANIFEST="${PFM_PHASE41_RENDER_MANIFEST:-${PFM_RENDER_MANIFEST:-/media/w24/D/xjw深度学习训练数据/pfm_overlap_graphs/20260611_234228_h100_fov076_dom76_lat60_0m2e3_internal/manifests/h100km_fov076_render_manifest.csv}}"', text)
+        self.assertIn('UINT8_MANIFEST="${PFM_PHASE41_UINT8_MANIFEST:-${PFM_UINT8_MANIFEST:-/media/w24/D/xjw深度学习训练数据/pfm_overlap_graphs/20260611_234228_h100_fov076_dom76_lat60_0m2e3_internal/manifests/h100km_fov076_uint8_manifest.csv}}"', text)
+        self.assertIn('PFM_PHASE40_RENDER_MANIFEST="${RENDER_MANIFEST}"', text)
+        self.assertIn('PFM_PHASE40_UINT8_MANIFEST="${UINT8_MANIFEST}"', text)
+
     def test_phase40_crosscam_eval_launcher_allows_matcher_candidate_topk_override(self) -> None:
         text = self.read_script("runs/phase40_crosscam_extreme_baseline_20260620.sh")
 
         self.assertIn('PFM_MATCHER_CANDIDATE_TOPK="${PFM_PHASE40_MATCHER_CANDIDATE_TOPK:-256}"', text)
         self.assertIn('pfm_matcher_candidate_topk=<code>${PFM_MATCHER_CANDIDATE_TOPK}</code>', text)
         self.assertIn('--matcher-candidate-topk "${PFM_MATCHER_CANDIDATE_TOPK}"', text)
+
+    def test_phase40_crosscam_eval_launcher_is_portable_across_training_machines(self) -> None:
+        text = self.read_script("runs/phase40_crosscam_extreme_baseline_20260620.sh")
+
+        self.assertIn('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', text)
+        self.assertIn('PROJECT_ROOT="${PFM_PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"', text)
+        self.assertIn('PY="${PFM_PYTHON:-${PY:-/home/w24/anaconda3/envs/cppTorch/bin/python}}"', text)
+        self.assertIn('RENDER_MANIFEST="${PFM_PHASE40_RENDER_MANIFEST:-${PFM_RENDER_MANIFEST:-/media/w24/D/xjw深度学习训练数据/pfm_overlap_graphs/20260611_234228_h100_fov076_dom76_lat60_0m2e3_internal/manifests/h100km_fov076_render_manifest.csv}}"', text)
+        self.assertIn('UINT8_MANIFEST="${PFM_PHASE40_UINT8_MANIFEST:-${PFM_UINT8_MANIFEST:-/media/w24/D/xjw深度学习训练数据/pfm_overlap_graphs/20260611_234228_h100_fov076_dom76_lat60_0m2e3_internal/manifests/h100km_fov076_uint8_manifest.csv}}"', text)
+        self.assertIn('LIGHTGLUE_RUNNER="${PFM_PHASE40_LIGHTGLUE_RUNNER:-${PFM_LIGHTGLUE_RUNNER:-${PROJECT_ROOT}/runs/fov76_phase24_dev_expansion_20260618/run_lightglue_for_manifest.py}}"', text)
 
     def test_phase40_crosscam_eval_launcher_allows_final_accept_score_override(self) -> None:
         text = self.read_script("runs/phase40_crosscam_extreme_baseline_20260620.sh")
@@ -1080,6 +1101,9 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
     def test_phase148_pair_rejection_head_retrains_from_frozen_phase146_teacher(self) -> None:
         text = self.read_script("runs/phase148_phase146_pair_rejection_head_train_eval_20260623.sh")
 
+        self.assertIn('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', text)
+        self.assertIn('PROJECT_ROOT="${PFM_PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"', text)
+        self.assertIn('PY="${PFM_PHASE148_PYTHON:-${PFM_PYTHON:-/home/w24/anaconda3/envs/cppTorch/bin/python}}"', text)
         self.assertIn("phase146_phase142_safe_gate_mainline_teacher_20260623", text)
         self.assertIn("phase146_pair_accept_teacher_manifest.csv", text)
         self.assertIn("phase148_pair_accept_teacher_balanced_manifest.csv", text)
