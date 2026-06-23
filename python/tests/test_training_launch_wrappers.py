@@ -213,6 +213,32 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('train_keypoint_offset_head_only=<code>${PFM_PHASE41_TRAIN_KEYPOINT_OFFSET_HEAD_ONLY:-0}</code>', text)
         self.assertIn('"${TRAIN_EXTRA_FLAGS[@]}"', text)
 
+    def test_phase41_crosscam_launcher_allows_feature_extractor_unfreeze_overrides(self) -> None:
+        text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
+
+        for variable, flag in (
+            ("PFM_PHASE41_TRAIN_DUAL_FPN", "--train-dual-fpn"),
+            ("PFM_PHASE41_TRAIN_BACKBONE", "--train-backbone"),
+            ("PFM_PHASE41_TRAIN_SPARSE_CONTEXT", "--train-sparse-context"),
+            ("PFM_PHASE41_TRAIN_GEOMETRY_HEAD", "--train-geometry-head"),
+            ("PFM_PHASE41_TRAIN_TEXTURE_ADAPTER", "--train-texture-adapter"),
+            ("PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION", "--train-descriptor-fusion"),
+            ("PFM_PHASE41_TRAIN_QUALITY_HEAD", "--train-quality-head"),
+            ("PFM_PHASE41_TRAIN_RELIABILITY_HEAD", "--train-reliability-head"),
+        ):
+            self.assertIn(f'if [[ "${{{variable}:-0}}" == "1" ]]; then', text)
+            self.assertIn(f'TRAIN_FEATURE_FLAGS+=({flag})', text)
+        self.assertIn('TRAIN_FEATURE_FLAGS=()', text)
+        self.assertIn('"${TRAIN_FEATURE_FLAGS[@]}"', text)
+        self.assertIn('train_feature_flags=<code>${TRAIN_FEATURE_FLAGS[*]:-none}</code>', text)
+
+    def test_phase41_crosscam_launcher_can_skip_eval_for_smoke_training(self) -> None:
+        text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
+
+        self.assertIn('if [[ "${PFM_PHASE41_SKIP_EVAL:-0}" == "1" ]]; then', text)
+        self.assertIn('phase41_train_only_complete run_root=${RUN_ROOT} candidate_state=${CANDIDATE_STATE}', text)
+        self.assertIn('exit 0', text)
+
     def test_phase41_crosscam_launcher_allows_graph_calibration_only_override(self) -> None:
         text = self.read_script("runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh")
 
@@ -220,6 +246,21 @@ class TrainingLaunchWrappersTest(unittest.TestCase):
         self.assertIn('TRAIN_EXTRA_FLAGS+=(--train-graph-calibration-only)', text)
         self.assertIn('train_graph_calibration_only=<code>${PFM_PHASE41_TRAIN_GRAPH_CALIBRATION_ONLY:-0}</code>', text)
         self.assertIn('"${TRAIN_EXTRA_FLAGS[@]}"', text)
+
+    def test_phase149_end_to_end_feature_retrain_launcher_enables_feature_training(self) -> None:
+        text = self.read_script("runs/phase149_end_to_end_feature_retrain_20260623.sh")
+
+        self.assertIn('PHASE148_ROOT="${PFM_PHASE148_ROOT:-/media/w24/D/xjw深度学习训练数据/pfm_runs/phase148_phase146_pair_rejection_head_train_eval_20260623}"', text)
+        self.assertIn('PHASE141_ROOT="${PFM_PHASE141_ROOT:-/media/w24/D/xjw深度学习训练数据/pfm_runs/phase141_extreme01_02_gap_replay_conservative_train_eval_20260622}"', text)
+        self.assertIn('INIT_STATE="${PFM_PHASE149_INIT_STATE:-${DEFAULT_INIT_STATE}}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_DESCRIPTOR_HEAD="${PFM_PHASE41_TRAIN_DESCRIPTOR_HEAD:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_SPARSE_CONTEXT="${PFM_PHASE41_TRAIN_SPARSE_CONTEXT:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_GEOMETRY_HEAD="${PFM_PHASE41_TRAIN_GEOMETRY_HEAD:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_TEXTURE_ADAPTER="${PFM_PHASE41_TRAIN_TEXTURE_ADAPTER:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION="${PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION:-1}"', text)
+        self.assertIn('export PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY="${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-0}"', text)
+        self.assertIn('export PFM_PHASE41_SKIP_EVAL="${PFM_PHASE41_SKIP_EVAL:-${PHASE149_SMOKE}}"', text)
+        self.assertIn('bash runs/phase41_crosscam_extreme_geometry_train_eval_20260620.sh', text)
 
     def test_phase45_true_geometry_visual_eval_can_run_train_without_lightglue(self) -> None:
         text = self.read_script("runs/phase45_true_geometry_visual_eval_20260621.sh")

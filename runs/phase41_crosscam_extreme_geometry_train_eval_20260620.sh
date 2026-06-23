@@ -105,6 +105,31 @@ VAL_ROWS="$(($(wc -l < "${DATA_ROOT}/val_pairs.csv") - 1))"
 LOCKBOX_ROWS="$(($(wc -l < "${DATA_ROOT}/lockbox_pairs.csv") - 1))"
 DISK_FREE_PROJECT="$(df -h . | awk 'NR == 2 {print $4}')"
 ACTIVE_TASKS="$(pgrep -af 'batch_pose_sim_dataset.py|pfm_pytorch_training.py|sat_sim_cuda|benchmark_lazy_pose_pairs.py|visualize_lazy_pose_matches.py|run_lightglue' || true)"
+TRAIN_FEATURE_FLAGS=()
+if [[ "${PFM_PHASE41_TRAIN_DUAL_FPN:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-dual-fpn)
+fi
+if [[ "${PFM_PHASE41_TRAIN_BACKBONE:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-backbone)
+fi
+if [[ "${PFM_PHASE41_TRAIN_SPARSE_CONTEXT:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-sparse-context)
+fi
+if [[ "${PFM_PHASE41_TRAIN_GEOMETRY_HEAD:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-geometry-head)
+fi
+if [[ "${PFM_PHASE41_TRAIN_TEXTURE_ADAPTER:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-texture-adapter)
+fi
+if [[ "${PFM_PHASE41_TRAIN_DESCRIPTOR_FUSION:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-descriptor-fusion)
+fi
+if [[ "${PFM_PHASE41_TRAIN_QUALITY_HEAD:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-quality-head)
+fi
+if [[ "${PFM_PHASE41_TRAIN_RELIABILITY_HEAD:-0}" == "1" ]]; then
+  TRAIN_FEATURE_FLAGS+=(--train-reliability-head)
+fi
 TRAIN_EXTRA_FLAGS=()
 if [[ "${PFM_PHASE41_TRAIN_PAIR_ACCEPT_HEAD_ONLY:-0}" == "1" ]]; then
   TRAIN_EXTRA_FLAGS+=(--train-pair-accept-head-only)
@@ -152,6 +177,7 @@ cat > "${RUN_ROOT}/record.html" <<HTML
 <p>steps=<code>${STEPS}</code> save_every=<code>${SAVE_EVERY}</code> seed=<code>${SEED}</code></p>
 <p>learning_rate=<code>${LEARNING_RATE}</code></p>
 <p>train_descriptor_head=<code>${TRAIN_DESCRIPTOR_HEAD}</code></p>
+<p>train_feature_flags=<code>${TRAIN_FEATURE_FLAGS[*]:-none}</code></p>
 <p>train_keypoint_offset_head_only=<code>${PFM_PHASE41_TRAIN_KEYPOINT_OFFSET_HEAD_ONLY:-0}</code></p>
 <p>train_graph_calibration_only=<code>${PFM_PHASE41_TRAIN_GRAPH_CALIBRATION_ONLY:-0}</code></p>
 <p>freeze_extractor_warmup_steps=<code>${FREEZE_EXTRACTOR_WARMUP_STEPS}</code></p>
@@ -229,6 +255,7 @@ HTML
   --selected-keypoint-offset-max-points 256 \
   --selected-keypoint-offset-inverse-radius-px 1.5 \
   "${TRAIN_DESCRIPTOR_FLAGS[@]}" \
+  "${TRAIN_FEATURE_FLAGS[@]}" \
   "${FALSE_MATCH_FLAGS[@]}" \
   --train-graph-matcher \
   --graph-matcher-loss-weight 1.0 \
@@ -296,6 +323,15 @@ fi
 if [[ ! -s "${CANDIDATE_STATE}" ]]; then
   echo "missing trained candidate state under ${TRAIN_OUT}" >&2
   exit 1
+fi
+if [[ "${PFM_PHASE41_SKIP_EVAL:-0}" == "1" ]]; then
+  cat >> "${RUN_ROOT}/record.html" <<HTML
+<p>stage=<code>train_only_completed</code></p>
+<p>candidate_state=<code>${CANDIDATE_STATE}</code></p>
+<p>skip_eval=<code>1</code></p>
+HTML
+  echo "phase41_train_only_complete run_root=${RUN_ROOT} candidate_state=${CANDIDATE_STATE}"
+  exit 0
 fi
 
 PFM_PHASE40_ROOT="${EVAL_ROOT}" \
