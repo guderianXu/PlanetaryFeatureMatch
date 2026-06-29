@@ -19,6 +19,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator
@@ -87,10 +88,12 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE = "fov76_graph_magsac2_min24_balanced"
 TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE,
     TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
 )
 VISUAL_GEOMETRY_FILTER_CHOICES = (
@@ -175,6 +178,11 @@ GRAPH_MATCHER_DIAGNOSTIC_METRIC_FIELDS = (
     "graph_matcher_teacher_score_floor_violations",
     "graph_matcher_teacher_score_floor_delta_mean",
     "graph_matcher_teacher_score_floor_teacher_score_mean",
+    "graph_matcher_teacher_rank_loss",
+    "graph_matcher_teacher_rank_edges",
+    "graph_matcher_teacher_rank_violations",
+    "graph_matcher_teacher_rank_margin_delta_mean",
+    "graph_matcher_teacher_rank_teacher_score_mean",
     "graph_matcher_teacher_match_count_floor_loss",
     "graph_matcher_teacher_match_count_floor_teacher_count",
     "graph_matcher_teacher_match_count_floor_student_count",
@@ -2005,6 +2013,12 @@ def _should_log_bad_pair(skip_count: int) -> bool:
     return skip_count <= 20 or skip_count % 500 == 0
 
 
+def _profile_scope(profiler, name: str):
+    if profiler is None:
+        return nullcontext()
+    return torch.profiler.record_function(name)
+
+
 def _gpu_snapshot() -> dict[str, str]:
     try:
         output = subprocess.check_output(
@@ -3448,6 +3462,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "amp_enabled",
         "amp_scale",
         "activation_checkpointing",
+        "batched_descriptor_forward_pairs",
         "freeze_extractor_warmup_active",
         "descriptor_geometry_safety_schedule",
         "descriptor_geometry_blend_weight",
@@ -3509,6 +3524,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "graph_matcher_teacher_score_floor_weight",
         "graph_matcher_teacher_score_floor_tolerance",
         "graph_matcher_teacher_score_floor_min_score",
+        "graph_matcher_teacher_rank_weight",
+        "graph_matcher_teacher_rank_topk",
+        "graph_matcher_teacher_rank_tolerance",
+        "graph_matcher_teacher_rank_min_score",
         "graph_matcher_teacher_match_count_floor_weight",
         "graph_matcher_teacher_match_count_floor_threshold",
         "graph_matcher_teacher_match_count_floor_margin",
@@ -3719,6 +3738,28 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         )
         gpu_monitor.start()
 
+    profiler = None
+    profiler_trace_path = args.output_dir / "torch_profiler_trace.json"
+    profiler_table_path = args.output_dir / "torch_profiler_key_averages.txt"
+    if args.torch_profiler:
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if device.type == "cuda":
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        profiler = torch.profiler.profile(
+            activities=activities,
+            schedule=torch.profiler.schedule(
+                wait=args.torch_profiler_wait,
+                warmup=args.torch_profiler_warmup,
+                active=args.torch_profiler_active,
+                repeat=1,
+            ),
+            on_trace_ready=lambda prof: prof.export_chrome_trace(str(profiler_trace_path)),
+            record_shapes=args.torch_profiler_record_shapes,
+            profile_memory=args.torch_profiler_profile_memory,
+            with_stack=args.torch_profiler_with_stack,
+        )
+        profiler.__enter__()
+
     stability_tracker = TrainingStabilityTracker(
         thresholds=StabilityThresholds(
             min_steps_before_early_stop=args.stability_min_steps,
@@ -3776,11 +3817,13 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             )
             use_hard_iterator = hard_iterator is not None and random.random() < hard_probability
             active_iterator = hard_iterator if use_hard_iterator and hard_iterator is not None else base_iterator
-            results = [next(active_iterator) for _ in range(args.batch_pairs)]
+            with _profile_scope(profiler, "pfm/data_fetch"):
+                results = [next(active_iterator) for _ in range(args.batch_pairs)]
             data_wait_ms = (time.perf_counter() - fetch_start) * 1000.0
             fake_paths = [ref_dir / f"step_{step:06d}_pair_{idx:02d}.pt" for idx in range(len(results))]
             augment_start = time.perf_counter()
-            augmented_pairs = [result.pair for result in results]
+            with _profile_scope(profiler, "pfm/augmentation"):
+                augmented_pairs = [result.pair for result in results]
             augment_ms = (time.perf_counter() - augment_start) * 1000.0
             prefetched = {path.resolve(strict=False): pair for path, pair in zip(fake_paths, augmented_pairs)}
             pair_acceptance_targets = {
@@ -3869,6 +3912,8 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
             )
             false_cluster_replay_loss_multiplier = false_cluster_replay_loss_multiplier_for_results(args, results)
             true_geometry_supervision_metrics = true_geometry_supervision_metrics_for_results(results)
+            train_scope = _profile_scope(profiler, "pfm/train_step")
+            train_scope.__enter__()
             metrics = train_step(
                 model,
                 optimizer,
@@ -4037,6 +4082,10 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 graph_matcher_teacher_score_floor_weight=args.graph_matcher_teacher_score_floor_weight,
                 graph_matcher_teacher_score_floor_tolerance=args.graph_matcher_teacher_score_floor_tolerance,
                 graph_matcher_teacher_score_floor_min_score=args.graph_matcher_teacher_score_floor_min_score,
+                graph_matcher_teacher_rank_weight=args.graph_matcher_teacher_rank_weight,
+                graph_matcher_teacher_rank_topk=args.graph_matcher_teacher_rank_topk,
+                graph_matcher_teacher_rank_tolerance=args.graph_matcher_teacher_rank_tolerance,
+                graph_matcher_teacher_rank_min_score=args.graph_matcher_teacher_rank_min_score,
                 graph_matcher_teacher_match_count_floor_weight=(
                     args.graph_matcher_teacher_match_count_floor_weight
                 ),
@@ -4092,17 +4141,20 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 amp_dtype=amp_dtype,
                 grad_scaler=grad_scaler,
                 activation_checkpointing=args.activation_checkpointing,
+                batched_descriptor_forward=args.batched_descriptor_forward,
                 training_step=step,
                 freeze_extractor_warmup_active=freeze_extractor_warmup_active,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
+            train_scope.__exit__(None, None, None)
             train_ms = (time.perf_counter() - train_start) * 1000.0
             gpu_snapshot_start = time.perf_counter()
-            if gpu_monitor is not None:
-                gpu = gpu_monitor.latest()
-            else:
-                gpu = _gpu_snapshot() if _should_collect_gpu_snapshot(step, args.gpu_snapshot_every) else {}
+            with _profile_scope(profiler, "pfm/gpu_snapshot"):
+                if gpu_monitor is not None:
+                    gpu = gpu_monitor.latest()
+                else:
+                    gpu = _gpu_snapshot() if _should_collect_gpu_snapshot(step, args.gpu_snapshot_every) else {}
             gpu_snapshot_ms = (time.perf_counter() - gpu_snapshot_start) * 1000.0
             hard_lazy_pairs = sum(
                 1
@@ -4136,6 +4188,7 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 "amp_enabled": int(args.amp),
                 "amp_scale": f"{metrics.get('amp_scale', 0.0):.1f}",
                 "activation_checkpointing": int(args.activation_checkpointing),
+                "batched_descriptor_forward_pairs": f"{metrics.get('batched_descriptor_forward_pairs', 0.0):.0f}",
                 "freeze_extractor_warmup_active": int(freeze_extractor_warmup_active),
                 "descriptor_geometry_safety_schedule": args.descriptor_geometry_safety_schedule,
                 "descriptor_geometry_blend_weight": f"{descriptor_geometry_blend_weight:.6f}",
@@ -4240,6 +4293,18 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                 ),
                 "graph_matcher_teacher_score_floor_min_score": (
                     f"{args.graph_matcher_teacher_score_floor_min_score if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_rank_weight": (
+                    f"{args.graph_matcher_teacher_rank_weight if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_rank_topk": (
+                    args.graph_matcher_teacher_rank_topk if args.train_graph_matcher else 0
+                ),
+                "graph_matcher_teacher_rank_tolerance": (
+                    f"{args.graph_matcher_teacher_rank_tolerance if args.train_graph_matcher else 0.0:.6f}"
+                ),
+                "graph_matcher_teacher_rank_min_score": (
+                    f"{args.graph_matcher_teacher_rank_min_score if args.train_graph_matcher else 0.0:.6f}"
                 ),
                 "graph_matcher_teacher_match_count_floor_weight": (
                     f"{args.graph_matcher_teacher_match_count_floor_weight if args.train_graph_matcher else 0.0:.6f}"
@@ -4699,9 +4764,21 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
                     f"train={train_ms:.1f}ms rate={step / max(elapsed, 1.0e-6):.2f} step/s",
                     flush=True,
                 )
+            if profiler is not None:
+                profiler.step()
             if should_break:
                 break
     finally:
+        if profiler is not None:
+            profiler.__exit__(None, None, None)
+            profiler_table_path.write_text(
+                profiler.key_averages().table(
+                    sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
+                    row_limit=args.torch_profiler_row_limit,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         metrics_writer.close()
         if false_match_handle is not None:
             false_match_handle.close()
@@ -4766,6 +4843,9 @@ def run_train(args: argparse.Namespace, specs: list[LazyPairSpec]) -> dict[str, 
         "best_by_val_loss_checkpoint": str(best_by_loss_checkpoint_path or ""),
         "last_good_checkpoint": str(last_good_checkpoint_path or ""),
         "crash_report": str(crash_report_path or ""),
+        "torch_profiler_enabled": bool(args.torch_profiler),
+        "torch_profiler_trace": str(profiler_trace_path if args.torch_profiler else ""),
+        "torch_profiler_key_averages": str(profiler_table_path if args.torch_profiler else ""),
     }
     final_step = int(rows[-1]["step"]) if rows else 0
     checkpoint_path = args.output_dir / "pytorch_pfm_state.pt"
@@ -5067,6 +5147,10 @@ def _save_training_state(
                 "graph_matcher_teacher_score_floor_min_score": float(
                     args.graph_matcher_teacher_score_floor_min_score
                 ),
+                "graph_matcher_teacher_rank_weight": float(args.graph_matcher_teacher_rank_weight),
+                "graph_matcher_teacher_rank_topk": int(args.graph_matcher_teacher_rank_topk),
+                "graph_matcher_teacher_rank_tolerance": float(args.graph_matcher_teacher_rank_tolerance),
+                "graph_matcher_teacher_rank_min_score": float(args.graph_matcher_teacher_rank_min_score),
                 "graph_matcher_teacher_match_count_floor_weight": float(
                     args.graph_matcher_teacher_match_count_floor_weight
                 ),
@@ -5166,6 +5250,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-snapshot-every", type=int, default=25)
     parser.add_argument("--gpu-monitor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gpu-sample-interval-s", type=float, default=1.0)
+    parser.add_argument("--torch-profiler", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--torch-profiler-wait", type=int, default=1)
+    parser.add_argument("--torch-profiler-warmup", type=int, default=1)
+    parser.add_argument("--torch-profiler-active", type=int, default=5)
+    parser.add_argument("--torch-profiler-row-limit", type=int, default=40)
+    parser.add_argument("--torch-profiler-record-shapes", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--torch-profiler-profile-memory", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--torch-profiler-with-stack", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--skip-bad-pairs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-bad-pairs", type=int, default=0)
 
@@ -5173,6 +5265,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--amp-dtype", choices=["float16", "bfloat16"], default="float16")
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--batched-descriptor-forward", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--init-pytorch-state", type=Path, default=DEFAULT_INIT_STATE)
     parser.add_argument("--graph-hidden-dim", type=int, default=0)
     parser.add_argument("--graph-attention-layers", type=int, default=0)
@@ -5307,6 +5400,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-score-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-tolerance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-teacher-rank-tolerance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
@@ -5500,6 +5597,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-score-floor-tolerance must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         parser.error("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_rank_weight < 0.0:
+        parser.error("--graph-matcher-teacher-rank-weight must be nonnegative")
+    if args.graph_matcher_teacher_rank_topk < 0:
+        parser.error("--graph-matcher-teacher-rank-topk must be nonnegative")
+    if args.graph_matcher_teacher_rank_tolerance < 0.0:
+        parser.error("--graph-matcher-teacher-rank-tolerance must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_rank_min_score)):
+        parser.error("--graph-matcher-teacher-rank-min-score must be finite")
     if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
         parser.error("--graph-matcher-teacher-match-count-floor-weight must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
@@ -5525,9 +5630,10 @@ def parse_args() -> argparse.Namespace:
         or args.graph_matcher_teacher_match_count_floor_weight > 0.0
         or args.graph_matcher_teacher_match_count_ceiling_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
+        or args.graph_matcher_teacher_rank_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, match-count ceiling, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, teacher rank, match-count floor, match-count ceiling, or distillation weight is positive"
         )
     if (
         not math.isfinite(float(args.descriptor_geometry_blend_weight))
@@ -6013,6 +6119,14 @@ def main() -> int:
         raise ValueError("--graph-matcher-teacher-score-floor-tolerance must be non-negative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         raise ValueError("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_rank_weight < 0.0:
+        raise ValueError("--graph-matcher-teacher-rank-weight must be non-negative")
+    if args.graph_matcher_teacher_rank_topk < 0:
+        raise ValueError("--graph-matcher-teacher-rank-topk must be non-negative")
+    if args.graph_matcher_teacher_rank_tolerance < 0.0:
+        raise ValueError("--graph-matcher-teacher-rank-tolerance must be non-negative")
+    if not math.isfinite(float(args.graph_matcher_teacher_rank_min_score)):
+        raise ValueError("--graph-matcher-teacher-rank-min-score must be finite")
     if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
         raise ValueError("--graph-matcher-teacher-match-count-floor-weight must be non-negative")
     if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
@@ -6106,6 +6220,16 @@ def main() -> int:
         "cross_fov_offsets": list(args.cross_fov_offsets),
         "amp": {"enabled": bool(args.amp), "dtype": str(args.amp_dtype)},
         "activation_checkpointing": bool(args.activation_checkpointing),
+        "batched_descriptor_forward": bool(args.batched_descriptor_forward),
+        "torch_profiler": {
+            "enabled": bool(args.torch_profiler),
+            "wait": int(args.torch_profiler_wait),
+            "warmup": int(args.torch_profiler_warmup),
+            "active": int(args.torch_profiler_active),
+            "record_shapes": bool(args.torch_profiler_record_shapes),
+            "profile_memory": bool(args.torch_profiler_profile_memory),
+            "with_stack": bool(args.torch_profiler_with_stack),
+        },
         "descriptor_geometry_mode": str(args.descriptor_geometry_mode),
         "descriptor_geometry_blend_weight": float(args.descriptor_geometry_blend_weight),
         "descriptor_scale_log_clamp_min": float(args.descriptor_scale_log_clamp_min),
@@ -6126,6 +6250,12 @@ def main() -> int:
             "reliability_dustbin_bias": str(args.matcher_reliability_dustbin_bias),
             "final_accept_score_mode": str(args.matcher_final_accept_score_mode),
             "geometry_bias_scale": float(args.matcher_geometry_bias_scale),
+            "teacher_rank": {
+                "weight": float(args.graph_matcher_teacher_rank_weight),
+                "topk": int(args.graph_matcher_teacher_rank_topk),
+                "tolerance": float(args.graph_matcher_teacher_rank_tolerance),
+                "min_score": float(args.graph_matcher_teacher_rank_min_score),
+            },
         },
         "training_stability": {
             "window": int(args.stability_window),

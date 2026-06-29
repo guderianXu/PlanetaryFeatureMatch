@@ -21,10 +21,12 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE = "fov76_graph_magsac2_min24_balanced"
 TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE,
     TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
 )
 
@@ -180,6 +182,16 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         _set_profile_default(args, "filtered_min_matches", 0, 0)
         _set_profile_default(args, "filtered_min_matches_values", [0], None)
         _set_profile_default(args, "true_geometry_min_valid_fraction", 0.10, 0.0)
+        return
+    if profile == FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE:
+        _set_profile_default(args, "geometry_filter", "none", "none")
+        _set_profile_default(args, "geometry_threshold_px", 2.0, 0.0)
+        _set_profile_default(args, "geometry_threshold_px_values", [2.0], None)
+        _set_profile_default(args, "filtered_geometry_filter", "magsac", "local")
+        _set_profile_default(args, "filtered_min_margin", 0.0, 0.02)
+        _set_profile_default(args, "min_score_values", [18.0], [-1.0])
+        _set_profile_default(args, "filtered_min_matches", 24, 0)
+        _set_profile_default(args, "filtered_min_matches_values", [24], None)
         return
     _set_profile_default(args, "geometry_filter", "local", "none")
     _set_profile_default(args, "geometry_threshold_px", 5.0, 0.0)

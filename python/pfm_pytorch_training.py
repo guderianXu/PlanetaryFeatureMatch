@@ -136,6 +136,11 @@ GRAPH_MATCHER_LOSS_METRIC_KEYS = (
     "graph_matcher_teacher_score_floor_violations",
     "graph_matcher_teacher_score_floor_delta_mean",
     "graph_matcher_teacher_score_floor_teacher_score_mean",
+    "graph_matcher_teacher_rank_loss",
+    "graph_matcher_teacher_rank_edges",
+    "graph_matcher_teacher_rank_violations",
+    "graph_matcher_teacher_rank_margin_delta_mean",
+    "graph_matcher_teacher_rank_teacher_score_mean",
     "graph_matcher_teacher_match_count_floor_loss",
     "graph_matcher_teacher_match_count_floor_teacher_count",
     "graph_matcher_teacher_match_count_floor_student_count",
@@ -1847,6 +1852,10 @@ def graph_matcher_correspondence_loss(
     teacher_score_floor_weight: float = 0.0,
     teacher_score_floor_tolerance: float = 0.0,
     teacher_score_floor_min_score: float = 0.0,
+    teacher_rank_weight: float = 0.0,
+    teacher_rank_topk: int = 8,
+    teacher_rank_tolerance: float = 0.0,
+    teacher_rank_min_score: float = 0.0,
     teacher_match_count_floor_weight: float = 0.0,
     teacher_match_count_floor_threshold: float = 0.0,
     teacher_match_count_floor_margin: float = 0.0,
@@ -1914,6 +1923,8 @@ def graph_matcher_correspondence_loss(
         teacher_guard_metrics: dict[str, torch.Tensor] | None = None,
         teacher_score_floor_loss: torch.Tensor | None = None,
         teacher_score_floor_metrics: dict[str, torch.Tensor] | None = None,
+        teacher_rank_loss: torch.Tensor | None = None,
+        teacher_rank_metrics: dict[str, torch.Tensor] | None = None,
         teacher_match_count_floor_loss: torch.Tensor | None = None,
         teacher_match_count_floor_metrics: dict[str, torch.Tensor] | None = None,
         teacher_match_count_ceiling_loss: torch.Tensor | None = None,
@@ -2180,6 +2191,31 @@ def graph_matcher_correspondence_loss(
                 if teacher_score_floor_metrics is None
                 else teacher_score_floor_metrics["teacher_score_mean"]
             ),
+            "graph_matcher_teacher_rank_loss": (
+                total_loss.new_zeros(())
+                if teacher_rank_loss is None
+                else teacher_rank_loss
+            ),
+            "graph_matcher_teacher_rank_edges": (
+                total_loss.new_zeros(())
+                if teacher_rank_metrics is None
+                else teacher_rank_metrics["edges"]
+            ),
+            "graph_matcher_teacher_rank_violations": (
+                total_loss.new_zeros(())
+                if teacher_rank_metrics is None
+                else teacher_rank_metrics["violations"]
+            ),
+            "graph_matcher_teacher_rank_margin_delta_mean": (
+                total_loss.new_zeros(())
+                if teacher_rank_metrics is None
+                else teacher_rank_metrics["margin_delta_mean"]
+            ),
+            "graph_matcher_teacher_rank_teacher_score_mean": (
+                total_loss.new_zeros(())
+                if teacher_rank_metrics is None
+                else teacher_rank_metrics["teacher_score_mean"]
+            ),
             "graph_matcher_teacher_match_count_floor_loss": (
                 total_loss.new_zeros(())
                 if teacher_match_count_floor_loss is None
@@ -2290,6 +2326,14 @@ def graph_matcher_correspondence_loss(
         raise ValueError("teacher_guard_weight must be nonnegative")
     if teacher_score_floor_weight < 0.0:
         raise ValueError("teacher_score_floor_weight must be nonnegative")
+    if teacher_rank_weight < 0.0:
+        raise ValueError("teacher_rank_weight must be nonnegative")
+    if teacher_rank_topk < 0:
+        raise ValueError("teacher_rank_topk must be nonnegative")
+    if teacher_rank_tolerance < 0.0:
+        raise ValueError("teacher_rank_tolerance must be nonnegative")
+    if not math.isfinite(float(teacher_rank_min_score)):
+        raise ValueError("teacher_rank_min_score must be finite")
     if teacher_match_count_floor_weight < 0.0:
         raise ValueError("teacher_match_count_floor_weight must be nonnegative")
     if teacher_match_count_ceiling_weight < 0.0:
@@ -2696,6 +2740,7 @@ def graph_matcher_correspondence_loss(
     if (
         teacher_guard_weight > 0.0
         or teacher_score_floor_weight > 0.0
+        or teacher_rank_weight > 0.0
         or teacher_match_count_floor_weight > 0.0
         or teacher_match_count_ceiling_weight > 0.0
         or teacher_distillation_weight > 0.0
@@ -2703,6 +2748,7 @@ def graph_matcher_correspondence_loss(
         resolved_teacher_guard_output = run_teacher_guard_matcher(attention_layer_budget)
     teacher_guard_loss = output.logits.new_zeros(())
     teacher_score_floor_loss = output.logits.new_zeros(())
+    teacher_rank_loss = output.logits.new_zeros(())
     teacher_match_count_floor_loss = output.logits.new_zeros(())
     teacher_match_count_ceiling_loss = output.logits.new_zeros(())
     teacher_distillation_loss = output.logits.new_zeros(())
@@ -2715,6 +2761,12 @@ def graph_matcher_correspondence_loss(
     teacher_score_floor_metrics = {
         "violations": output.logits.new_zeros(()),
         "score_delta_mean": output.logits.new_zeros(()),
+        "teacher_score_mean": output.logits.new_zeros(()),
+    }
+    teacher_rank_metrics = {
+        "edges": output.logits.new_zeros(()),
+        "violations": output.logits.new_zeros(()),
+        "margin_delta_mean": output.logits.new_zeros(()),
         "teacher_score_mean": output.logits.new_zeros(()),
     }
     teacher_match_count_floor_metrics = {
@@ -2847,6 +2899,16 @@ def graph_matcher_correspondence_loss(
             min_teacher_score=teacher_score_floor_min_score,
         )
         loss = loss + float(teacher_score_floor_weight) * teacher_score_floor_loss
+    if teacher_rank_weight > 0.0 and resolved_teacher_guard_output is not None:
+        teacher_rank_loss, teacher_rank_metrics = graph_matcher_teacher_rank_preservation_loss(
+            output,
+            resolved_teacher_guard_output,
+            positive_count=count,
+            topk=teacher_rank_topk,
+            tolerance=teacher_rank_tolerance,
+            min_teacher_score=teacher_rank_min_score,
+        )
+        loss = loss + float(teacher_rank_weight) * teacher_rank_loss
     if teacher_match_count_floor_weight > 0.0 and resolved_teacher_guard_output is not None:
         (
             teacher_match_count_floor_loss,
@@ -3132,6 +3194,8 @@ def graph_matcher_correspondence_loss(
             teacher_guard_metrics=teacher_guard_metrics,
             teacher_score_floor_loss=teacher_score_floor_loss,
             teacher_score_floor_metrics=teacher_score_floor_metrics,
+            teacher_rank_loss=teacher_rank_loss,
+            teacher_rank_metrics=teacher_rank_metrics,
             teacher_match_count_floor_loss=teacher_match_count_floor_loss,
             teacher_match_count_floor_metrics=teacher_match_count_floor_metrics,
             teacher_match_count_ceiling_loss=teacher_match_count_ceiling_loss,
@@ -4022,6 +4086,109 @@ def graph_matcher_teacher_score_floor_loss(
         "violations": deficit.gt(0.0).to(student_logits.dtype).sum().detach(),
         "score_delta_mean": score_delta.detach().mean(),
         "teacher_score_mean": selected_teacher.detach().mean(),
+    }
+    return loss, metrics
+
+
+def graph_matcher_teacher_rank_preservation_loss(
+    student: pfm_model.GraphMatcherOutput,
+    teacher: pfm_model.GraphMatcherOutput,
+    *,
+    positive_count: int,
+    topk: int = 8,
+    tolerance: float = 0.0,
+    min_teacher_score: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Preserve teacher true-pair ranking against its strongest row/column competitors."""
+
+    if topk < 0:
+        raise ValueError("topk must be nonnegative")
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be nonnegative")
+    if not math.isfinite(float(min_teacher_score)):
+        raise ValueError("min_teacher_score must be finite")
+    count = min(
+        int(positive_count),
+        student.logits.size(0) - 1,
+        student.logits.size(1) - 1,
+        teacher.logits.size(0) - 1,
+        teacher.logits.size(1) - 1,
+    )
+    zero = student.logits.new_zeros(())
+    metrics = {
+        "edges": zero,
+        "violations": zero,
+        "margin_delta_mean": zero,
+        "teacher_score_mean": zero,
+    }
+    if count <= 1 or topk <= 0:
+        return zero, metrics
+
+    device = student.logits.device
+    student_logits = student.logits
+    teacher_logits = teacher.logits.detach().to(device=device, dtype=student_logits.dtype)
+    indices = torch.arange(count, device=device)
+
+    def final_scores(logits: torch.Tensor) -> torch.Tensor:
+        pair_logits = logits[:count, :count]
+        row_dustbin = logits[:count, logits.size(1) - 1].unsqueeze(1)
+        col_dustbin = logits[logits.size(0) - 1, :count].unsqueeze(0)
+        return pair_logits - row_dustbin - col_dustbin
+
+    student_scores = final_scores(student_logits)
+    teacher_scores = final_scores(teacher_logits)
+    teacher_true_scores = teacher_scores.diagonal()
+    protected = teacher_true_scores >= float(min_teacher_score)
+    if not bool(protected.any()):
+        return zero, metrics
+
+    eye = torch.eye(count, dtype=torch.bool, device=device)
+    deficit_terms: list[torch.Tensor] = []
+    margin_delta_terms: list[torch.Tensor] = []
+    teacher_score_terms: list[torch.Tensor] = []
+    edge_count = 0
+    for axis in ("row", "col"):
+        if axis == "row":
+            teacher_competitors = teacher_scores.masked_fill(eye, -torch.inf)
+            student_competitors = student_scores
+        else:
+            teacher_competitors = teacher_scores.T.masked_fill(eye, -torch.inf)
+            student_competitors = student_scores.T
+        for index in torch.nonzero(protected, as_tuple=False).flatten().tolist():
+            candidate_scores = teacher_competitors[index]
+            valid = torch.isfinite(candidate_scores)
+            if not bool(valid.any()):
+                continue
+            valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+            keep_count = min(int(topk), int(valid_indices.numel()))
+            selected_order = candidate_scores[valid].topk(keep_count).indices
+            selected_indices = valid_indices.index_select(0, selected_order)
+            teacher_margin = teacher_true_scores[index] - teacher_competitors[index, selected_indices]
+            reliable = teacher_margin > 0.0
+            if not bool(reliable.any()):
+                continue
+            selected_indices = selected_indices[reliable]
+            teacher_margin = teacher_margin[reliable]
+            student_true_score = student_scores[index, index]
+            student_margin = student_true_score - student_competitors[index, selected_indices]
+            margin_delta = student_margin - teacher_margin
+            deficit = (teacher_margin - student_margin - float(tolerance)).clamp_min(0.0)
+            deficit_terms.append(deficit)
+            margin_delta_terms.append(margin_delta.detach())
+            teacher_score_terms.append(teacher_true_scores[index].detach().expand_as(deficit))
+            edge_count += int(deficit.numel())
+
+    if not deficit_terms:
+        return zero, metrics
+    deficits = torch.cat(deficit_terms)
+    margin_delta = torch.cat(margin_delta_terms)
+    teacher_selected_scores = torch.cat(teacher_score_terms)
+    loss = deficits.pow(2).mean()
+    metrics = {
+        "edges": student_logits.new_tensor(float(edge_count)),
+        "violations": deficits.gt(0.0).to(student_logits.dtype).sum().detach(),
+        "margin_delta_mean": margin_delta.mean(),
+        "teacher_score_mean": teacher_selected_scores.mean(),
     }
     return loss, metrics
 
@@ -5049,6 +5216,78 @@ def compute_student_teacher_descriptor_maps(
     return student_a, student_b, teacher_a, teacher_b, heatmap_a, heatmap_b
 
 
+def can_batch_descriptor_forward(pairs: list[SyntheticPair]) -> bool:
+    if len(pairs) <= 1:
+        return False
+    first = pairs[0]
+    for pair in pairs:
+        if pair.view_a.shape != first.view_a.shape or pair.view_b.shape != first.view_b.shape:
+            return False
+        if pair.view_a.dtype != first.view_a.dtype or pair.view_b.dtype != first.view_b.dtype:
+            return False
+        if pair.view_a.device != first.view_a.device or pair.view_b.device != first.view_b.device:
+            return False
+    return True
+
+
+def compute_student_teacher_descriptor_maps_batched(
+    model: pfm_model.PlanetaryFeatureMatcher,
+    pairs: list[SyntheticPair],
+    *,
+    train_blended_descriptors: bool = False,
+    texture_blend_weight: float = pfm_model.INFERENCE_TEXTURE_BLEND_WEIGHT,
+    include_heatmaps: bool = False,
+    activation_checkpointing: bool = False,
+) -> list[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+]:
+    if not pairs:
+        return []
+    if not can_batch_descriptor_forward(pairs):
+        raise ValueError("all pairs must have matching view shapes, dtypes, and devices for batched descriptor forward")
+    view_a_batch = torch.stack([pair.view_a for pair in pairs], dim=0)
+    view_b_batch = torch.stack([pair.view_b for pair in pairs], dim=0)
+    student_a, heatmap_a = learned_descriptor_and_heatmap_single(
+        model,
+        view_a_batch,
+        train_blended_descriptors=train_blended_descriptors,
+        texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
+    )
+    student_b, heatmap_b = learned_descriptor_and_heatmap_single(
+        model,
+        view_b_batch,
+        train_blended_descriptors=train_blended_descriptors,
+        texture_blend_weight=texture_blend_weight,
+        activation_checkpointing=activation_checkpointing,
+    )
+    with torch.no_grad():
+        teacher_a = model.texture_descriptor_map_single(view_a_batch)
+        teacher_b = model.texture_descriptor_map_single(view_b_batch)
+    if not include_heatmaps:
+        return [
+            (
+                student_a[index : index + 1],
+                student_b[index : index + 1],
+                teacher_a[index : index + 1],
+                teacher_b[index : index + 1],
+            )
+            for index in range(len(pairs))
+        ]
+    return [
+        (
+            student_a[index : index + 1],
+            student_b[index : index + 1],
+            teacher_a[index : index + 1],
+            teacher_b[index : index + 1],
+            heatmap_a[index : index + 1],
+            heatmap_b[index : index + 1],
+        )
+        for index in range(len(pairs))
+    ]
+
+
 def descriptor_parameters(
     model: pfm_model.PlanetaryFeatureMatcher,
     *,
@@ -5235,7 +5474,11 @@ def grad_scaler_scale(grad_scaler) -> float:
 
 def clip_and_measure_gradients(parameters: list[torch.nn.Parameter], *, max_grad_norm: float = 0.0) -> float:
     if max_grad_norm > 0.0:
-        torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+        total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+        grad_norm = float(total_norm.detach().cpu()) if isinstance(total_norm, torch.Tensor) else float(total_norm)
+        if not math.isfinite(grad_norm):
+            raise FloatingPointError("non-finite gradient norm")
+        return min(grad_norm, float(max_grad_norm))
     grad_norm = gradient_l2_norm(parameters)
     if not math.isfinite(grad_norm):
         raise FloatingPointError("non-finite gradient norm")
@@ -5468,6 +5711,10 @@ def train_step(
     graph_matcher_teacher_score_floor_weight: float = 0.0,
     graph_matcher_teacher_score_floor_tolerance: float = 0.0,
     graph_matcher_teacher_score_floor_min_score: float = 0.0,
+    graph_matcher_teacher_rank_weight: float = 0.0,
+    graph_matcher_teacher_rank_topk: int = 8,
+    graph_matcher_teacher_rank_tolerance: float = 0.0,
+    graph_matcher_teacher_rank_min_score: float = 0.0,
     graph_matcher_teacher_match_count_floor_weight: float = 0.0,
     graph_matcher_teacher_match_count_floor_threshold: float = 0.0,
     graph_matcher_teacher_match_count_floor_margin: float = 0.0,
@@ -5493,6 +5740,7 @@ def train_step(
     amp_dtype: torch.dtype = torch.float16,
     grad_scaler=None,
     activation_checkpointing: bool = False,
+    batched_descriptor_forward: bool = False,
     training_spatial_bins: int = 0,
     training_crop_size: int = 0,
     training_max_image_size: int = 0,
@@ -5541,6 +5789,7 @@ def train_step(
         ("graph_matcher_pair_acceptance_loss_weight", graph_matcher_pair_acceptance_loss_weight),
         ("graph_matcher_teacher_guard_weight", graph_matcher_teacher_guard_weight),
         ("graph_matcher_teacher_score_floor_weight", graph_matcher_teacher_score_floor_weight),
+        ("graph_matcher_teacher_rank_weight", graph_matcher_teacher_rank_weight),
         ("graph_matcher_teacher_match_count_floor_weight", graph_matcher_teacher_match_count_floor_weight),
         ("graph_matcher_teacher_match_count_ceiling_weight", graph_matcher_teacher_match_count_ceiling_weight),
         ("graph_matcher_teacher_distillation_weight", graph_matcher_teacher_distillation_weight),
@@ -5557,6 +5806,10 @@ def train_step(
             graph_matcher_teacher_score_floor_tolerance,
         ),
         (
+            "graph_matcher_teacher_rank_tolerance",
+            graph_matcher_teacher_rank_tolerance,
+        ),
+        (
             "graph_matcher_teacher_match_count_floor_margin",
             graph_matcher_teacher_match_count_floor_margin,
         ),
@@ -5569,6 +5822,10 @@ def train_step(
             raise ValueError(f"{name} must be nonnegative")
     if not math.isfinite(float(graph_matcher_teacher_score_floor_min_score)):
         raise ValueError("graph_matcher_teacher_score_floor_min_score must be finite")
+    if graph_matcher_teacher_rank_topk < 0:
+        raise ValueError("graph_matcher_teacher_rank_topk must be nonnegative")
+    if not math.isfinite(float(graph_matcher_teacher_rank_min_score)):
+        raise ValueError("graph_matcher_teacher_rank_min_score must be finite")
     if not math.isfinite(float(graph_matcher_teacher_match_count_floor_threshold)):
         raise ValueError("graph_matcher_teacher_match_count_floor_threshold must be finite")
     if not math.isfinite(float(graph_matcher_teacher_match_count_ceiling_threshold)):
@@ -5702,6 +5959,7 @@ def train_step(
     illumination_consistency_pairs_used = 0
     illumination_match_points = 0
     illumination_match_pairs_used = 0
+    batched_descriptor_forward_pairs = 0
     matchability_loss_sum = 0.0
     descriptor_uncertainty_loss_sum = 0.0
     no_match_prior_loss_sum = 0.0
@@ -5785,6 +6043,37 @@ def train_step(
             "freeze_extractor_warmup_active": 1.0 if freeze_extractor_warmup_active else 0.0,
         }
 
+    def skipped_training_metrics(reported_loss: float) -> dict[str, float]:
+        metrics = skipped_step_metrics(torch.tensor(reported_loss, device=device), metric_rows, sampled_count=sampled_count)
+        metrics.update(aggregate_graph_matcher_loss_metrics(graph_metric_rows))
+        metrics.update(auxiliary_loss_metrics())
+        metrics.update(
+            {
+                "pseudo_label_points": float(pseudo_label_points),
+                "pseudo_keypoint_points": float(pseudo_keypoint_points),
+                "pseudo_label_pairs": float(pseudo_label_pairs),
+                "false_match_points": float(false_match_points),
+                "false_match_pairs": float(false_match_pairs),
+                "online_false_match_points": float(online_false_match_points),
+                "online_false_match_pairs": float(online_false_match_pairs),
+                "illumination_consistency_points": float(illumination_consistency_points),
+                "illumination_consistency_pairs": float(illumination_consistency_pairs_used),
+                "illumination_match_points": float(illumination_match_points),
+                "illumination_match_pairs": float(illumination_match_pairs_used),
+                "batched_descriptor_forward_pairs": float(batched_descriptor_forward_pairs),
+                "pose_easy_pairs": pose_counts["pose_easy_pairs"],
+                "pose_medium_pairs": pose_counts["pose_medium_pairs"],
+                "pose_hard_pairs": pose_counts["pose_hard_pairs"],
+                "pose_unknown_pairs": pose_counts["pose_unknown_pairs"],
+                "pose_mean_loss_weight": (
+                    pose_counts["pose_weight_sum"] / pose_counts["pose_weight_pairs"]
+                    if pose_counts["pose_weight_pairs"] > 0.0
+                    else 1.0
+                ),
+            }
+        )
+        return metrics
+
     try:
         for _ in range(gradient_accumulation_steps):
             if forced_pair_paths is not None:
@@ -5805,20 +6094,43 @@ def train_step(
                     pose_balanced_sampling=pose_balanced_sampling,
                 )
             losses = []
-            for pair_path in selected:
-                pair_key = pair_path.resolve(strict=False)
-                pair_acceptance = None if pair_acceptance_targets is None else pair_acceptance_targets.get(pair_key)
-                true_geometry_match_count = (
-                    None
-                    if true_geometry_match_count_targets is None
-                    else true_geometry_match_count_targets.get(pair_key)
-                )
-                if prefetched_pairs is not None and pair_key in prefetched_pairs:
-                    pair = move_pair_to_device(prefetched_pairs[pair_key], device=device)
-                else:
-                    pair = load_pair_for_training(pair_path, device=device, pair_cache=pair_cache)
-                pair = crop_pair_for_training(pair, crop_size=training_crop_size, generator=generator)
-                pair = resize_pair_for_training(pair, max_image_size=training_max_image_size)
+
+            def iter_batch_items():
+                for pair_path in selected:
+                    pair_key = pair_path.resolve(strict=False)
+                    pair_acceptance = None if pair_acceptance_targets is None else pair_acceptance_targets.get(pair_key)
+                    true_geometry_match_count = (
+                        None
+                        if true_geometry_match_count_targets is None
+                        else true_geometry_match_count_targets.get(pair_key)
+                    )
+                    if prefetched_pairs is not None and pair_key in prefetched_pairs:
+                        pair = move_pair_to_device(prefetched_pairs[pair_key], device=device)
+                    else:
+                        pair = load_pair_for_training(pair_path, device=device, pair_cache=pair_cache)
+                    pair = crop_pair_for_training(pair, crop_size=training_crop_size, generator=generator)
+                    pair = resize_pair_for_training(pair, max_image_size=training_max_image_size)
+                    yield pair_path, pair_key, pair, pair_acceptance, true_geometry_match_count
+
+            batched_descriptor_maps = None
+            if batched_descriptor_forward and not sparse_maps_required:
+                batch_items = list(iter_batch_items())
+                batch_pairs_for_forward = [item[2] for item in batch_items]
+                if can_batch_descriptor_forward(batch_pairs_for_forward):
+                    with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                        batched_descriptor_maps = compute_student_teacher_descriptor_maps_batched(
+                            model,
+                            batch_pairs_for_forward,
+                            train_blended_descriptors=train_blended_descriptors,
+                            texture_blend_weight=texture_blend_weight,
+                            include_heatmaps=True,
+                            activation_checkpointing=use_activation_checkpointing,
+                        )
+                    batched_descriptor_forward_pairs += len(batch_pairs_for_forward)
+            else:
+                batch_items = iter_batch_items()
+            for item_index, item in enumerate(batch_items):
+                pair_path, pair_key, pair, pair_acceptance, true_geometry_match_count = item
                 sparse_maps_a: TrainingSparseMaps | None = None
                 sparse_maps_b: TrainingSparseMaps | None = None
                 if sparse_maps_required:
@@ -5845,15 +6157,18 @@ def train_step(
                         teacher_a = model.texture_descriptor_map_single(pair.view_a.unsqueeze(0))
                         teacher_b = model.texture_descriptor_map_single(pair.view_b.unsqueeze(0))
                 else:
-                    with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
-                        descriptor_maps = compute_student_teacher_descriptor_maps(
-                            model,
-                            pair,
-                            train_blended_descriptors=train_blended_descriptors,
-                            texture_blend_weight=texture_blend_weight,
-                            include_heatmaps=True,
-                            activation_checkpointing=use_activation_checkpointing,
-                        )
+                    if batched_descriptor_maps is None:
+                        with autocast_context(device, enabled=use_amp, dtype=amp_dtype):
+                            descriptor_maps = compute_student_teacher_descriptor_maps(
+                                model,
+                                pair,
+                                train_blended_descriptors=train_blended_descriptors,
+                                texture_blend_weight=texture_blend_weight,
+                                include_heatmaps=True,
+                                activation_checkpointing=use_activation_checkpointing,
+                            )
+                    else:
+                        descriptor_maps = batched_descriptor_maps[item_index]
                     if len(descriptor_maps) == 4:
                         descriptors_a, descriptors_b, teacher_a, teacher_b = descriptor_maps
                         heatmap_a = None
@@ -6234,6 +6549,10 @@ def train_step(
                                 teacher_score_floor_weight=graph_matcher_teacher_score_floor_weight,
                                 teacher_score_floor_tolerance=graph_matcher_teacher_score_floor_tolerance,
                                 teacher_score_floor_min_score=graph_matcher_teacher_score_floor_min_score,
+                                teacher_rank_weight=graph_matcher_teacher_rank_weight,
+                                teacher_rank_topk=graph_matcher_teacher_rank_topk,
+                                teacher_rank_tolerance=graph_matcher_teacher_rank_tolerance,
+                                teacher_rank_min_score=graph_matcher_teacher_rank_min_score,
                                 teacher_match_count_floor_weight=graph_matcher_teacher_match_count_floor_weight,
                                 teacher_match_count_floor_threshold=(
                                     graph_matcher_teacher_match_count_floor_threshold
@@ -6616,7 +6935,8 @@ def train_step(
                 scaled_micro_loss.backward()
             valid_micro_batches += 1
         if valid_micro_batches == 0:
-            raise RuntimeError("no valid correspondences sampled")
+            optimizer.zero_grad(set_to_none=True)
+            return skipped_training_metrics(0.0)
         if use_grad_scaler:
             grad_scaler.unscale_(optimizer)
             grad_scaler_unscaled = True
@@ -6630,34 +6950,7 @@ def train_step(
         if not metric_rows:
             raise RuntimeError("no valid correspondences sampled")
         reported_loss = sum(loss_values) / float(len(loss_values)) if loss_values else float("nan")
-        metrics = skipped_step_metrics(
-            torch.tensor(reported_loss, device=device),
-            metric_rows,
-            sampled_count=sampled_count,
-        )
-        metrics.update(aggregate_graph_matcher_loss_metrics(graph_metric_rows))
-        metrics.update(auxiliary_loss_metrics())
-        metrics["pseudo_label_points"] = float(pseudo_label_points)
-        metrics["pseudo_keypoint_points"] = float(pseudo_keypoint_points)
-        metrics["pseudo_label_pairs"] = float(pseudo_label_pairs)
-        metrics["false_match_points"] = float(false_match_points)
-        metrics["false_match_pairs"] = float(false_match_pairs)
-        metrics["online_false_match_points"] = float(online_false_match_points)
-        metrics["online_false_match_pairs"] = float(online_false_match_pairs)
-        metrics["illumination_consistency_points"] = float(illumination_consistency_points)
-        metrics["illumination_consistency_pairs"] = float(illumination_consistency_pairs_used)
-        metrics["illumination_match_points"] = float(illumination_match_points)
-        metrics["illumination_match_pairs"] = float(illumination_match_pairs_used)
-        metrics["pose_easy_pairs"] = pose_counts["pose_easy_pairs"]
-        metrics["pose_medium_pairs"] = pose_counts["pose_medium_pairs"]
-        metrics["pose_hard_pairs"] = pose_counts["pose_hard_pairs"]
-        metrics["pose_unknown_pairs"] = pose_counts["pose_unknown_pairs"]
-        metrics["pose_mean_loss_weight"] = (
-            pose_counts["pose_weight_sum"] / pose_counts["pose_weight_pairs"]
-            if pose_counts["pose_weight_pairs"] > 0.0
-            else 1.0
-        )
-        return metrics
+        return skipped_training_metrics(reported_loss)
     if use_grad_scaler:
         grad_scaler.step(optimizer)
         grad_scaler.update()
@@ -6681,6 +6974,7 @@ def train_step(
         "illumination_consistency_pairs": float(illumination_consistency_pairs_used),
         "illumination_match_points": float(illumination_match_points),
         "illumination_match_pairs": float(illumination_match_pairs_used),
+        "batched_descriptor_forward_pairs": float(batched_descriptor_forward_pairs),
         "pose_easy_pairs": pose_counts["pose_easy_pairs"],
         "pose_medium_pairs": pose_counts["pose_medium_pairs"],
         "pose_hard_pairs": pose_counts["pose_hard_pairs"],
@@ -7271,6 +7565,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--amp-dtype", choices=AMP_DTYPE_CHOICES, default="float16")
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--batched-descriptor-forward", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=0)
     parser.add_argument("--save-every-epoch", action="store_true")
@@ -7478,6 +7773,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-matcher-teacher-score-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-tolerance", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-score-floor-min-score", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-weight", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-topk", type=int, default=8)
+    parser.add_argument("--graph-matcher-teacher-rank-tolerance", type=float, default=0.0)
+    parser.add_argument("--graph-matcher-teacher-rank-min-score", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-weight", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-threshold", type=float, default=0.0)
     parser.add_argument("--graph-matcher-teacher-match-count-floor-margin", type=float, default=0.0)
@@ -7794,6 +8093,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--graph-matcher-teacher-score-floor-tolerance must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_score_floor_min_score)):
         parser.error("--graph-matcher-teacher-score-floor-min-score must be finite")
+    if args.graph_matcher_teacher_rank_weight < 0.0:
+        parser.error("--graph-matcher-teacher-rank-weight must be nonnegative")
+    if args.graph_matcher_teacher_rank_topk < 0:
+        parser.error("--graph-matcher-teacher-rank-topk must be nonnegative")
+    if args.graph_matcher_teacher_rank_tolerance < 0.0:
+        parser.error("--graph-matcher-teacher-rank-tolerance must be nonnegative")
+    if not math.isfinite(float(args.graph_matcher_teacher_rank_min_score)):
+        parser.error("--graph-matcher-teacher-rank-min-score must be finite")
     if args.graph_matcher_teacher_match_count_floor_weight < 0.0:
         parser.error("--graph-matcher-teacher-match-count-floor-weight must be nonnegative")
     if not math.isfinite(float(args.graph_matcher_teacher_match_count_floor_threshold)):
@@ -7816,12 +8123,13 @@ def parse_args() -> argparse.Namespace:
     if (
         args.graph_matcher_teacher_guard_weight > 0.0
         or args.graph_matcher_teacher_score_floor_weight > 0.0
+        or args.graph_matcher_teacher_rank_weight > 0.0
         or args.graph_matcher_teacher_match_count_floor_weight > 0.0
         or args.graph_matcher_teacher_match_count_ceiling_weight > 0.0
         or args.graph_matcher_teacher_distillation_weight > 0.0
     ) and args.graph_matcher_teacher_guard_state is None:
         parser.error(
-            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, match-count floor, match-count ceiling, or distillation weight is positive"
+            "--graph-matcher-teacher-guard-state is required when teacher guard, score floor, rank, match-count floor, match-count ceiling, or distillation weight is positive"
         )
     if not math.isfinite(float(args.graph_matcher_positive_dustbin_guard_reject_threshold)):
         parser.error("--graph-matcher-positive-dustbin-guard-reject-threshold must be finite")
@@ -8094,6 +8402,18 @@ def save_pytorch_training_state(
             "graph_matcher_teacher_score_floor_min_score": float(
                 getattr(args, "graph_matcher_teacher_score_floor_min_score", 0.0)
             ),
+            "graph_matcher_teacher_rank_weight": float(
+                getattr(args, "graph_matcher_teacher_rank_weight", 0.0)
+            ),
+            "graph_matcher_teacher_rank_topk": int(
+                getattr(args, "graph_matcher_teacher_rank_topk", 0)
+            ),
+            "graph_matcher_teacher_rank_tolerance": float(
+                getattr(args, "graph_matcher_teacher_rank_tolerance", 0.0)
+            ),
+            "graph_matcher_teacher_rank_min_score": float(
+                getattr(args, "graph_matcher_teacher_rank_min_score", 0.0)
+            ),
             "graph_matcher_teacher_match_count_floor_weight": float(
                 getattr(args, "graph_matcher_teacher_match_count_floor_weight", 0.0)
             ),
@@ -8204,6 +8524,10 @@ def main() -> int:
             f"score_floor_weight={args.graph_matcher_teacher_score_floor_weight:.3f} "
             f"score_floor_tolerance={args.graph_matcher_teacher_score_floor_tolerance:.3f} "
             f"score_floor_min_score={args.graph_matcher_teacher_score_floor_min_score:.3f} "
+            f"rank_weight={args.graph_matcher_teacher_rank_weight:.3f} "
+            f"rank_topk={args.graph_matcher_teacher_rank_topk} "
+            f"rank_tolerance={args.graph_matcher_teacher_rank_tolerance:.3f} "
+            f"rank_min_score={args.graph_matcher_teacher_rank_min_score:.3f} "
             f"match_count_floor_weight={args.graph_matcher_teacher_match_count_floor_weight:.3f} "
             f"match_count_floor_threshold={args.graph_matcher_teacher_match_count_floor_threshold:.3f} "
             f"match_count_floor_margin={args.graph_matcher_teacher_match_count_floor_margin:.3f} "
@@ -8411,6 +8735,7 @@ def main() -> int:
                 "amp_enabled",
                 "amp_scale",
                 "activation_checkpointing",
+                "batched_descriptor_forward_pairs",
                 "freeze_extractor_warmup_active",
                 "descriptor_geometry_safety_schedule",
                 "descriptor_geometry_blend_weight",
@@ -8453,6 +8778,10 @@ def main() -> int:
                 "graph_matcher_teacher_score_floor_weight",
                 "graph_matcher_teacher_score_floor_tolerance",
                 "graph_matcher_teacher_score_floor_min_score",
+                "graph_matcher_teacher_rank_weight",
+                "graph_matcher_teacher_rank_topk",
+                "graph_matcher_teacher_rank_tolerance",
+                "graph_matcher_teacher_rank_min_score",
                 "graph_matcher_teacher_match_count_floor_weight",
                 "graph_matcher_teacher_match_count_floor_threshold",
                 "graph_matcher_teacher_match_count_floor_margin",
@@ -8881,6 +9210,10 @@ def main() -> int:
                 graph_matcher_teacher_score_floor_weight=args.graph_matcher_teacher_score_floor_weight,
                 graph_matcher_teacher_score_floor_tolerance=args.graph_matcher_teacher_score_floor_tolerance,
                 graph_matcher_teacher_score_floor_min_score=args.graph_matcher_teacher_score_floor_min_score,
+                graph_matcher_teacher_rank_weight=args.graph_matcher_teacher_rank_weight,
+                graph_matcher_teacher_rank_topk=args.graph_matcher_teacher_rank_topk,
+                graph_matcher_teacher_rank_tolerance=args.graph_matcher_teacher_rank_tolerance,
+                graph_matcher_teacher_rank_min_score=args.graph_matcher_teacher_rank_min_score,
                 graph_matcher_teacher_match_count_floor_weight=(
                     args.graph_matcher_teacher_match_count_floor_weight
                 ),
@@ -8928,6 +9261,7 @@ def main() -> int:
                 amp_dtype=amp_dtype,
                 grad_scaler=grad_scaler,
                 activation_checkpointing=args.activation_checkpointing,
+                batched_descriptor_forward=args.batched_descriptor_forward,
                 freeze_extractor_warmup_active=freeze_extractor_warmup_active,
             )
             writer.writerow(
@@ -9016,6 +9350,18 @@ def main() -> int:
                     ),
                     "graph_matcher_teacher_score_floor_min_score": (
                         args.graph_matcher_teacher_score_floor_min_score if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_rank_weight": (
+                        args.graph_matcher_teacher_rank_weight if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_rank_topk": (
+                        args.graph_matcher_teacher_rank_topk if args.train_graph_matcher else 0
+                    ),
+                    "graph_matcher_teacher_rank_tolerance": (
+                        args.graph_matcher_teacher_rank_tolerance if args.train_graph_matcher else 0.0
+                    ),
+                    "graph_matcher_teacher_rank_min_score": (
+                        args.graph_matcher_teacher_rank_min_score if args.train_graph_matcher else 0.0
                     ),
                     "graph_matcher_teacher_match_count_floor_weight": (
                         args.graph_matcher_teacher_match_count_floor_weight if args.train_graph_matcher else 0.0

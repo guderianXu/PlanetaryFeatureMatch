@@ -166,6 +166,27 @@ class PFMTrainingStabilityTest(unittest.TestCase):
         self.assertTrue(good.is_last_good)
         self.assertFalse(bad.is_last_good)
 
+    def test_tracker_requests_last_good_save_only_on_score_improvement(self):
+        tracker = TrainingStabilityTracker(
+            thresholds=StabilityThresholds(
+                min_steps_before_early_stop=5,
+                rolling_window=3,
+                max_nan_in_window=2,
+                max_loss_multiplier=3.0,
+                min_top1_mean=0.2,
+            )
+        )
+
+        first = tracker.update(1, {"loss": 5.0, "top1_accuracy": 0.8})
+        same_score = tracker.update(2, {"loss": 4.5, "top1_accuracy": 0.8})
+        worse_score = tracker.update(3, {"loss": 4.0, "top1_accuracy": 0.7})
+        better_score = tracker.update(4, {"loss": 4.0, "top1_accuracy": 0.9})
+
+        self.assertTrue(first.should_save_last_good)
+        self.assertFalse(same_score.should_save_last_good)
+        self.assertFalse(worse_score.should_save_last_good)
+        self.assertTrue(better_score.should_save_last_good)
+
     def test_tracker_exposes_rolling_diagnostics_for_training_logs(self):
         tracker = TrainingStabilityTracker(
             thresholds=StabilityThresholds(

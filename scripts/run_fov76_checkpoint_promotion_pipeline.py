@@ -25,10 +25,12 @@ FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE = "fov76_geo5_geo10_extreme_rescue"
 FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE = (
     "fov76_geo5_geo10_extreme_rescue_lowmatch_guard"
 )
+FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE = "fov76_graph_magsac2_min24_balanced"
 TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE = "true_geometry_error5_overlap10"
 FOV76_POST_FILTER_PROFILES = (
     FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE,
     FOV76_GEO5_GEO10_EXTREME_RESCUE_LOW_MATCH_GUARD_PROFILE,
+    FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE,
     TRUE_GEOMETRY_ERROR5_OVERLAP10_PROFILE,
 )
 FOV76_RANSAC_MINMATCH16_DUAL_RESCUE_PROFILE = "fov76_ransac_minmatch16"
@@ -164,6 +166,13 @@ def apply_post_filter_profile(args: argparse.Namespace) -> None:
         _set_profile_default(args, "true_geometry_selector_pipeline", True, False)
         _set_profile_default(args, "formal_target_variants", "extreme_02,extreme_03", "")
         _set_profile_default(args, "formal_protected_variants", "mid_01,mid_02,extreme_01,nadir", "")
+        return
+    if profile == FOV76_GRAPH_MAGSAC2_MIN24_BALANCED_PROFILE:
+        _set_profile_default(args, "geometry_filter", "none", "local")
+        _set_profile_default(args, "geometry_threshold_px", 2.0, 10.0)
+        _set_profile_default(args, "filtered_geometry_filter", "magsac", "magsac")
+        _set_profile_default(args, "filtered_min_matches", 24, 16)
+        _set_profile_default(args, "min_score_values", "18", "-1")
         return
     if profile == FOV76_GEO5_GEO10_EXTREME_RESCUE_PROFILE:
         _set_profile_default(args, "geometry_threshold_px", 5.0, 10.0)
@@ -363,7 +372,7 @@ def _add_common_sweep_options(
             "--geometry-threshold-px-values",
             str(args.geometry_threshold_px),
             "--min-score-values",
-            "-1",
+            str(getattr(args, "min_score_values", "-1")),
             "--graph-dustbin-delta-values",
             "0",
             "--graph-acceptance-margin-values",
@@ -1790,6 +1799,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--true-geometry-min-valid-fraction", type=float, default=0.0)
     parser.add_argument("--filtered-min-matches", type=int, default=16)
+    parser.add_argument(
+        "--min-score-values",
+        default="-1",
+        help="Comma-separated GraphMatcher score thresholds forwarded to run_graph_filter_sweep.py.",
+    )
     parser.add_argument("--filtered-min-matches-by-variant", action="append", default=[])
     parser.add_argument("--baseline-filtered-min-matches-by-variant", action="append", default=[])
     parser.add_argument("--candidate-filtered-min-matches-by-variant", action="append", default=[])

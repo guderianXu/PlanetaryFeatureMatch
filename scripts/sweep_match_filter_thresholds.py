@@ -25,9 +25,16 @@ class SourceSpec:
 
 @dataclass(frozen=True)
 class MatchPrediction:
+    split: str
+    pair_index: int
+    base_id: str
     target_variant: str
     reject_probability: float
     correct: int
+    x_a: float = 0.0
+    y_a: float = 0.0
+    x_b: float = 0.0
+    y_b: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,11 @@ class Metrics:
     wrong: int
     lightglue_correct: int = 0
     lightglue_wrong: int = 0
+    pair_mean_coverage_mean: float = 0.0
+    lg_only_correct_cells: int = 0
+    candidate_only_correct_cells: int = 0
+    pair_mean_largest_cell_ratio: float = 0.0
+    coverage_pair_count: int = 0
 
     @property
     def precision(self) -> float:
@@ -60,7 +72,20 @@ class Metrics:
             "lightglue_wrong": self.lightglue_wrong,
             "correct_delta_vs_lightglue": self.correct_delta_vs_lightglue,
             "wrong_delta_vs_lightglue": self.wrong_delta_vs_lightglue,
+            "pair_mean_coverage_mean": self.pair_mean_coverage_mean,
+            "lg_only_correct_cells": self.lg_only_correct_cells,
+            "candidate_only_correct_cells": self.candidate_only_correct_cells,
+            "pair_mean_largest_cell_ratio": self.pair_mean_largest_cell_ratio,
         }
+
+    @property
+    def coverage_score(self) -> float:
+        return (
+            self.pair_mean_coverage_mean
+            + 0.0015 * self.candidate_only_correct_cells
+            - 0.0015 * self.lg_only_correct_cells
+            - 0.20 * self.pair_mean_largest_cell_ratio
+        )
 
 
 class VariantPrefixStats:
@@ -90,7 +115,14 @@ class SourceData:
     def variants(self) -> set[str]:
         return set(self.by_variant)
 
-    def evaluate(self, thresholds: dict[str, float], *, default_threshold: float) -> Metrics:
+    def evaluate(
+        self,
+        thresholds: dict[str, float],
+        *,
+        default_threshold: float,
+        coverage_grid_size: int = 8,
+        coverage_image_size: float = 768.0,
+    ) -> Metrics:
         matches = 0
         correct = 0
         wrong = 0
@@ -99,12 +131,26 @@ class SourceData:
             matches += kept
             correct += variant_correct
             wrong += variant_wrong
+        selected_rows = [
+            row
+            for row in self.rows
+            if row.reject_probability < thresholds.get(row.target_variant, default_threshold)
+        ]
+        coverage = _coverage_for_predictions(
+            selected_rows,
+            grid_size=coverage_grid_size,
+            image_size=coverage_image_size,
+        )
         return Metrics(
             matches=matches,
             correct=correct,
             wrong=wrong,
             lightglue_correct=self.spec.lightglue_correct,
             lightglue_wrong=self.spec.lightglue_wrong,
+            pair_mean_coverage_mean=float(coverage["pair_mean_coverage_mean"]),
+            candidate_only_correct_cells=int(coverage["candidate_only_correct_cells"]),
+            pair_mean_largest_cell_ratio=float(coverage["pair_mean_largest_cell_ratio"]),
+            coverage_pair_count=int(coverage["coverage_pair_count"]),
         )
 
 
@@ -116,12 +162,24 @@ class ThresholdResult:
     validation_aggregate: Metrics
     eligible: bool
 
-    def ranking_key(self) -> tuple[int, int, float, int]:
+    def ranking_key(self, *, coverage_aware: bool = False) -> tuple[float, ...]:
+        if coverage_aware:
+            return (
+                float(self.select.correct_delta_vs_lightglue),
+                float(-self.select.wrong_delta_vs_lightglue),
+                float(self.select.precision),
+                float(self.select.coverage_score),
+                float(self.select.pair_mean_coverage_mean),
+                float(-self.select.lg_only_correct_cells),
+                float(self.select.candidate_only_correct_cells),
+                float(-self.select.pair_mean_largest_cell_ratio),
+                float(self.select.correct),
+            )
         return (
-            self.select.correct_delta_vs_lightglue,
-            -self.select.wrong_delta_vs_lightglue,
-            self.select.precision,
-            self.select.correct,
+            float(self.select.correct_delta_vs_lightglue),
+            float(-self.select.wrong_delta_vs_lightglue),
+            float(self.select.precision),
+            float(self.select.correct),
         )
 
 
@@ -150,18 +208,81 @@ def _float_value(row: dict[str, str], key: str) -> float:
     return parsed
 
 
+def _optional_float_value(row: dict[str, str], key: str, default: float = 0.0) -> float:
+    value = row.get(key, "")
+    if value == "":
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
 def _read_predictions(path: Path) -> list[MatchPrediction]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         rows = []
         for row in csv.DictReader(handle):
             rows.append(
                 MatchPrediction(
+                    split=row.get("split", ""),
+                    pair_index=int(round(_optional_float_value(row, "pair_index", 0.0))),
+                    base_id=row.get("base_id", ""),
                     target_variant=row.get("target_variant", ""),
                     reject_probability=_float_value(row, "reject_probability"),
                     correct=1 if _float_value(row, "correct") > 0.0 else 0,
+                    x_a=_optional_float_value(row, "point_a_x_px", 0.0),
+                    y_a=_optional_float_value(row, "point_a_y_px", 0.0),
+                    x_b=_optional_float_value(row, "point_b_x_px", 0.0),
+                    y_b=_optional_float_value(row, "point_b_y_px", 0.0),
                 )
             )
     return rows
+
+
+def _prediction_cell(x: float, y: float, *, grid_size: int, image_size: float) -> tuple[int, int]:
+    ix = max(0, min(grid_size - 1, int(math.floor(x / image_size * grid_size))))
+    iy = max(0, min(grid_size - 1, int(math.floor(y / image_size * grid_size))))
+    return ix, iy
+
+
+def _coverage_for_predictions(
+    rows: Sequence[MatchPrediction],
+    *,
+    grid_size: int,
+    image_size: float,
+) -> dict[str, float | int]:
+    grouped: dict[tuple[str, int], list[MatchPrediction]] = {}
+    for row in rows:
+        grouped.setdefault((row.split, row.pair_index), []).append(row)
+    coverage_values: list[float] = []
+    largest_values: list[float] = []
+    candidate_only_cells = 0
+    for items in grouped.values():
+        cells_a: set[tuple[int, int]] = set()
+        cells_b: set[tuple[int, int]] = set()
+        counts: dict[tuple[str, int, int], int] = {}
+        correct_count = 0
+        for row in items:
+            if row.correct <= 0:
+                continue
+            correct_count += 1
+            ax, ay = _prediction_cell(row.x_a, row.y_a, grid_size=grid_size, image_size=image_size)
+            bx, by = _prediction_cell(row.x_b, row.y_b, grid_size=grid_size, image_size=image_size)
+            cells_a.add((ax, ay))
+            cells_b.add((bx, by))
+            counts[("a", ax, ay)] = counts.get(("a", ax, ay), 0) + 1
+            counts[("b", bx, by)] = counts.get(("b", bx, by), 0) + 1
+        total_cells = grid_size * grid_size
+        coverage_values.append((len(cells_a) + len(cells_b)) / (2 * total_cells))
+        candidate_only_cells += len(cells_a) + len(cells_b)
+        largest_values.append(max(counts.values()) / correct_count if correct_count > 0 and counts else 0.0)
+    return {
+        "pair_mean_coverage_mean": float(sum(coverage_values) / len(coverage_values)) if coverage_values else 0.0,
+        "candidate_only_correct_cells": candidate_only_cells,
+        "pair_mean_largest_cell_ratio": float(sum(largest_values) / len(largest_values)) if largest_values else 0.0,
+        "coverage_pair_count": len(grouped),
+    }
 
 
 def _load_source(spec: SourceSpec) -> SourceData:
@@ -207,12 +328,30 @@ def _candidate_thresholds_by_variant(
 
 
 def _aggregate(metrics: Sequence[Metrics]) -> Metrics:
+    coverage_pair_count = sum(max(0, item.coverage_pair_count) for item in metrics)
+    if coverage_pair_count > 0:
+        pair_mean_coverage = (
+            sum(item.pair_mean_coverage_mean * item.coverage_pair_count for item in metrics)
+            / coverage_pair_count
+        )
+        pair_mean_largest = (
+            sum(item.pair_mean_largest_cell_ratio * item.coverage_pair_count for item in metrics)
+            / coverage_pair_count
+        )
+    else:
+        pair_mean_coverage = 0.0
+        pair_mean_largest = 0.0
     return Metrics(
         matches=sum(item.matches for item in metrics),
         correct=sum(item.correct for item in metrics),
         wrong=sum(item.wrong for item in metrics),
         lightglue_correct=sum(item.lightglue_correct for item in metrics),
         lightglue_wrong=sum(item.lightglue_wrong for item in metrics),
+        pair_mean_coverage_mean=pair_mean_coverage,
+        lg_only_correct_cells=sum(item.lg_only_correct_cells for item in metrics),
+        candidate_only_correct_cells=sum(item.candidate_only_correct_cells for item in metrics),
+        pair_mean_largest_cell_ratio=pair_mean_largest,
+        coverage_pair_count=coverage_pair_count,
     )
 
 
@@ -224,12 +363,27 @@ def _evaluate_thresholds(
     default_threshold: float,
     min_select_correct_delta: int,
     max_select_wrong_delta: int,
+    coverage_grid_size: int,
+    coverage_image_size: float,
 ) -> ThresholdResult:
     select_metrics = _aggregate(
-        [source.evaluate(thresholds, default_threshold=default_threshold) for source in select_sources]
+        [
+            source.evaluate(
+                thresholds,
+                default_threshold=default_threshold,
+                coverage_grid_size=coverage_grid_size,
+                coverage_image_size=coverage_image_size,
+            )
+            for source in select_sources
+        ]
     )
     validation = {
-        source.spec.name: source.evaluate(thresholds, default_threshold=default_threshold)
+        source.spec.name: source.evaluate(
+            thresholds,
+            default_threshold=default_threshold,
+            coverage_grid_size=coverage_grid_size,
+            coverage_image_size=coverage_image_size,
+        )
         for source in validation_sources
     }
     validation_aggregate = _aggregate(list(validation.values()))
@@ -256,6 +410,9 @@ def sweep_thresholds(
     default_threshold: float,
     min_select_correct_delta: int,
     max_select_wrong_delta: int,
+    coverage_aware_ranking: bool,
+    coverage_grid_size: int,
+    coverage_image_size: float,
     top_k: int,
 ) -> list[ThresholdResult]:
     thresholds_by_variant = _candidate_thresholds_by_variant(
@@ -277,6 +434,8 @@ def sweep_thresholds(
                     default_threshold=default_threshold,
                     min_select_correct_delta=min_select_correct_delta,
                     max_select_wrong_delta=max_select_wrong_delta,
+                    coverage_grid_size=coverage_grid_size,
+                    coverage_image_size=coverage_image_size,
                 )
             )
     elif mode == "per-target-variant":
@@ -291,13 +450,19 @@ def sweep_thresholds(
                     default_threshold=default_threshold,
                     min_select_correct_delta=min_select_correct_delta,
                     max_select_wrong_delta=max_select_wrong_delta,
+                    coverage_grid_size=coverage_grid_size,
+                    coverage_image_size=coverage_image_size,
                 )
             )
     else:
         raise ValueError(f"unsupported mode: {mode}")
 
     eligible = [result for result in results if result.eligible]
-    ranked = sorted(eligible or results, key=lambda result: result.ranking_key(), reverse=True)
+    ranked = sorted(
+        eligible or results,
+        key=lambda result: result.ranking_key(coverage_aware=coverage_aware_ranking),
+        reverse=True,
+    )
     return ranked[:top_k]
 
 
@@ -377,6 +542,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-thresholds-per-variant", type=int, default=64)
     parser.add_argument("--default-threshold", type=float, default=0.16815922380501608)
     parser.add_argument("--extra-threshold", action="append", type=float, default=[])
+    parser.add_argument("--coverage-aware-ranking", action="store_true")
+    parser.add_argument("--coverage-grid-size", type=int, default=8)
+    parser.add_argument("--coverage-image-size", type=float, default=768.0)
     parser.add_argument("--top-k", type=int, default=50)
     args = parser.parse_args(argv)
     if args.max_thresholds_per_variant <= 0:
@@ -385,6 +553,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         raise ValueError("--top-k must be positive")
     if not math.isfinite(args.default_threshold):
         raise ValueError("--default-threshold must be finite")
+    if args.coverage_grid_size <= 0:
+        raise ValueError("--coverage-grid-size must be positive")
+    if args.coverage_image_size <= 0.0 or not math.isfinite(args.coverage_image_size):
+        raise ValueError("--coverage-image-size must be finite and positive")
     return args
 
 
@@ -403,6 +575,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default_threshold=args.default_threshold,
         min_select_correct_delta=args.min_select_correct_delta,
         max_select_wrong_delta=args.max_select_wrong_delta,
+        coverage_aware_ranking=args.coverage_aware_ranking,
+        coverage_grid_size=args.coverage_grid_size,
+        coverage_image_size=args.coverage_image_size,
         top_k=args.top_k,
     )
     if not results:
@@ -422,6 +597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_select_wrong_delta": args.max_select_wrong_delta,
         "max_thresholds_per_variant": args.max_thresholds_per_variant,
         "default_threshold": args.default_threshold,
+        "coverage_aware_ranking": args.coverage_aware_ranking,
+        "coverage_grid_size": args.coverage_grid_size,
+        "coverage_image_size": args.coverage_image_size,
         "top_k": args.top_k,
         "eligible_results": sum(1 for result in results if result.eligible),
         "best": {

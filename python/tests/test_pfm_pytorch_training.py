@@ -47,6 +47,194 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(cache.hits, 1)
         self.assertEqual(cache.misses, 1)
 
+    def test_compute_student_teacher_descriptor_maps_batched_stacks_pairs(self):
+        pair_a = SyntheticPair(
+            view_a=torch.ones(1, 3, 3),
+            view_b=torch.ones(1, 3, 3) * 2.0,
+            warp_a_to_b=torch.zeros(3, 3, 2),
+            valid_mask=torch.ones(3, 3, dtype=torch.bool),
+        )
+        pair_b = SyntheticPair(
+            view_a=torch.ones(1, 3, 3) * 3.0,
+            view_b=torch.ones(1, 3, 3) * 4.0,
+            warp_a_to_b=torch.zeros(3, 3, 2),
+            valid_mask=torch.ones(3, 3, dtype=torch.bool),
+        )
+
+        class TeacherModel:
+            def texture_descriptor_map_single(self, image):
+                return image + 100.0
+
+        calls = []
+
+        def fake_learned(_model, image, **_kwargs):
+            calls.append(tuple(image.shape))
+            return image + 10.0, image + 20.0
+
+        with mock.patch.object(train, "learned_descriptor_and_heatmap_single", side_effect=fake_learned):
+            maps = train.compute_student_teacher_descriptor_maps_batched(
+                TeacherModel(),
+                [pair_a, pair_b],
+                include_heatmaps=True,
+            )
+
+        self.assertEqual(calls, [(2, 1, 3, 3), (2, 1, 3, 3)])
+        self.assertEqual(len(maps), 2)
+        self.assertTrue(torch.equal(maps[0][0], pair_a.view_a.unsqueeze(0) + 10.0))
+        self.assertTrue(torch.equal(maps[0][1], pair_a.view_b.unsqueeze(0) + 10.0))
+        self.assertTrue(torch.equal(maps[1][2], pair_b.view_a.unsqueeze(0) + 100.0))
+        self.assertTrue(torch.equal(maps[1][5], pair_b.view_b.unsqueeze(0) + 20.0))
+
+    def test_train_step_uses_batched_descriptor_forward_when_enabled(self):
+        pair_a_path = Path("pair_a.pt")
+        pair_b_path = Path("pair_b.pt")
+        pair_a = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        pair_b = SyntheticPair(
+            view_a=torch.ones(1, 2, 2) * 2.0,
+            view_b=torch.ones(1, 2, 2) * 2.0,
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        descriptor_maps = [
+            (
+                torch.ones(1, 1, 2, 2),
+                torch.ones(1, 1, 2, 2),
+                torch.ones(1, 1, 2, 2),
+                torch.ones(1, 1, 2, 2),
+                torch.ones(1, 1, 2, 2),
+                torch.ones(1, 1, 2, 2),
+            ),
+            (
+                torch.ones(1, 1, 2, 2) * 2.0,
+                torch.ones(1, 1, 2, 2) * 2.0,
+                torch.ones(1, 1, 2, 2) * 2.0,
+                torch.ones(1, 1, 2, 2) * 2.0,
+                torch.ones(1, 1, 2, 2) * 2.0,
+                torch.ones(1, 1, 2, 2) * 2.0,
+            ),
+        ]
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_a_path, pair_b_path]),
+            mock.patch.object(
+                train,
+                "load_libtorch_pair_archive",
+                side_effect=lambda path, **_kwargs: pair_a if Path(path) == pair_a_path else pair_b,
+            ),
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps_batched", return_value=descriptor_maps) as batched,
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps") as single,
+            mock.patch.object(train, "sample_feature_correspondences", return_value=(torch.zeros(2, 2), torch.zeros(2, 2))),
+            mock.patch.object(
+                train,
+                "descriptor_map_pair_loss",
+                return_value=(
+                    parameter * 1.0,
+                    {
+                        "top1_accuracy": 1.0,
+                        "top5_accuracy": 1.0,
+                        "top10_accuracy": 1.0,
+                        "mean_positive_rank": 1.0,
+                        "mean_positive_score": 1.0,
+                        "mean_negative_score": 0.0,
+                    },
+                ),
+            ),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_a_path, pair_b_path],
+                device=torch.device("cpu"),
+                batch_pairs=2,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                batched_descriptor_forward=True,
+            )
+
+        batched.assert_called_once()
+        single.assert_not_called()
+        self.assertEqual(metrics["batched_descriptor_forward_pairs"], 2.0)
+
+    def test_train_step_streams_pairs_when_batched_descriptor_forward_disabled(self):
+        pair_a_path = Path("pair_a.pt")
+        pair_b_path = Path("pair_b.pt")
+        pair_a = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        pair_b = SyntheticPair(
+            view_a=torch.ones(1, 2, 2) * 2.0,
+            view_b=torch.ones(1, 2, 2) * 2.0,
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        )
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        loaded_paths = []
+        loaded_paths_at_descriptor_forward = []
+
+        def fake_load(path, **_kwargs):
+            loaded_paths.append(Path(path))
+            return pair_a if Path(path) == pair_a_path else pair_b
+
+        def fake_descriptor_maps(_model, pair, **_kwargs):
+            loaded_paths_at_descriptor_forward.append(list(loaded_paths))
+            image = pair.view_a.unsqueeze(0)
+            return image, image, image, image, image, image
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_a_path, pair_b_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", side_effect=fake_load),
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps", side_effect=fake_descriptor_maps),
+            mock.patch.object(train, "compute_student_teacher_descriptor_maps_batched") as batched,
+            mock.patch.object(train, "sample_feature_correspondences", return_value=(torch.zeros(2, 2), torch.zeros(2, 2))),
+            mock.patch.object(
+                train,
+                "descriptor_map_pair_loss",
+                return_value=(
+                    parameter * 1.0,
+                    {
+                        "top1_accuracy": 1.0,
+                        "top5_accuracy": 1.0,
+                        "top10_accuracy": 1.0,
+                        "mean_positive_rank": 1.0,
+                        "mean_positive_score": 1.0,
+                        "mean_negative_score": 0.0,
+                    },
+                ),
+            ),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_a_path, pair_b_path],
+                device=torch.device("cpu"),
+                batch_pairs=2,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+                batched_descriptor_forward=False,
+            )
+
+        batched.assert_not_called()
+        self.assertEqual(metrics["batched_descriptor_forward_pairs"], 0.0)
+        self.assertEqual(loaded_paths_at_descriptor_forward[0], [pair_a_path])
+        self.assertEqual(loaded_paths_at_descriptor_forward[1], [pair_a_path, pair_b_path])
+
     def test_sample_feature_correspondences_scales_image_pixels_to_feature_grid(self):
         view = torch.ones(1, 5, 9)
         warp = torch.zeros(5, 9, 2)
@@ -69,6 +257,29 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(tuple(points_a.shape), (1, 2))
         self.assertTrue(torch.allclose(points_a[0], torch.tensor([2.0, 1.0])))
         self.assertTrue(torch.allclose(points_b[0], torch.tensor([2.0, 1.0])))
+
+    def test_sample_feature_correspondences_uses_dense_mask_without_nonzero_sync(self):
+        view = torch.ones(1, 4, 5)
+        warp = torch.zeros(4, 5, 2)
+        warp[..., 0] = torch.arange(5, dtype=torch.float32).view(1, 5).expand(4, 5)
+        warp[..., 1] = torch.arange(4, dtype=torch.float32).view(4, 1).expand(4, 5)
+        valid = torch.zeros(4, 5, dtype=torch.bool)
+        valid[1, 2] = True
+        valid[3, 4] = True
+        pair = SyntheticPair(view_a=view, view_b=view, warp_a_to_b=warp, valid_mask=valid)
+
+        with mock.patch.object(train.torch, "nonzero", side_effect=AssertionError("unexpected nonzero sync")):
+            points_a, points_b = train.sample_feature_correspondences(
+                pair,
+                feature_height=4,
+                feature_width=5,
+                count=2,
+                min_intensity=0.0,
+                generator=torch.Generator().manual_seed(3),
+            )
+
+        self.assertEqual({tuple(row.tolist()) for row in points_a}, {(2.0, 1.0), (4.0, 3.0)})
+        self.assertEqual({tuple(row.tolist()) for row in points_b}, {(2.0, 1.0), (4.0, 3.0)})
 
     def test_sample_feature_correspondences_filters_dark_target_pixels(self):
         view_a = torch.ones(1, 5, 5)
@@ -2456,6 +2667,52 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertGreater(float(score_floor), 0.0)
         self.assertEqual(float(score_metrics["violations"]), 2.0)
         self.assertLess(float(score_metrics["score_delta_mean"]), 0.0)
+        self.assertAlmostEqual(float(identical), 0.0, places=6)
+        self.assertEqual(float(identical_metrics["violations"]), 0.0)
+
+    def test_graph_matcher_teacher_rank_preservation_loss_penalizes_rank_regression(self):
+        teacher_logits = torch.tensor(
+            [
+                [5.0, 3.0, -2.0, -5.0],
+                [3.0, 5.0, -2.0, -5.0],
+                [-2.0, -2.0, 5.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        student_logits = torch.tensor(
+            [
+                [2.0, 4.0, -2.0, -5.0],
+                [3.0, 5.0, -2.0, -5.0],
+                [-2.0, -2.0, 5.0, -5.0],
+                [-5.0, -5.0, -5.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        teacher = pfm_model.GraphMatcherOutput(teacher_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+        student = pfm_model.GraphMatcherOutput(student_logits, torch.empty((0, 2), dtype=torch.long), torch.empty((0,)))
+
+        loss, metrics = train.graph_matcher_teacher_rank_preservation_loss(
+            student,
+            teacher,
+            positive_count=3,
+            topk=1,
+            tolerance=0.25,
+            min_teacher_score=10.0,
+        )
+        identical, identical_metrics = train.graph_matcher_teacher_rank_preservation_loss(
+            teacher,
+            teacher,
+            positive_count=3,
+            topk=1,
+            tolerance=0.25,
+            min_teacher_score=10.0,
+        )
+
+        self.assertGreater(float(loss), 0.0)
+        self.assertGreater(float(metrics["edges"]), 0.0)
+        self.assertGreater(float(metrics["violations"]), 0.0)
+        self.assertLess(float(metrics["margin_delta_mean"]), 0.0)
         self.assertAlmostEqual(float(identical), 0.0, places=6)
         self.assertEqual(float(identical_metrics["violations"]), 0.0)
 
@@ -5646,6 +5903,15 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
 
         self.assertLessEqual(norm, 5.0001)
 
+    def test_clip_and_measure_gradients_reuses_clip_norm_when_clipping(self):
+        parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+        parameter.grad = torch.tensor([30.0, 40.0])
+
+        with mock.patch.object(train, "gradient_l2_norm", side_effect=AssertionError("extra sync")):
+            norm = train.clip_and_measure_gradients([parameter], max_grad_norm=5.0)
+
+        self.assertLessEqual(norm, 5.0001)
+
     def test_clip_and_measure_gradients_rejects_nonfinite_gradients(self):
         parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
         parameter.grad = torch.tensor([float("nan"), 1.0])
@@ -5671,6 +5937,54 @@ class PFMPyTorchTrainingTest(unittest.TestCase):
         self.assertEqual(metrics["points"], 16.0)
         self.assertEqual(metrics["grad_l2"], 0.0)
         self.assertAlmostEqual(metrics["top1_accuracy"], 0.25)
+
+    def test_train_step_skips_empty_correspondence_batch_without_optimizer_update(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        pair_path = Path("pair_empty_correspondence.pt")
+        pair = SyntheticPair(
+            view_a=torch.ones(1, 2, 2),
+            view_b=torch.ones(1, 2, 2),
+            warp_a_to_b=torch.zeros(2, 2, 2),
+            valid_mask=torch.zeros(2, 2, dtype=torch.bool),
+        )
+
+        with (
+            mock.patch.object(train, "sample_training_pairs_with_pseudo_labels", return_value=[pair_path]),
+            mock.patch.object(train, "load_libtorch_pair_archive", return_value=pair),
+            mock.patch.object(
+                train,
+                "compute_student_teacher_descriptor_maps",
+                return_value=(
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                    torch.ones(1, 1, 2, 2),
+                ),
+            ),
+            mock.patch.object(
+                train,
+                "sample_feature_correspondences",
+                return_value=(torch.empty(0, 2), torch.empty(0, 2)),
+            ),
+        ):
+            metrics = train.train_step(
+                object(),
+                optimizer,
+                [pair_path],
+                device=torch.device("cpu"),
+                batch_pairs=1,
+                samples_per_pair=2,
+                min_intensity=0.01,
+                generator=torch.Generator().manual_seed(7),
+                temperature=0.07,
+                teacher_weight=0.0,
+            )
+
+        self.assertEqual(metrics["skipped"], 1.0)
+        self.assertEqual(metrics["points"], 0.0)
+        self.assertEqual(metrics["grad_l2"], 0.0)
+        self.assertAlmostEqual(float(parameter.detach()), 1.0)
 
     def test_train_step_uses_grad_scaler_for_amp_before_optimizer_step(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))

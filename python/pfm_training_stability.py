@@ -96,11 +96,13 @@ class TrainingStabilityTracker:
         loss = finite_float(metrics.get("loss"))
         top1 = finite_float(metrics.get("top1_accuracy"))
         score = self.match_score(metrics)
+        previous_best_match_score = self.best_match_score
         self.best_match_score = max(self.best_match_score, score)
         recent_loss = self.window.mean("loss")
         if math.isfinite(recent_loss):
             self.best_recent_loss = min(self.best_recent_loss, recent_loss)
         is_last_good = loss is not None and top1 is not None and top1 >= self.thresholds.min_top1_mean
+        should_save_last_good = is_last_good and score > previous_best_match_score
         should_stop = False
         reason = ""
         if step >= self.thresholds.min_steps_before_early_stop:
@@ -147,7 +149,7 @@ class TrainingStabilityTracker:
         return StabilityDecision(
             should_stop=should_stop,
             should_save_latest=True,
-            should_save_last_good=is_last_good,
+            should_save_last_good=should_save_last_good,
             is_last_good=is_last_good,
             reason=reason,
         )

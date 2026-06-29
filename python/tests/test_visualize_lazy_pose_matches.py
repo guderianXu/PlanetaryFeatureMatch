@@ -265,6 +265,32 @@ class VisualizeLazyPoseMatchesTest(unittest.TestCase):
         self.assertAlmostEqual(args.true_geometry_min_valid_fraction, 0.10)
         self.assertEqual(args.filtered_min_matches, 0)
 
+    def test_graph_magsac2_min24_profile_sets_pareto_defaults(self):
+        base_argv = [
+            "visualize_lazy_pose_matches.py",
+            "--render-manifest",
+            "render.csv",
+            "--uint8-manifest",
+            "uint8.csv",
+            "--pytorch-state",
+            "state.pt",
+            "--output-dir",
+            "out",
+            "--post-filter-profile",
+            "fov76_graph_magsac2_min24_balanced",
+        ]
+
+        with mock.patch.object(sys, "argv", base_argv):
+            args = visual.parse_args()
+
+        self.assertEqual(args.geometry_filter, "none")
+        self.assertAlmostEqual(args.geometry_threshold_px, 2.0)
+        self.assertEqual(args.filtered_geometry_filter, "magsac")
+        self.assertAlmostEqual(args.filtered_min_score, 18.0)
+        self.assertAlmostEqual(args.filtered_min_margin, 0.0)
+        self.assertEqual(args.filtered_min_matches, 24)
+        self.assertEqual(args.adaptive_geometry_rescue_variants, "")
+
     def test_skips_adaptive_rescue_filter_when_base_exceeds_rescue_match_cap(self):
         base = _make_visual("base", 20)
         rescue = _make_visual("base / adaptive-rescue-source", 30)

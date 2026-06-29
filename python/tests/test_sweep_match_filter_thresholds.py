@@ -111,6 +111,52 @@ class SweepMatchFilterThresholdsTest(unittest.TestCase):
             self.assertGreaterEqual(len(rows), 1)
             self.assertIn("validation_lockbox_correct_delta_vs_lightglue", rows[0])
 
+    def test_coverage_aware_ranking_prefers_better_spatial_coverage_on_tie(self) -> None:
+        import sweep_match_filter_thresholds as sweep
+
+        weak_spread = sweep.ThresholdResult(
+            thresholds={"extreme_02": 0.4},
+            select=sweep.Metrics(
+                matches=20,
+                correct=20,
+                wrong=0,
+                lightglue_correct=18,
+                lightglue_wrong=0,
+                pair_mean_coverage_mean=0.20,
+                lg_only_correct_cells=12,
+                candidate_only_correct_cells=4,
+                pair_mean_largest_cell_ratio=0.45,
+            ),
+            validation={},
+            validation_aggregate=sweep.Metrics(matches=0, correct=0, wrong=0),
+            eligible=True,
+        )
+        better_spread = sweep.ThresholdResult(
+            thresholds={"extreme_02": 0.5},
+            select=sweep.Metrics(
+                matches=20,
+                correct=20,
+                wrong=0,
+                lightglue_correct=18,
+                lightglue_wrong=0,
+                pair_mean_coverage_mean=0.31,
+                lg_only_correct_cells=3,
+                candidate_only_correct_cells=11,
+                pair_mean_largest_cell_ratio=0.20,
+            ),
+            validation={},
+            validation_aggregate=sweep.Metrics(matches=0, correct=0, wrong=0),
+            eligible=True,
+        )
+
+        ranked = sorted(
+            [weak_spread, better_spread],
+            key=lambda result: result.ranking_key(coverage_aware=True),
+            reverse=True,
+        )
+
+        self.assertIs(ranked[0], better_spread)
+
 
 if __name__ == "__main__":
     unittest.main()

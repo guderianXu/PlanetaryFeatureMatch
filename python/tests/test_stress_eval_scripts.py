@@ -2979,6 +2979,51 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(selector_config.min_rescue_matches, 16)
         self.assertEqual(selector_config.min_match_gain, 3)
 
+    def test_fov76_promotion_pipeline_profile_sets_graph_magsac2_min24(self) -> None:
+        argv = [
+            "run_fov76_checkpoint_promotion_pipeline.py",
+            "--pair-root",
+            "/data/pairs",
+            "--guard-root",
+            "/data/pairs/hard_mining/guard",
+            "--output-dir",
+            "/out/eval",
+            "--baseline-state",
+            "/runs/base/state.pt",
+            "--baseline-run-dir",
+            "/runs/base/train_output",
+            "--candidate-state",
+            "/runs/cand/state.pt",
+            "--candidate-run-dir",
+            "/runs/cand/train_output",
+            "--candidate-label",
+            "candidate_balanced",
+            "--guard-candidate-label",
+            "candidate_balanced",
+            "--post-filter-profile",
+            "fov76_graph_magsac2_min24_balanced",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = fov76_gate_mod.parse_args()
+        fov76_gate_mod.apply_post_filter_profile(args)
+        candidate = fov76_gate_mod.EvalModel(
+            label=args.candidate_label,
+            guard_label=args.guard_candidate_label,
+            state=args.candidate_state,
+            run_dir=args.candidate_run_dir,
+        )
+
+        command = fov76_gate_mod.build_formal_sweep_command(args, model=candidate, split="test")
+
+        self.assertEqual(command[command.index("--geometry-filter") + 1], "none")
+        self.assertEqual(command[command.index("--geometry-threshold-px") + 1], "2.0")
+        self.assertEqual(command[command.index("--geometry-threshold-px-values") + 1], "2.0")
+        self.assertEqual(command[command.index("--min-score-values") + 1], "18")
+        self.assertEqual(command[command.index("--filtered-geometry-filter") + 1], "magsac")
+        self.assertEqual(command[command.index("--filtered-min-matches") + 1], "24")
+        self.assertEqual(command[command.index("--filtered-min-matches-values") + 1], "24")
+
     def test_fov76_low_match_guard_profile_preserves_explicit_dual_selector_minmatch(self) -> None:
         argv = [
             "run_fov76_checkpoint_promotion_pipeline.py",
@@ -5126,6 +5171,33 @@ class StressEvalScriptsTest(unittest.TestCase):
         self.assertEqual(args.low_match_geometry_guard_max_homography_median_px, 1.5)
         self.assertEqual(args.low_match_geometry_guard_min_score_mean, 19.0)
 
+    def test_graph_filter_sweep_parse_args_applies_graph_magsac2_min24_profile(self) -> None:
+        argv = [
+            "run_graph_filter_sweep.py",
+            "--render-manifest",
+            "render.csv",
+            "--uint8-manifest",
+            "uint8.csv",
+            "--pytorch-state",
+            "model.pt",
+            "--output-dir",
+            "out",
+            "--post-filter-profile",
+            "fov76_graph_magsac2_min24_balanced",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = filter_sweep_mod.parse_args()
+
+        self.assertEqual(args.geometry_filter, "none")
+        self.assertEqual(args.geometry_threshold_px, 2.0)
+        self.assertEqual(args.geometry_threshold_px_values, [2.0])
+        self.assertEqual(args.filtered_geometry_filter, "magsac")
+        self.assertEqual(args.filtered_min_margin, 0.0)
+        self.assertEqual(args.min_score_values, [18.0])
+        self.assertEqual(args.filtered_min_matches, 24)
+        self.assertEqual(args.filtered_min_matches_values, [24])
+
     def test_graph_filter_sweep_parse_args_applies_true_geometry_profile(self) -> None:
         argv = [
             "run_graph_filter_sweep.py",
@@ -6875,7 +6947,9 @@ class StressEvalScriptsTest(unittest.TestCase):
         )
 
         def make_visual(target: RenderRecord, count: int, score: float) -> LazyMatchVisual:
-            points = np.stack([np.arange(count, dtype=np.float32), np.arange(count, dtype=np.float32)], axis=1)
+            side = int(np.ceil(np.sqrt(count)))
+            indices = np.arange(count, dtype=np.float32)
+            points = np.stack([indices % side, indices // side], axis=1)
             spec = LazyPairSpec(pair_index=1, split="val", reference=reference, target=target)
             return LazyMatchVisual(
                 label="candidate / all-filtered",
